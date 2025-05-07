@@ -12,7 +12,7 @@
 
 
 
-namespace fdf::detail
+/*namespace fdf::detail
 {
     constexpr std::string_view TOKEN_TYPE_TO_STRING[] =
     {
@@ -563,4 +563,16 @@ int main()
     bResult = Test::WriteTest() && bResult;
 
     return bResult? 0 : -1;
+}*/
+
+int main()
+{
+    fdf::Entry* e = fdf::detail::EntryAllocator::Allocate();
+    std::string s("TestEntry");
+    for(int i = 0; i < s.size(); i++)
+        e->identifier[i] = s[i];
+    std::cout << e->identifier << '\n';
+    fdf::detail::EntryAllocator::Deallocate(e);
+    fdf::detail::EntryAllocator::Clear();
+    std::puts("Hello World!");
 }
