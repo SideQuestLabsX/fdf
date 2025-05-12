@@ -319,7 +319,6 @@ namespace fdf::detail
 {
     class EntryAllocator
     {
-    public:
         struct Chunk
         {
             union U { Entry e; U* p; };
@@ -327,12 +326,13 @@ namespace fdf::detail
 
             U* freeList;
             size_t used;
+            Chunk* next;
             U data[ELEMENT_COUNT];
 
 
         public:
-            Chunk() noexcept
-                : freeList(data), used(0), data{}
+            constexpr Chunk() noexcept
+                : freeList(data), used(0), next(nullptr), data{}
             {
                 U* cur = freeList;
                 U* next = cur + 1;
@@ -349,18 +349,18 @@ namespace fdf::detail
 
             [[nodiscard]] constexpr bool Owns(Entry* ptr) noexcept
             {
-                return static_cast<void*>(data) <= static_cast<void*>(ptr) && static_cast<void*>(ptr) < static_cast<void*>(data + 4096);
+                return static_cast<void*>(data) <= static_cast<void*>(ptr) && static_cast<void*>(ptr) < static_cast<void*>(data + ELEMENT_COUNT);
             }
 
             [[nodiscard]] constexpr bool IsEmpty()  noexcept  { return used == 0; }
             [[nodiscard]] constexpr bool HasSpace() noexcept  { return used <  ELEMENT_COUNT; }
-            [[nodiscard]] constexpr U* EntryToUnion(Entry* e) noexcept  { return &data[e - &data->e]; }
+            [[nodiscard]] constexpr U* EntryToUnion(void* e) noexcept  { return static_cast<U*>(e); }
 
             [[nodiscard]] constexpr Entry* Allocate() noexcept
             {
                 Entry* allocated = &freeList->e;
                 freeList = freeList->p;
-                new(allocated)Entry{};
+                new(allocated) Entry{};
                 used++;
                 return allocated;
             }
@@ -374,95 +374,36 @@ namespace fdf::detail
             }
         };
 
-        struct ChunkVec
-        {
-            using T = std::unique_ptr<Chunk>;
-
-            size_t size;
-            size_t cap;
-            T* data;
-
-        public:
-            ~ChunkVec()
-            {
-                for(size_t i = 0; i < size; ++i)
-                    data[i].~T();
-                ::operator delete[](data);
-            }
-
-            constexpr T* begin() noexcept  { return data; }
-            constexpr T* end()   noexcept  { return data + size; }
-
-            constexpr T& Emplace()
-            {
-                if(size < cap)
-                    return *new(data + size++) T(std::make_unique<Chunk>());
-
-                const size_t newCap = std::max(cap * 2ull, 4ull);
-                T* newData = static_cast<T*>(::operator new[](newCap * sizeof(T)));
-
-                for(size_t i = 0; i < size; i++)
-                {
-                    new(newData + i) T(std::move(data[i]));
-                    data[i].~T();
-                }
-
-                ::operator delete[](data);
-                data = newData;
-                cap = newCap;
-                return *new(data + size++) T(std::make_unique<Chunk>());
-            }
-
-            constexpr void Erase(T* chunk)
-            {
-                if(chunk < data || chunk > data + size)
-                    throw std::runtime_error("ChunkVec::Erase element doesn't belong to ChunkVec");
-
-                size_t i = chunk - data;
-                data[i].~T();
-                for(; i + 1 < size; i++)
-                    new(data + i) T(std::move(data[i + 1]));
-                
-                --size;
-                if(i != 0)
-                    data[size].~T();
-            }
-
-            void Clear() noexcept
-            {
-                for(size_t i = 0; i < size; ++i)
-                    data[i].~T();
-                ::operator delete[](data);
-
-                size = 0;
-                cap = 0;
-                data = nullptr;
-            }
-        };
-
-        inline static constinit ChunkVec chunks = {};
+        inline static thread_local constinit Chunk* head = nullptr;
 
     public:
-        [[nodiscard]] constexpr static Entry* Allocate() noexcept
+        [[nodiscard]] constexpr static Entry* Allocate()
         {
-            for(auto& chunk : chunks)
+            for(Chunk* chunk = head; chunk; chunk = chunk->next)
             {
                 if(chunk->HasSpace())
                     return chunk->Allocate();
             }
 
-            return chunks.Emplace()->Allocate();
+            Chunk* newChunk = new Chunk();
+            newChunk->next = head;
+            head = newChunk;
+            return newChunk->Allocate();
         }
 
-        static void Deallocate(Entry* ptr)
+        constexpr static void Deallocate(Entry* ptr)
         {
-            for(auto& chunk : chunks)
+            Chunk** nextOfPrev = &head; // next pointer of previous chunk
+            for(Chunk* chunk = head; chunk; nextOfPrev = &chunk->next, chunk = chunk->next)
             {
                 if(chunk->Owns(ptr))
                 {
                     chunk->Deallocate(ptr);
                     if(chunk->IsEmpty())
-                        chunks.Erase(&chunk);
+                    {
+                        *nextOfPrev = chunk->next;
+                        delete chunk;
+                    }
                     return;
                 }
             }
@@ -470,9 +411,14 @@ namespace fdf::detail
             throw std::runtime_error("EntryAllocator::Deallocate -- pointer doesn't belongs to EntryAllocator");
         }
 
-        static void Clear() noexcept
+        constexpr static void Clear() noexcept
         {
-            chunks.Clear();
+            while(head)
+            {
+                Chunk* temp = head->next;
+                delete head;
+                head = temp;
+            }
         }
     };
 }
