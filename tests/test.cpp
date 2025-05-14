@@ -570,16 +570,15 @@ int main()
     std::vector<fdf::Entry*> vec;
     for(int i = 0; i < 200; i++)
     {
-        vec.push_back(fdf::detail::EntryAllocator::Allocate());
+        vec.push_back(fdf::Entry::Create());
         vec.back()->depth = i;
     }
 
     for(auto& e : vec)
         std::print("{}\n", e->depth);
 
-    for(auto& e : vec)
-        fdf::detail::EntryAllocator::Deallocate(e);
+    for(auto& e : vec | std::views::reverse)
+        fdf::Entry::Destroy(e);
 
-    fdf::detail::EntryAllocator::Clear();
     std::puts("Hello World!");
 }

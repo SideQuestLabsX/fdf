@@ -47,8 +47,7 @@ FDF_EXPORT namespace fdf
         Timestamp,
 
         Array,
-        Map,
-        TypedArray
+        Map
     };
 
 
@@ -136,11 +135,6 @@ namespace fdf::detail
     constexpr uint64_t  INT64_MAX_VALUE = std::numeric_limits< int64_t>::max();
     constexpr uint64_t UINT64_MAX_VALUE = std::numeric_limits<uint64_t>::max();
     constexpr double   DOUBLE_MAX_VALUE = std::numeric_limits<  double>::max();
-
-    constexpr size_t VARIANT_SIZE = 5 * sizeof(int64_t);  // 5x 64 bit value
-    constexpr size_t VARIANT_32BIT_ELEMENT_COUNT = VARIANT_SIZE / sizeof(int32_t);
-    constexpr size_t VARIANT_64BIT_ELEMENT_COUNT = VARIANT_SIZE / sizeof(int64_t);
-    constexpr size_t VARIANT_DYNAMIC_STRING_HARD_LIMIT = (VARIANT_SIZE * 2.5);
 
 
     constexpr std::string_view KEYWORDS[] =
@@ -289,40 +283,17 @@ namespace fdf::detail
 
 
 
-FDF_EXPORT namespace fdf
-{
-    class Entry
-    {
-    public:
-        Type type = Type::Invalid;
-        Type subType = Type::Invalid;
-        uint8_t depth = 0;
-        uint8_t identifierSize = 0;
-        uint32_t size = 0;
-        Entry* parent = nullptr;
-        void* data = nullptr;
-        void* comment = nullptr;
-        char identifier[32] = {};
-    };
-}
-
-
-
-
-
-
-
-
-
-
 namespace fdf::detail
 {
-    class EntryAllocator
+    template<size_t BLOCK_SIZE, size_t BLOCK_ALIGNMENT = BLOCK_SIZE, size_t CHUNK_SIZE = 4096, size_t LAZILY_DEALLOCATED_CHUNK_COUNT = 1>
+    class SlabAllocator
     {
+        static_assert(BLOCK_SIZE >= sizeof(void*), "BLOCK_SIZE can't be smaller than size of a pointer");
+
         struct Chunk
         {
-            union U { Entry e; U* p; };
-            static constexpr size_t ELEMENT_COUNT = (4096 - sizeof(void*)) / sizeof(U);
+            union U { alignas(BLOCK_ALIGNMENT) std::byte block[BLOCK_SIZE]; U* p; };
+            static constexpr size_t ELEMENT_COUNT = (CHUNK_SIZE - 3 * sizeof(void*)) / sizeof(U);
 
             U* freeList;
             size_t used;
@@ -347,42 +318,65 @@ namespace fdf::detail
                 cur->p = nullptr;
             }
 
-            [[nodiscard]] constexpr bool Owns(Entry* ptr) noexcept
+            [[nodiscard]] constexpr bool Owns(void* ptr) noexcept
             {
-                return static_cast<void*>(data) <= static_cast<void*>(ptr) && static_cast<void*>(ptr) < static_cast<void*>(data + ELEMENT_COUNT);
+                return static_cast<void*>(data) <= ptr && ptr < static_cast<void*>(data + ELEMENT_COUNT);
             }
 
-            [[nodiscard]] constexpr bool IsEmpty()  noexcept  { return used == 0; }
-            [[nodiscard]] constexpr bool HasSpace() noexcept  { return used <  ELEMENT_COUNT; }
-            [[nodiscard]] constexpr U* EntryToUnion(void* e) noexcept  { return static_cast<U*>(e); }
+            [[nodiscard]] constexpr bool IsEmpty()        noexcept  { return used == 0; }
+            [[nodiscard]] constexpr bool HasSpace()       noexcept  { return used < ELEMENT_COUNT; }
+            [[nodiscard]] constexpr U*   ToUnion(void* e) noexcept  { return static_cast<U*>(e); }
 
-            [[nodiscard]] constexpr Entry* Allocate() noexcept
+            [[nodiscard]] constexpr void* Allocate() noexcept
             {
-                Entry* allocated = &freeList->e;
+                void* allocated = freeList->block;
                 freeList = freeList->p;
-                new(allocated) Entry{};
                 used++;
                 return allocated;
             }
 
-            constexpr void Deallocate(Entry* ptr) noexcept
+            constexpr void Deallocate(void* ptr) noexcept
             {
-                ptr->~Entry();
-                EntryToUnion(ptr)->p = freeList;
-                freeList = EntryToUnion(ptr);
+                ToUnion(ptr)->p = freeList;
+                freeList = ToUnion(ptr);
                 used--;
             }
         };
 
-        inline static thread_local constinit Chunk* head = nullptr;
+        Chunk* head = nullptr;
+        size_t emptyChunkCount = 0;
 
     public:
-        [[nodiscard]] constexpr static Entry* Allocate()
+        static constexpr size_t PER_CHUNK_CAPACITY = Chunk::ELEMENT_COUNT;
+
+        constexpr  SlabAllocator() noexcept = default;
+        constexpr ~SlabAllocator() noexcept
+        {
+            while(head)
+            {
+                Chunk* temp = head->next;
+                delete head;
+                head = temp;
+            }
+        }
+
+
+
+
+        [[nodiscard]] constexpr void* Allocate()
         {
             for(Chunk* chunk = head; chunk; chunk = chunk->next)
             {
                 if(chunk->HasSpace())
+                {
+                    if constexpr(LAZILY_DEALLOCATED_CHUNK_COUNT > 0)
+                    {
+                        if(chunk->IsEmpty())
+                            emptyChunkCount--;
+                    }
+
                     return chunk->Allocate();
+                }
             }
 
             Chunk* newChunk = new Chunk();
@@ -391,7 +385,7 @@ namespace fdf::detail
             return newChunk->Allocate();
         }
 
-        constexpr static void Deallocate(Entry* ptr)
+        constexpr void Deallocate(void* ptr)
         {
             Chunk** nextOfPrev = &head; // next pointer of previous chunk
             for(Chunk* chunk = head; chunk; nextOfPrev = &chunk->next, chunk = chunk->next)
@@ -401,24 +395,80 @@ namespace fdf::detail
                     chunk->Deallocate(ptr);
                     if(chunk->IsEmpty())
                     {
-                        *nextOfPrev = chunk->next;
-                        delete chunk;
+                        if constexpr(LAZILY_DEALLOCATED_CHUNK_COUNT == 0)
+                        {
+                            *nextOfPrev = chunk->next;
+                            delete chunk;
+                        }
+                        else
+                        {
+                            if(emptyChunkCount >= LAZILY_DEALLOCATED_CHUNK_COUNT)
+                            {
+                                *nextOfPrev = chunk->next;
+                                delete chunk;
+                            }
+                            else
+                                emptyChunkCount++;
+                        }
                     }
                     return;
                 }
             }
 
-            throw std::runtime_error("EntryAllocator::Deallocate -- pointer doesn't belongs to EntryAllocator");
+            throw std::runtime_error("SlabAllocator::Deallocate -- pointer doesn't belong to SlabAllocator");
         }
 
-        constexpr static void Clear() noexcept
+
+
+
+        template<typename T, typename... Args>
+        constexpr T* Create(Args&&... args)
         {
-            while(head)
-            {
-                Chunk* temp = head->next;
-                delete head;
-                head = temp;
-            }
+            static_assert(sizeof(T) <= BLOCK_SIZE, "T is too large for this SlabAllocator.");
+            return new(Allocate()) T(std::forward<Args>(args)...);
         }
+
+        template<typename T>
+        constexpr void Destroy(T* obj)
+        {
+            static_assert(sizeof(T) <= BLOCK_SIZE, "T is too large for this SlabAllocator.");
+            obj->~T();
+            Deallocate(obj);
+        }
+    };
+}
+
+
+
+
+
+
+
+
+
+
+FDF_EXPORT namespace fdf
+{
+    class Entry
+    {
+        template<size_t BLOCK_SIZE, size_t BLOCK_ALIGNMENT, size_t CHUNK_SIZE, size_t LAZILY_DEALLOCATED_CHUNK_COUNT>
+        friend class detail::SlabAllocator;
+
+        inline static constinit detail::SlabAllocator<64, 8> ALLOCATOR = {};  // sizeof(Entry) == 64 && alignof(Entry) == 8
+        constexpr  Entry() noexcept = default;
+        constexpr ~Entry() noexcept = default;
+
+    public:
+        constexpr static Entry* Create (        )  { return ALLOCATOR.Create<Entry>(); }
+        constexpr static void   Destroy(Entry* e)  { ALLOCATOR.Destroy(e); }
+
+    public:
+        Type type = Type::Invalid;
+        uint8_t identifierSize = 0;
+        uint16_t depth = 0;
+        uint32_t size = 0;
+        Entry* parent = nullptr;
+        void* data = nullptr;
+        char identifier[40] = {};
     };
 }
