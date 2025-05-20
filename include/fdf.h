@@ -327,7 +327,7 @@ namespace fdf::detail
             [[nodiscard]] constexpr bool HasSpace()       noexcept  { return used < ELEMENT_COUNT; }
             [[nodiscard]] constexpr U*   ToUnion(void* e) noexcept  { return static_cast<U*>(e); }
 
-            [[nodiscard]] constexpr void* Allocate() noexcept
+            [[nodiscard]] void* Allocate() noexcept
             {
                 void* allocated = freeList->block;
                 freeList = freeList->p;
@@ -335,7 +335,7 @@ namespace fdf::detail
                 return allocated;
             }
 
-            constexpr void Deallocate(void* ptr) noexcept
+            void Deallocate(void* ptr) noexcept
             {
                 ToUnion(ptr)->p = freeList;
                 freeList = ToUnion(ptr);
@@ -363,7 +363,7 @@ namespace fdf::detail
 
 
 
-        [[nodiscard]] constexpr void* Allocate()
+        [[nodiscard]] void* Allocate()
         {
             for(Chunk* chunk = head; chunk; chunk = chunk->next)
             {
@@ -385,7 +385,7 @@ namespace fdf::detail
             return newChunk->Allocate();
         }
 
-        constexpr void Deallocate(void* ptr)
+        [[nodiscard]] bool Deallocate(void* ptr)
         {
             Chunk** nextOfPrev = &head; // next pointer of previous chunk
             for(Chunk* chunk = head; chunk; nextOfPrev = &chunk->next, chunk = chunk->next)
@@ -411,29 +411,319 @@ namespace fdf::detail
                                 emptyChunkCount++;
                         }
                     }
-                    return;
+                    return true;
                 }
             }
 
-            throw std::runtime_error("SlabAllocator::Deallocate -- pointer doesn't belong to SlabAllocator");
+            return false;
         }
 
 
 
 
         template<typename T, typename... Args>
-        constexpr T* Create(Args&&... args)
+        [[nodiscard]] T* Create(Args&&... args)
         {
             static_assert(sizeof(T) <= BLOCK_SIZE, "T is too large for this SlabAllocator.");
             return new(Allocate()) T(std::forward<Args>(args)...);
         }
 
         template<typename T>
-        constexpr void Destroy(T* obj)
+        [[nodiscard]] bool Destroy(T* obj)
         {
             static_assert(sizeof(T) <= BLOCK_SIZE, "T is too large for this SlabAllocator.");
             obj->~T();
-            Deallocate(obj);
+            return Deallocate(obj);
+        }
+    };
+
+
+
+
+
+
+
+
+
+
+    // TODO: Rethink how this is handled... It's only used for bigger allocations than 64 bytes and smaller allocations than 4096 bytes (minus overhead)
+    template<size_t CHUNK_SIZE = 4096, size_t LAZILY_DEALLOCATED_CHUNK_COUNT = 1>
+    class DynamicAllocator
+    {
+        struct Chunk
+        {
+            static constexpr size_t MAX_MEMORY = CHUNK_SIZE - sizeof(void*) - 2 * sizeof(uint32_t);
+            static constexpr uint32_t MAGIC_VALUE = 495812;
+            struct Header { uint32_t nextOrMagic; uint32_t size; };
+
+            uint32_t freeList;
+            uint32_t used;
+            Chunk* next;
+            std::byte data[MAX_MEMORY];
+
+        public:
+            constexpr Chunk() noexcept
+                : freeList(0), used(0), next(nullptr), data{}
+            {
+                new(data) Header{uint32_t(-1), static_cast<uint32_t>(MAX_MEMORY - sizeof(Header))};
+            }
+
+            [[nodiscard]] constexpr bool Owns(void* ptr) noexcept
+            {
+                return static_cast<void*>(data) <= ptr && ptr < static_cast<void*>(data + MAX_MEMORY);
+            }
+
+            [[nodiscard]] constexpr bool    IsEmpty()                    noexcept  { return used == 0; }
+            [[nodiscard]] constexpr bool    HasSpace()                   noexcept  { return freeList != uint32_t(-1); }
+            [[nodiscard]] constexpr Header* GetHeaderPtr(uint32_t index) noexcept  { return index < MAX_MEMORY? std::launder(reinterpret_cast<Header*>(&data[index])) : nullptr; }
+
+            [[nodiscard]] constexpr void* Allocate(uint32_t size, uint32_t alignment = 8) noexcept
+            {
+                if(alignment < alignof(Header))
+                    alignment = alignof(Header);
+
+                if(size % alignment != 0)
+                    size = (((size / alignment) + 1) * alignment) + 8;
+
+                uint32_t* nextOfPrev = &freeList;
+                for(Header* list = GetHeaderPtr(freeList); list; nextOfPrev = &list->nextOrMagic, list = GetHeaderPtr(list->nextOrMagic))
+                {
+                    if(list->size > size && list->size - size >= 16)
+                    {
+                        Header* newHeader = new(reinterpret_cast<std::byte*>(list + 1) + size) Header{list->nextOrMagic, list->size - size - static_cast<uint32_t>(sizeof(Header))};
+                        *nextOfPrev = reinterpret_cast<std::byte*>(newHeader) - data;
+                        list->nextOrMagic = MAGIC_VALUE;
+                        list->size = size;
+                        used++;
+                        return list + 1;
+                    }
+
+                    if(list->size == size)
+                    {
+                        *nextOfPrev = list->nextOrMagic;
+                        list->nextOrMagic = MAGIC_VALUE;
+                        used++;
+                        return list + 1;
+                    }
+                }
+
+                return nullptr;
+            }
+
+            void Deallocate(void* ptr)
+            {
+                Header* header = static_cast<Header*>(ptr) - 1;
+                if(header->nextOrMagic != MAGIC_VALUE)
+                    throw std::runtime_error("Invalid pointer provided to DynamicAllocator::Chunk::Deallocate");
+
+                Header* prev = nullptr;
+                Header* cur = GetHeaderPtr(freeList);
+                while(cur && ptr < static_cast<void*>(cur))
+                {
+                    prev = cur;
+                    cur = GetHeaderPtr(cur->nextOrMagic);
+                }
+
+                // TODO
+            }
+        };
+
+        Chunk* head = nullptr;
+        size_t emptyChunkCount = 0;
+
+    public:
+        static constexpr size_t PER_CHUNK_MEMORY = Chunk::MAX_MEMORY;
+
+        constexpr  DynamicAllocator() noexcept = default;
+        constexpr ~DynamicAllocator() noexcept
+        {
+            while(head)
+            {
+                Chunk* temp = head->next;
+                delete head;
+                head = temp;
+            }
+        }
+
+
+
+
+        [[nodiscard]] void* Allocate(uint32_t size, uint32_t alignment = 8)
+        {
+            for(Chunk* chunk = head; chunk; chunk = chunk->next)
+            {
+                if(chunk->HasSpace())
+                {
+                    if constexpr(LAZILY_DEALLOCATED_CHUNK_COUNT > 0)
+                    {
+                        if(chunk->IsEmpty())
+                        {
+                            void* allocated = chunk->Allocate(size, alignment);
+                            if(allocated)
+                            {
+                                emptyChunkCount--;
+                                return allocated;
+                            }
+                        }
+                    }
+
+                    void* allocated = chunk->Allocate(size, alignment);
+                    if(allocated)
+                        return allocated;
+                }
+            }
+
+            Chunk* newChunk = new Chunk();
+            newChunk->next = head;
+            head = newChunk;
+            void* allocated = newChunk->Allocate(size, alignment);
+            if(!allocated)
+            {
+                emptyChunkCount++;
+                return nullptr;
+            }
+            return allocated;
+        }
+
+        [[nodiscard]] bool Deallocate(void* ptr)
+        {
+            Chunk** nextOfPrev = &head; // next pointer of previous chunk
+            for(Chunk* chunk = head; chunk; nextOfPrev = &chunk->next, chunk = chunk->next)
+            {
+                if(chunk->Owns(ptr))
+                {
+                    chunk->Deallocate(ptr);
+                    if(chunk->IsEmpty())
+                    {
+                        if constexpr(LAZILY_DEALLOCATED_CHUNK_COUNT == 0)
+                        {
+                            *nextOfPrev = chunk->next;
+                            delete chunk;
+                        }
+                        else
+                        {
+                            if(emptyChunkCount >= LAZILY_DEALLOCATED_CHUNK_COUNT)
+                            {
+                                *nextOfPrev = chunk->next;
+                                delete chunk;
+                            }
+                            else
+                                emptyChunkCount++;
+                        }
+                    }
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+
+
+
+        template<typename T, typename... Args>
+        [[nodiscard]] T* Create(Args&&... args)
+        {
+            static_assert(sizeof(T) <= Chunk::MAX_MEMORY, "T is too large for this DynamicAllocator.");
+            return new(Allocate(sizeof(T), alignof(T))) T(std::forward<Args>(args)...);
+        }
+
+        template<typename T>
+        [[nodiscard]] bool Destroy(T* obj)
+        {
+            static_assert(sizeof(T) <= Chunk::MAX_MEMORY, "T is too large for this DynamicAllocator.");
+            obj->~T();
+            return Deallocate(obj);
+        }
+    };
+
+
+
+
+
+
+
+
+
+
+    class GlobalAllocator
+    {
+        inline static constinit SlabAllocator<8, 8, 4096>  B8;
+        inline static constinit SlabAllocator<16, 8, 4096> B16;
+        inline static constinit SlabAllocator<32, 8, 4096> B32;
+        inline static constinit SlabAllocator<64, 8, 4096> B64;
+        //inline static constinit DynamicAllocator<4096>     D;
+
+    public:
+        static void* Allocate(size_t size)
+        {
+            if(size <= 8)
+                return B8.Allocate();
+            if(size <= 16)
+                return B16.Allocate();
+            if(size <= 32)
+                return B32.Allocate();
+            if(size <= 64)
+                return B64.Allocate();
+            //if(size <= DynamicAllocator<>::PER_CHUNK_MEMORY)
+            //    return D.Allocate(size);
+
+            return ::operator new(size);
+        }
+
+        static bool Deallocate(void* p, size_t size)
+        {
+
+            if(size <= 8)
+                return B8.Deallocate(p);
+            if(size <= 16)
+                return B16.Deallocate(p);
+            if(size <= 32)
+                return B32.Deallocate(p);
+            if(size <= 64)
+                return B64.Deallocate(p);
+            //if(size <= DynamicAllocator<>::PER_CHUNK_MEMORY)
+            //    return D.Deallocate(p);
+
+            ::operator delete(p);
+            return true;
+        }
+
+
+
+
+        template<typename T, typename... Args>
+        [[nodiscard]] static T* Create(Args&&... args)
+        {
+            if constexpr(sizeof(T) <= 8)
+                return B8.Create<T>(std::forward<Args>(args)...);
+            else if constexpr(sizeof(T) <= 16)
+                return B16.Create<T>(std::forward<Args>(args)...);
+            else if constexpr(sizeof(T) <= 32)
+                return B32.Create<T>(std::forward<Args>(args)...);
+            else if constexpr(sizeof(T) <= 64)
+                return B64.Create<T>(std::forward<Args>(args)...);
+            //else if constexpr(sizeof(T) <= DynamicAllocator<>::PER_CHUNK_MEMORY)
+            //    return D.Create<T>(std::forward<Args>(args)...);
+            else
+                return new T(std::forward<Args>(args)...);
+        }
+
+        template<typename T>
+        [[nodiscard]] static bool Destroy(T* obj)
+        {
+            if constexpr(sizeof(T) <= 8)
+                return B8.Destroy(obj);
+            else if constexpr(sizeof(T) <= 16)
+                return B16.Destroy(obj);
+            else if constexpr(sizeof(T) <= 32)
+                return B32.Destroy(obj);
+            else if constexpr(sizeof(T) <= 64)
+                return B64.Destroy(obj);
+            //else if constexpr(sizeof(T) <= DynamicAllocator<>::PER_CHUNK_MEMORY)
+            //    return D.Destroy(obj);
+            else
+                return delete obj;
         }
     };
 }
@@ -454,13 +744,12 @@ FDF_EXPORT namespace fdf
         template<size_t BLOCK_SIZE, size_t BLOCK_ALIGNMENT, size_t CHUNK_SIZE, size_t LAZILY_DEALLOCATED_CHUNK_COUNT>
         friend class detail::SlabAllocator;
 
-        inline static constinit detail::SlabAllocator<64, 8> ALLOCATOR = {};  // sizeof(Entry) == 64 && alignof(Entry) == 8
         constexpr  Entry() noexcept = default;
         constexpr ~Entry() noexcept = default;
 
     public:
-        constexpr static Entry* Create (        )  { return ALLOCATOR.Create<Entry>(); }
-        constexpr static void   Destroy(Entry* e)  { ALLOCATOR.Destroy(e); }
+        static Entry* Create (        )  { return detail::GlobalAllocator::Create<Entry>(); }
+        static void   Destroy(Entry* e)  { (void)detail::GlobalAllocator::Destroy(e); }
 
     public:
         Type type = Type::Invalid;
