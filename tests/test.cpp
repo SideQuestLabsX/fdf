@@ -565,20 +565,14 @@ int main()
     return bResult? 0 : -1;
 }*/
 
+
 int main()
 {
-    std::vector<fdf::Entry*> vec;
-    for(int i = 0; i < 200; i++)
+    fdf::Entry* e = fdf::ParseFile("D:/DEV/GithubPK/fdf/designs/Design_5.txt");
+    if(e)
     {
-        vec.push_back(fdf::Entry::Create());
-        vec.back()->depth = i;
+        std::cout << "comment: " << e->GetComment().data() << '\n';
+        fdf::Release(e);
     }
-
-    for(auto& e : vec)
-        std::print("{}\n", e->depth);
-
-    for(auto& e : vec | std::views::reverse)
-        fdf::Entry::Destroy(e);
-
     std::puts("Hello World!");
 }
