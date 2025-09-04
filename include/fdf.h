@@ -14,6 +14,7 @@
     #include <utility>
     #include <algorithm>
     #include <ranges>
+    #include <stack>
 
     #define FDF_EXPORT
 #endif
@@ -138,6 +139,13 @@ namespace fdf::detail
 
     template<auto DIAGNOSTIC_CALLBACK>
     struct Utils;
+    
+    template<typename T>
+    concept IsValidIDType = std::integral<std::remove_cvref_t<T>> || std::convertible_to<std::remove_cvref_t<T>, std::string_view>;
+    
+    template<typename Callable>
+    constexpr bool IsValidDiagnosticCallback = std::is_invocable_r_v<bool, Callable, Diagnostic, std::string_view>;
+    inline constexpr auto DefaultDiagnosticCallback = [](Diagnostic diagnostic, std::string_view message) -> bool  { return !IsError(diagnostic); };
 }
 
 
@@ -146,18 +154,22 @@ namespace fdf::detail
 
 FDF_EXPORT namespace fdf
 {
-    template <typename Callable>
-    constexpr bool IsValidDiagnosticCallback = std::is_invocable_r_v<bool, Callable, Diagnostic, std::string_view>;
-    inline constexpr auto DefaultDiagnosticCallback = [](Diagnostic diagnostic, std::string_view message) -> bool  { return !IsError(diagnostic); };
+    namespace ForEachFlags
+    {
+        enum Flag : uint8_t
+        {
+            None = 0,
+            Recursive   = 1 << 0,
+            Group       = 1 << 1,
+            IncludeSelf = 1 << 2,
+            All = Recursive | Group | IncludeSelf
+        };
 
-    template<auto DIAGNOSTIC_CALLBACK = DefaultDiagnosticCallback> requires(IsValidDiagnosticCallback<decltype(DIAGNOSTIC_CALLBACK)>)
-    [[nodiscard]] Entry* ParseFile(const std::filesystem::path& filepath) noexcept;
+        constexpr bool IsSet(std::underlying_type_t<Flag> flags, std::underlying_type_t<Flag> checkFlag)     { return (flags & checkFlag) != Flag::None; }
+        constexpr bool IsNotSet(std::underlying_type_t<Flag> flags, std::underlying_type_t<Flag> checkFlag)  { return (flags & checkFlag) == Flag::None; }
+        constexpr bool IsValidForEachFlag(std::underlying_type_t<Flag> flags)                                { return (flags & ~Flag::All) == 0; }
+    }
 
-    template<auto DIAGNOSTIC_CALLBACK = DefaultDiagnosticCallback> requires(IsValidDiagnosticCallback<decltype(DIAGNOSTIC_CALLBACK)>)
-    [[nodiscard]] constexpr Entry* ParseFileContent(std::string_view content) noexcept;
-
-    template<auto DIAGNOSTIC_CALLBACK = DefaultDiagnosticCallback> requires(IsValidDiagnosticCallback<decltype(DIAGNOSTIC_CALLBACK)>)
-    constexpr void Release(Entry* e) noexcept;
 
 
 
@@ -177,7 +189,8 @@ FDF_EXPORT namespace fdf
     private:
         Type type = Type::Invalid;
         uint8_t identifierSize = 0;
-        uint16_t depth = 0;
+        uint8_t depth = 0;
+        uint8_t unused = 0;
         uint32_t size = 0;
         //uint32_t capacity = 0;
         Entry* parent = nullptr;
@@ -186,16 +199,9 @@ FDF_EXPORT namespace fdf
     #if !FDF_NO_COMMENTS
         CommentControlBlock* comment = nullptr;
     #endif
-        struct Children
-        {
-            size_t capacity = 0;
-            Entry* data[128] = {nullptr};
-        };
-        Children** children = reinterpret_cast<Children**>(&data);
-
 
     public:
-        [[nodiscard]] constexpr size_t   GetChildCount() const noexcept  { return IsContainer()? size : 0; }
+        [[nodiscard]] constexpr uint32_t GetChildCount() const noexcept  { return IsContainer()? size : 0; }
         [[nodiscard]] constexpr uint8_t  GetDepth()      const noexcept  { return depth; }
         [[nodiscard]] constexpr Type     GetType()       const noexcept  { return type; }
         [[nodiscard]] constexpr bool     IsValid()       const noexcept  { return type != Type::Invalid; }
@@ -203,10 +209,11 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr bool     IsNil()         const noexcept  { return IsNull(); }
         [[nodiscard]] constexpr bool     IsContainer()   const noexcept  { return type == Type::Array || type == Type::Map; }
         [[nodiscard]] constexpr bool     HasValue()      const noexcept  { return IsValid() && !IsNull() && !IsContainer(); }
+        [[nodiscard]] constexpr Entry*   GetParent()           noexcept  { return parent; }
+        [[nodiscard]] constexpr Entry*   GetParent()     const noexcept  { return parent; }
 
         [[nodiscard]] constexpr std::string_view GetIdentifier() const noexcept  { return {identifier, identifierSize}; }
-
-        [[nodiscard]] constexpr std::string GetFullIdentifier() const noexcept
+        [[nodiscard]] constexpr std::string GetFullIdentifier_EXPENSIVE() const noexcept
         {
             const Entry* cur = parent;
             std::string temp = std::string(GetIdentifier());
@@ -220,13 +227,11 @@ FDF_EXPORT namespace fdf
 
         [[nodiscard]] constexpr std::string_view GetComment() const noexcept
         {
-            #if FDF_NO_COMMENTS
-                return {};
-            #else
+            #if !FDF_NO_COMMENTS
                 if(comment)
                     return {reinterpret_cast<char*>(comment + 1), comment->size};
-                return {};
             #endif
+                return {};
         }
 
     public:
@@ -236,11 +241,67 @@ FDF_EXPORT namespace fdf
         constexpr void ReleaseComment();
 
     public:
-        constexpr void AddChild(Entry& e, bool bForceEvenIfHasParent = false);
-        constexpr Entry* RemoveChild(Entry& e);
-        constexpr Entry* RemoveChild(std::string_view identifier);
-        constexpr Entry* RemoveChild(size_t i);
-        constexpr void ClearChildren(bool bAlsoDestroy = true);
+        [[nodiscard]] constexpr bool AddChild(Entry& e, bool bForceEvenIfHasParent = false);
+        [[nodiscard]] constexpr bool RemoveChild(Entry& e);
+        [[nodiscard]] constexpr bool RemoveChild(std::string_view _identifier);
+        [[nodiscard]] constexpr bool RemoveChild(uint32_t index);
+        [[nodiscard]] constexpr bool ClearChildren();
+        
+        [[nodiscard]] constexpr Entry* OrphanChild(Entry& e);
+        [[nodiscard]] constexpr Entry* OrphanChild(std::string_view _identifier);
+        [[nodiscard]] constexpr Entry* OrphanChild(uint32_t index);
+        [[nodiscard]] constexpr bool OrphanChildren();
+
+    public:
+        template<detail::IsValidIDType T, detail::IsValidIDType... Args>
+        [[nodiscard]] constexpr       Entry* GetChild(T&& param, Args&&... args);
+        template<detail::IsValidIDType T, detail::IsValidIDType... Args>
+        [[nodiscard]] constexpr const Entry* GetChild(T&& param, Args&&... args) const;
+
+        [[nodiscard]] constexpr       Entry* GetDirectChild(std::string_view _identifier);
+        [[nodiscard]] constexpr const Entry* GetDirectChild(std::string_view _identifier) const;
+        [[nodiscard]] constexpr       Entry* GetDirectChild(uint32_t index);
+        [[nodiscard]] constexpr const Entry* GetDirectChild(uint32_t index) const;
+        
+        [[nodiscard]] constexpr std::span<Entry*>       GetChildren();
+        [[nodiscard]] constexpr std::span<const Entry*> GetChildren() const;
+        [[nodiscard]] constexpr std::span<Entry*>       GetChildrenUnsafe();
+        [[nodiscard]] constexpr std::span<const Entry*> GetChildrenUnsafe() const;
+
+        [[nodiscard]] constexpr size_t GetTotalChildCount_EXPENSIVE() const noexcept;
+        [[nodiscard]] constexpr std::vector<Entry*>       GetAllChildren_VERY_EXPENSIVE();
+        [[nodiscard]] constexpr std::vector<const Entry*> GetAllChildren_VERY_EXPENSIVE() const;
+
+        template<std::underlying_type_t<ForEachFlags::Flag> FLAGS = ForEachFlags::None, typename Callable> requires(std::is_invocable_v<Callable, Entry&>)
+        constexpr void ForEach(Callable callback);
+        template<std::underlying_type_t<ForEachFlags::Flag> FLAGS = ForEachFlags::None, typename Callable> requires(std::is_invocable_v<Callable, const Entry&>)
+        constexpr void ForEach(Callable callback) const;
+
+    public:
+        template<typename T>
+        [[nodiscard]] constexpr auto GetValue()             { static_assert(false, "Invalid type"); }
+        template<typename T>
+        [[nodiscard]] constexpr auto GetValue() const       { static_assert(false, "Invalid type"); }
+        template<typename T>
+        [[nodiscard]] constexpr auto GetValueUnsafe()       { static_assert(false, "Invalid type"); }
+        template<typename T>
+        [[nodiscard]] constexpr auto GetValueUnsafe() const { static_assert(false, "Invalid type"); }
+
+        template<Style STYLE = {}>
+        [[nodiscard]] constexpr std::string_view DataToView(std::string& temp) const;
+
+    public:
+        template<auto DIAGNOSTIC_CALLBACK = detail::DefaultDiagnosticCallback> requires(detail::IsValidDiagnosticCallback<decltype(DIAGNOSTIC_CALLBACK)>)
+        [[nodiscard]] static Entry* ParseFile(const std::filesystem::path& filepath) noexcept;
+        template<auto DIAGNOSTIC_CALLBACK = detail::DefaultDiagnosticCallback> requires(detail::IsValidDiagnosticCallback<decltype(DIAGNOSTIC_CALLBACK)>)
+        [[nodiscard]] static constexpr Entry* ParseBuffer(std::string_view content) noexcept;
+
+        template<Style STYLE = {}>
+        [[nodiscard]] static bool WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists = true) noexcept;
+        template<Style STYLE = {}>
+        static constexpr void WriteBuffer(const Entry& root, std::string& buffer) noexcept;
+        
+        static constexpr void Destroy(Entry& e) noexcept;
     };
 }
 
@@ -1345,6 +1406,7 @@ namespace fdf::detail
                 if(firstNonDate == std::string_view::npos)
                 {
                     token.count = content.size() - token.startPosition;
+                    token.extra8 = token.count;
                     index = -1;
                     return token;
                 }
@@ -1352,6 +1414,7 @@ namespace fdf::detail
                 if(std::isspace(content[firstNonDate]) || content[firstNonDate] == ',')
                 {
                     token.count = firstNonDate - token.startPosition;
+                    token.extra8 = token.count;
                     index = firstNonDate;
                     return token;
                 }
@@ -1406,17 +1469,23 @@ namespace fdf::detail
     template<auto DIAGNOSTIC_CALLBACK>
     struct Utils
     {
+        inline static constinit SlabAllocator<sizeof(Entry), alignof(Entry), 4096>  ENTRY_ALLOCATOR;
+        
         template<typename... Args>
         [[nodiscard]] constexpr static Entry* Create(Args&&... args);
                       constexpr static void   Destroy(Entry* e);
 
-        [[nodiscard]] constexpr static Entry* ParseFileContent(std::string_view content) noexcept;
+        [[nodiscard]] constexpr static Entry* ParseBuffer(std::string_view content) noexcept;
         [[nodiscard]] constexpr static bool   ParseVariable   (Tokenizer& tokenizer, Entry& parent   FDF_COMMENT_SWITCH(, Token comment));
         [[nodiscard]] constexpr static bool   ParseSimpleValue(Tokenizer& tokenizer, Entry& entry    FDF_COMMENT_SWITCH(, Token comment));
-        [[nodiscard]] constexpr static bool   ParseArray      (Tokenizer& tokenizer, Entry& array   FDF_COMMENT_SWITCH(, Token comment));
-        [[nodiscard]] constexpr static bool   ParseMap        (Tokenizer& tokenizer, Entry& map   FDF_COMMENT_SWITCH(, Token comment));
+        [[nodiscard]] constexpr static bool   ParseArray      (Tokenizer& tokenizer, Entry& array    FDF_COMMENT_SWITCH(, Token comment));
+        [[nodiscard]] constexpr static bool   ParseMap        (Tokenizer& tokenizer, Entry& map      FDF_COMMENT_SWITCH(, Token comment));
+
+        template<Style STYLE>
+        static constexpr void WriteBuffer(const Entry& root, std::string& buffer, const bool bOverwrite = true) noexcept;
     };
 }
+
 
 
 
@@ -1431,7 +1500,7 @@ namespace fdf
     constexpr Entry::~Entry()
     {
         if(parent)
-            parent->RemoveChild(*this);
+            (void)parent->RemoveChild(*this);
         ReleaseData();
         if(identifier && identifierSize > 0)
             detail::GlobalAllocator::Deallocate(identifier, identifierSize + 1);
@@ -1527,7 +1596,7 @@ namespace fdf
             break;
         case Type::Array:
         case Type::Map:
-            ClearChildren();
+            (void)ClearChildren();
             return;
         default:
             return;
@@ -1544,15 +1613,18 @@ namespace fdf
     }
 
 
-    constexpr void Entry::AddChild(Entry& e, bool bForceEvenIfHasParent)
+
+    
+    constexpr bool Entry::AddChild(Entry& e, bool bForceEvenIfHasParent)
     {
-        if(type != Type::Array && type != Type::Map)
-            return;
+        if(!IsContainer())
+            return false;
         if(e.parent)
         {
             if(!bForceEvenIfHasParent)
-                return;
-            e.parent->RemoveChild(e);
+                return false;
+            if(!e.parent->RemoveChild(e))
+                throw std::runtime_error("Entry::AddChild - Failed to remove child from it's parent");
         }
         e.parent = this;
 
@@ -1581,66 +1653,960 @@ namespace fdf
             size = 0;  // Just in case
             (static_cast<Entry**>(data) + 1)[size++] = &e;
         }
+
+        return true;
     }
 
-    constexpr Entry* Entry::RemoveChild(Entry& e)
+    constexpr bool Entry::RemoveChild(Entry& e)
     {
-        if(size == 0 || (type != Type::Array && type != Type::Map))
-            return nullptr;
+        if(size == 0 || !IsContainer())
+            return false;
 
         for(size_t i = 0; i < size; i++)
         {
             if((static_cast<Entry**>(data) + 1)[i] == &e)
                 return RemoveChild(i);
         }
+        return false;
+    }
+
+    constexpr bool Entry::RemoveChild(std::string_view _identifier)
+    {
+        if(size == 0 || type != Type::Map)
+            return false;
+
+        for(size_t i = 0; i < size; i++)
+        {
+            if((static_cast<Entry**>(data) + 1)[i]->GetIdentifier() == _identifier)
+                return RemoveChild(i);
+        }
+        return false;
+    }
+
+    constexpr bool Entry::RemoveChild(uint32_t index)
+    {
+        if(index >= size || !IsContainer())
+            return false;
+
+        detail::Utils<0>::Destroy((static_cast<Entry**>(data) + 1)[index]);
+        for(; index + 1 < size; index++)
+            (static_cast<Entry**>(data) + 1)[index] = (static_cast<Entry**>(data) + 1)[index + 1];
+
+        (static_cast<Entry**>(data) + 1)[index] = nullptr;
+        size--;
+        return true;
+    }
+    
+    constexpr bool Entry::ClearChildren()
+    {
+        if(!IsContainer())
+            return false;
+        
+        if(data)
+        {
+            for(size_t i = 0; i < size; i++)
+            {
+                (static_cast<Entry**>(data) + 1)[i]->parent = nullptr;
+                detail::Utils<0>::Destroy((static_cast<Entry**>(data) + 1)[i]);
+            }
+            
+            (void)detail::GlobalAllocator::Deallocate(data, *static_cast<size_t*>(data) * sizeof(void*) + sizeof(size_t));
+            data = nullptr;
+            type = Type::Null;
+        }
+        
+        return true;
+    }
+
+
+
+    
+    constexpr Entry* Entry::OrphanChild(Entry& e)
+    {
+        if(size == 0 || !IsContainer())
+            return nullptr;
+
+        for(size_t i = 0; i < size; i++)
+        {
+            if((static_cast<Entry**>(data) + 1)[i] == &e)
+                return OrphanChild(i);
+        }
         return nullptr;
     }
 
-    constexpr Entry* Entry::RemoveChild(std::string_view identifier)
+    constexpr Entry* Entry::OrphanChild(std::string_view _identifier)
     {
         if(size == 0 || type != Type::Map)
             return nullptr;
 
         for(size_t i = 0; i < size; i++)
         {
-            if((static_cast<Entry**>(data) + 1)[i]->GetIdentifier() == identifier)
-                return RemoveChild(i);
+            if((static_cast<Entry**>(data) + 1)[i]->GetIdentifier() == _identifier)
+                return OrphanChild(i);
         }
         return nullptr;
     }
 
-    constexpr Entry* Entry::RemoveChild(size_t i)
+    constexpr Entry* Entry::OrphanChild(uint32_t index)
     {
-        if(i >= size || (type != Type::Array && type != Type::Map))
+        if(index >= size || !IsContainer())
             return nullptr;
 
-        Entry* original = (static_cast<Entry**>(data) + 1)[i];
-        for(; i + 1 < size; i++)
-            (static_cast<Entry**>(data) + 1)[i] = (static_cast<Entry**>(data) + 1)[i + 1];
+        Entry* original = (static_cast<Entry**>(data) + 1)[index];
+        for(; index + 1 < size; index++)
+            (static_cast<Entry**>(data) + 1)[index] = (static_cast<Entry**>(data) + 1)[index + 1];
 
-        (static_cast<Entry**>(data) + 1)[i] = nullptr;
+        (static_cast<Entry**>(data) + 1)[index] = nullptr;
         size--;
         return original;
     }
-    constexpr void Entry::ClearChildren(bool bAlsoDestroy)
+    
+    constexpr bool Entry::OrphanChildren()
     {
-        if((type != Type::Array && type != Type::Map))
-            return;
+        if(!IsContainer())
+            return false;
         
         if(data)
         {
-            if(bAlsoDestroy)
-            {
-                for(size_t i = 0; i < size; i++)
-                {
-                    (static_cast<Entry**>(data) + 1)[i]->parent = nullptr;
-                    detail::Utils<0>::Destroy((static_cast<Entry**>(data) + 1)[i]);
-                }
-            }
-            
             (void)detail::GlobalAllocator::Deallocate(data, *static_cast<size_t*>(data) * sizeof(void*) + sizeof(size_t));
             data = nullptr;
             type = Type::Null;
+        }
+        
+        return true;
+    }
+
+
+
+
+    template<detail::IsValidIDType T, detail::IsValidIDType ... Args>
+    constexpr Entry* Entry::GetChild(T&& param, Args&&... args)
+    {
+        return const_cast<Entry*>(static_cast<const Entry*>(this)->GetChild(std::forward<T>(param), std::forward<Args>(args)...));
+    }
+
+    template<detail::IsValidIDType T, detail::IsValidIDType ... Args>
+    constexpr const Entry* Entry::GetChild(T&& param, Args&&... args) const
+    {
+        if(size == 0 || !IsContainer())
+            return nullptr;
+
+        const Entry* currentEntry = this;
+        
+        if constexpr(std::integral<std::remove_cvref_t<T>>)
+            currentEntry = GetDirectChild(param);
+        else
+        {
+            std::string_view _identifier = param;
+            for(size_t searchDepth = std::ranges::count(_identifier, '.') + 1; searchDepth > 0 && currentEntry; searchDepth--)
+            {
+                std::string_view cur;
+                const size_t dotPos = _identifier.find('.');
+                if(dotPos == std::string_view::npos)
+                    cur = _identifier;
+                else
+                {
+                    cur = _identifier.substr(0, dotPos);
+                    _identifier = _identifier.substr(dotPos + 1);
+                }
+
+                if(std::ranges::all_of(cur, [](char c) { return c >= '0' && c <= '9'; }))
+                {
+                    size_t value;
+                    if(std::from_chars(cur.data(), cur.data() + cur.size(), value).ec != std::errc())
+                        return nullptr;
+
+                    currentEntry = currentEntry->GetDirectChild(value);
+                }
+                else
+                    currentEntry = currentEntry->GetDirectChild(cur);
+            }
+        }
+        
+        if constexpr(sizeof...(args) > 0)
+            return currentEntry? currentEntry->GetChild(std::forward<Args>(args)...) : nullptr;
+        return currentEntry == this? nullptr : currentEntry;
+    }
+
+
+
+    
+    constexpr Entry* Entry::GetDirectChild(std::string_view _identifier)
+    {
+        return const_cast<Entry*>(static_cast<const Entry*>(this)->GetDirectChild(_identifier));
+    }
+    constexpr const Entry* Entry::GetDirectChild(std::string_view _identifier) const
+    {
+        if(size == 0 || type != Type::Map)
+            return nullptr;
+        
+        for(size_t i = 0; i < size; i++)
+        {
+            if((static_cast<Entry**>(data) + 1)[i]->GetIdentifier() == _identifier)
+                return GetDirectChild(i);
+        }
+        return nullptr;
+    }
+    
+    constexpr Entry* Entry::GetDirectChild(uint32_t index)
+    {
+        return const_cast<Entry*>(static_cast<const Entry*>(this)->GetDirectChild(index));
+    }
+    constexpr const Entry* Entry::GetDirectChild(uint32_t index) const
+    {
+        if(index >= size || !IsContainer())
+            return nullptr;
+        return (static_cast<Entry**>(data) + 1)[index];
+    }
+
+    
+    
+    
+    constexpr std::span<Entry*> Entry::GetChildren()
+    {
+        if(size == 0 || !IsContainer())
+            return {};
+        return {(static_cast<Entry**>(data) + 1), size};
+    }
+    constexpr std::span<const Entry*> Entry::GetChildren() const
+    {
+        if(size == 0 || !IsContainer())
+            return {};
+        return {(static_cast<const Entry**>(data) + 1), size};
+    }
+    
+    constexpr std::span<Entry*> Entry::GetChildrenUnsafe()
+    {
+        return {(static_cast<Entry**>(data) + 1), size};
+    }
+    constexpr std::span<const Entry*> Entry::GetChildrenUnsafe() const
+    {
+        return {(static_cast<const Entry**>(data) + 1), size};
+    }
+
+
+
+
+
+
+
+
+
+
+    constexpr size_t Entry::GetTotalChildCount_EXPENSIVE() const noexcept
+    {
+        if(size == 0 || !IsContainer())
+            return 0;
+        
+        size_t total = 0;
+        std::vector<const Entry*> stack;
+        stack.push_back(this);
+
+        while(!stack.empty())
+        {
+            const Entry* current = stack.back();
+            stack.pop_back();
+
+            if((current->type == Type::Array || current->type == Type::Map) && current->size > 0)
+            {
+                total += current->size;
+                for(const Entry* child : std::ranges::reverse_view(current->GetChildrenUnsafe()))
+                    stack.push_back(child);
+            }
+        }
+        
+        return total;
+    }
+
+    constexpr std::vector<Entry*> Entry::GetAllChildren_VERY_EXPENSIVE()
+    {
+        if(size == 0 || !IsContainer())
+            return {};
+        
+        std::vector<Entry*> stack;
+        std::vector<Entry*> result;
+        stack.push_back(this);
+
+        while(!stack.empty())
+        {
+            Entry* current = stack.back();
+            stack.pop_back();
+            result.push_back(current);
+
+            if((current->type == Type::Array || current->type == Type::Map) && current->size > 0)
+            {
+                for(Entry* child : std::ranges::reverse_view(current->GetChildrenUnsafe()))
+                    stack.push_back(child);
+            }
+        }
+        
+        return result;
+    }
+
+    constexpr std::vector<const Entry*> Entry::GetAllChildren_VERY_EXPENSIVE() const
+    {
+        if(size == 0 || !IsContainer())
+            return {};
+        
+        std::vector<const Entry*> stack;
+        std::vector<const Entry*> result;
+        stack.push_back(this);
+
+        while(!stack.empty())
+        {
+            const Entry* current = stack.back();
+            stack.pop_back();
+            result.push_back(current);
+
+            if((current->type == Type::Array || current->type == Type::Map) && current->size > 0)
+            {
+                for(const Entry* child : std::ranges::reverse_view(current->GetChildrenUnsafe()))
+                    stack.push_back(child);
+            }
+        }
+        
+        return result;
+    }
+
+
+
+
+    template<std::underlying_type_t<ForEachFlags::Flag> FLAGS, typename Callable> requires (std::is_invocable_v<Callable, Entry&>)
+    constexpr void Entry::ForEach(Callable callback)
+    {
+        if constexpr(!ForEachFlags::IsValidForEachFlag(FLAGS))
+        {
+            static_assert(false, "Invalid flag");
+        }
+        else if constexpr(ForEachFlags::IsNotSet(FLAGS, ForEachFlags::Recursive | ForEachFlags::Group))
+        {
+            // Non-recursive, non-sorted
+            if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
+                callback(*this);
+            for(Entry* child : GetChildren())
+                callback(*child);
+        }
+        else if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::Group) && ForEachFlags::IsNotSet(FLAGS, ForEachFlags::Recursive))
+        {
+            // Non-recursive, sorted
+            if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
+                callback(*this);
+
+            if(size == 0 || !IsContainer())
+                return;
+
+            const auto children = GetChildrenUnsafe();
+            for(Entry* e : children)
+            {
+                if(!e->IsContainer())
+                    callback(*e);
+            }
+            for(Entry* e : children)
+            {
+                if(e->type == Type::Array)
+                    callback(*e);
+            }
+            for(Entry* e : children)
+            {
+                if(e->type == Type::Map)
+                    callback(*e);
+            }
+        }
+        else if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::Recursive) && ForEachFlags::IsNotSet(FLAGS, ForEachFlags::Group))
+        {
+            // Recursive, non-sorted
+            if(size == 0 || !IsContainer())
+            {
+                if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
+                    callback(*this);
+                return;
+            }
+            
+            std::stack<Entry*> stack;
+            if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
+            {
+                stack.push(this);
+            }
+            else
+            {
+                for(Entry* child : std::ranges::reverse_view(GetChildrenUnsafe()))
+                    stack.push(child);
+            }
+
+            while(!stack.empty())
+            {
+                Entry* current = stack.top();
+                stack.pop();
+                callback(*current);
+
+                for(Entry* child : std::ranges::reverse_view(current->GetChildren()))
+                    stack.push(child);
+            }
+        }
+        else if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::Recursive | ForEachFlags::Group))
+        {
+            // Recursive, sorted
+            if(size == 0 || !IsContainer())
+            {
+                if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
+                    callback(*this);
+                return;
+            }
+            
+            enum class Phase : uint8_t { Pre, Leaf, Array, Map };
+            struct Frame { Entry* e; Phase phase; uint32_t idx;};
+        
+            std::stack<Frame> stack;
+            stack.push(Frame{ this, Phase::Pre, 0 });
+        
+            while(!stack.empty())
+            {
+                Frame& f = stack.top();
+                switch(f.phase)
+                {
+                    case Phase::Pre:
+                    {
+                        if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
+                        {
+                            callback(*f.e);
+                        }
+                        else
+                        {
+                            if(f.e != this)
+                                callback(*f.e);
+                        }
+            
+                        f.phase = Phase::Leaf;
+                        break;
+                    }
+                    case Phase::Leaf:
+                    {
+                        for(Entry* c : f.e->GetChildrenUnsafe())
+                        {
+                            if(!c->IsContainer())
+                                callback(*c);
+                        }
+                        
+                        f.phase = Phase::Array;
+                        break;
+                    }
+                    case Phase::Array:
+                    {
+                        auto children = f.e->GetChildrenUnsafe();
+                        bool pushed = false;
+                        while(f.idx < children.size())
+                        {
+                            Entry* c = children[f.idx++];
+                            if(c->IsContainer() && c->type == Type::Array)
+                            {
+                                stack.push(Frame{ c, Phase::Pre, 0 });
+                                pushed = true;
+                                break;
+                            }
+                        }
+                        if(!pushed)
+                        {
+                            f.phase = Phase::Map;
+                            f.idx = 0;
+                        }
+                        break;
+                    }
+                    case Phase::Map:
+                    {
+                        auto children = f.e->GetChildrenUnsafe();
+                        bool pushed = false;
+                        while(f.idx < children.size())
+                        {
+                            Entry* c = children[f.idx++];
+                            if(c->IsContainer() && c->type == Type::Map)
+                            {
+                                stack.push(Frame{ c, Phase::Pre, 0 });
+                                pushed = true;
+                                break;
+                            }
+                        }
+                        if(!pushed)
+                            stack.pop();
+                        break;
+                    }
+                    default:
+                        break;
+                }
+            }
+        }
+    }
+
+    template<std::underlying_type_t<ForEachFlags::Flag> FLAGS, typename Callable> requires (std::is_invocable_v<Callable, const Entry&>)
+    constexpr void Entry::ForEach(Callable callback) const
+    {
+        if constexpr(!ForEachFlags::IsValidForEachFlag(FLAGS))
+        {
+            static_assert(false, "Invalid flag");
+        }
+        else if constexpr(ForEachFlags::IsNotSet(FLAGS, ForEachFlags::Recursive | ForEachFlags::Group))
+        {
+            // Non-recursive, non-sorted
+            if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
+                callback(*this);
+            for(const Entry* child : GetChildren())
+                callback(*child);
+        }
+        else if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::Group) && ForEachFlags::IsNotSet(FLAGS, ForEachFlags::Recursive))
+        {
+            // Non-recursive, sorted
+            if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
+                callback(*this);
+
+            if(size == 0 || !IsContainer())
+                return;
+
+            const auto children = GetChildrenUnsafe();
+            for(const Entry* e : children)
+            {
+                if(!e->IsContainer())
+                    callback(*e);
+            }
+            for(const Entry* e : children)
+            {
+                if(e->type == Type::Array)
+                    callback(*e);
+            }
+            for(const Entry* e : children)
+            {
+                if(e->type == Type::Map)
+                    callback(*e);
+            }
+        }
+        else if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::Recursive) && ForEachFlags::IsNotSet(FLAGS, ForEachFlags::Group))
+        {
+            // Recursive, non-sorted
+            if(size == 0 || !IsContainer())
+            {
+                if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
+                    callback(*this);
+                return;
+            }
+            
+            std::stack<const Entry*> stack;
+            if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
+            {
+                stack.push(this);
+            }
+            else
+            {
+                for(const Entry* child : std::ranges::reverse_view(GetChildrenUnsafe()))
+                    stack.push(child);
+            }
+
+            while(!stack.empty())
+            {
+                const Entry* current = stack.top();
+                stack.pop();
+                callback(*current);
+
+                for(const Entry* child : std::ranges::reverse_view(current->GetChildren()))
+                    stack.push(child);
+            }
+        }
+        else if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::Recursive | ForEachFlags::Group))
+        {
+            // Recursive, sorted
+            if(size == 0 || !IsContainer())
+            {
+                if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
+                    callback(*this);
+                return;
+            }
+            
+            enum class Phase : uint8_t { Pre, Leaf, Array, Map };
+            struct Frame { const Entry* e; Phase phase; uint32_t idx;};
+        
+            std::stack<Frame> stack;
+            stack.push(Frame{ this, Phase::Pre, 0 });
+        
+            while(!stack.empty())
+            {
+                Frame& f = stack.top();
+                switch(f.phase)
+                {
+                    case Phase::Pre:
+                    {
+                        if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
+                        {
+                            callback(*f.e);
+                        }
+                        else
+                        {
+                            if(f.e != this)
+                                callback(*f.e);
+                        }
+            
+                        f.phase = Phase::Leaf;
+                        break;
+                    }
+                    case Phase::Leaf:
+                    {
+                        for(const Entry* c : f.e->GetChildrenUnsafe())
+                        {
+                            if(!c->IsContainer())
+                                callback(*c);
+                        }
+                        
+                        f.phase = Phase::Array;
+                        break;
+                    }
+                    case Phase::Array:
+                    {
+                        auto children = f.e->GetChildrenUnsafe();
+                        bool pushed = false;
+                        while(f.idx < children.size())
+                        {
+                            const Entry* c = children[f.idx++];
+                            if(c->IsContainer() && c->type == Type::Array)
+                            {
+                                stack.push(Frame{ c, Phase::Pre, 0 });
+                                pushed = true;
+                                break;
+                            }
+                        }
+                        if(!pushed)
+                        {
+                            f.phase = Phase::Map;
+                            f.idx = 0;
+                        }
+                        break;
+                    }
+                    case Phase::Map:
+                    {
+                        auto children = f.e->GetChildrenUnsafe();
+                        bool pushed = false;
+                        while(f.idx < children.size())
+                        {
+                            const Entry* c = children[f.idx++];
+                            if(c->IsContainer() && c->type == Type::Map)
+                            {
+                                stack.push(Frame{ c, Phase::Pre, 0 });
+                                pushed = true;
+                                break;
+                            }
+                        }
+                        if(!pushed)
+                            stack.pop();
+                        break;
+                    }
+                    default:
+                        break;
+                }
+            }
+        }
+    }
+
+
+
+
+
+
+
+
+
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<bool>()
+    {
+        if(type != Type::Bool)
+            throw std::runtime_error("Entry::GetValue<bool>: Invalid type");
+        return std::span(static_cast<bool*>(data), size);
+    }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<int64_t>()
+    {
+        if(type != Type::Int)
+            throw std::runtime_error("Entry::GetValue<int64_t>: Invalid type");
+        return std::span(static_cast<int64_t*>(data), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<int>()  { return GetValue<int64_t>(); }
+    
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<uint64_t>()
+    {
+        if(type != Type::UInt && type != Type::Version)
+            throw std::runtime_error("Entry::GetValue<uint64_t>: Invalid type");
+        return std::span(static_cast<uint64_t*>(data), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<unsigned int>()  { return GetValue<uint64_t>(); }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<double>()
+    {
+        if(type != Type::Float)
+            throw std::runtime_error("Entry::GetValue<double>: Invalid type");
+        return std::span(static_cast<double*>(data), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<float>()  { return GetValue<double>(); }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<char>()
+    {
+        if(type != Type::String && type != Type::Hex && type != Type::Timestamp)
+            throw std::runtime_error("Entry::GetValue<char>: Invalid type");
+        return std::string_view((static_cast<char*>(data) + sizeof(uint32_t)), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<std::string>()  { return GetValue<char>(); }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<std::string_view>()  { return GetValue<char>(); }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<char*>()  { return GetValue<char>(); }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<const char*>()  { return GetValue<char>(); }
+
+
+
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<bool>() const
+    {
+        if(type != Type::Bool)
+            throw std::runtime_error("Entry::GetValue<bool>: Invalid type");
+        return std::span(static_cast<const bool*>(data), size);
+    }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<int64_t>() const
+    {
+        if(type != Type::Int)
+            throw std::runtime_error("Entry::GetValue<int64_t>: Invalid type");
+        return std::span(static_cast<const int64_t*>(data), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<int>() const  { return GetValue<int64_t>(); }
+    
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<uint64_t>() const
+    {
+        if(type != Type::UInt && type != Type::Version)
+            throw std::runtime_error("Entry::GetValue<uint64_t>: Invalid type");
+        return std::span(static_cast<const uint64_t*>(data), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<unsigned int>() const  { return GetValue<uint64_t>(); }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<double>() const
+    {
+        if(type != Type::Float)
+            throw std::runtime_error("Entry::GetValue<double>: Invalid type");
+        return std::span(static_cast<const double*>(data), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<float>() const  { return GetValue<double>(); }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<char>() const
+    {
+        if(type != Type::String && type != Type::Hex && type != Type::Timestamp)
+            throw std::runtime_error("Entry::GetValue<char>: Invalid type");
+        return std::string_view((static_cast<const char*>(data) + sizeof(uint32_t)), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<std::string>() const  { return GetValue<char>(); }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<std::string_view>() const  { return GetValue<char>(); }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<char*>() const  { return GetValue<char>(); }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<const char*>() const  { return GetValue<char>(); }
+
+
+
+
+
+
+
+
+
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<bool>()
+    {
+        return std::span(static_cast<bool*>(data), size);
+    }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<int64_t>()
+    {
+        return std::span(static_cast<int64_t*>(data), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<int>()  { return GetValueUnsafe<int64_t>(); }
+    
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<uint64_t>()
+    {
+        return std::span(static_cast<uint64_t*>(data), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<unsigned int>()  { return GetValueUnsafe<uint64_t>(); }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<double>()
+    {
+        return std::span(static_cast<double*>(data), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<float>()  { return GetValueUnsafe<double>(); }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<char>()
+    {
+        return std::string_view((static_cast<char*>(data) + sizeof(uint32_t)), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<std::string>()  { return GetValueUnsafe<char>(); }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<std::string_view>()  { return GetValueUnsafe<char>(); }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<char*>()  { return GetValueUnsafe<char>(); }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<const char*>()  { return GetValueUnsafe<char>(); }
+
+
+
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<bool>() const
+    {
+        return std::span(static_cast<const bool*>(data), size);
+    }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<int64_t>() const
+    {
+        return std::span(static_cast<const int64_t*>(data), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<int>() const  { return GetValueUnsafe<int64_t>(); }
+    
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<uint64_t>() const
+    {
+        return std::span(static_cast<const uint64_t*>(data), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<unsigned int>() const  { return GetValueUnsafe<uint64_t>(); }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<double>() const
+    {
+        return std::span(static_cast<const double*>(data), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<float>() const  { return GetValueUnsafe<double>(); }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<char>() const
+    {
+        return std::string_view((static_cast<const char*>(data) + sizeof(uint32_t)), size);
+    }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<std::string>() const  { return GetValueUnsafe<char>(); }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<std::string_view>() const  { return GetValueUnsafe<char>(); }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<char*>() const  { return GetValueUnsafe<char>(); }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<const char*>() const  { return GetValueUnsafe<char>(); }
+
+
+
+
+
+
+
+
+
+
+    template<Style STYLE>
+    [[nodiscard]] constexpr std::string_view Entry::DataToView(std::string& temp) const
+    {
+        switch(type)
+        {
+            case Type::Invalid: return detail::INVALID_TEXT;
+            case Type::Null:    if constexpr(STYLE.bUseNilInsteadOfNull) return detail::KEYWORDS[1]; return detail::KEYWORDS[0];
+            case Type::Array:   return detail::ARRAY_TEXT;
+            case Type::Map:     return detail::MAP_TEXT;
+
+            case Type::String:
+            case Type::Timestamp:
+                return GetValueUnsafe<char>();
+            
+            case Type::Hex:
+            {
+                std::string_view view = GetValueUnsafe<char>();
+
+                if constexpr(STYLE.bUppercaseHex)
+                {
+                    temp = view;
+                    std::ranges::transform(temp, temp.begin(), [](unsigned char c)  { return std::toupper(c); });
+                    return temp;
+                }
+
+                return view;
+            }
+
+            case Type::Version:
+            {
+                const auto span = GetValueUnsafe<uint64_t>();
+                if(size == 3)
+                    temp = std::format("{}.{}.{}", span[0], span[1], span[2]);
+                else
+                    temp = std::format("{}.{}.{}.{}", span[0], span[1], span[2], span[3]);
+                return temp;
+            }
+
+            case Type::Bool:
+            {
+                const auto span = GetValueUnsafe<bool>();
+                temp = std::format("{}", (span[0]? detail::KEYWORDS[2] : detail::KEYWORDS[3]));
+                for(size_t i = 1; i < span.size(); i++)
+                    temp = std::format("{}x{}", temp, (span[i]? detail::KEYWORDS[2] : detail::KEYWORDS[3]));
+                return temp;
+            }
+
+            case Type::Int:
+            {
+                const auto span = GetValueUnsafe<int64_t>();
+                temp = std::format("{}", span[0]);
+                for(size_t i = 1; i < span.size(); i++)
+                    temp = std::format("{}x{}", temp, span[i]);
+                return temp;
+            }
+
+            case Type::UInt:
+            {
+                const auto span = GetValueUnsafe<uint64_t>();
+                temp = std::format("{}", span[0]);
+                for(size_t i = 1; i < span.size(); i++)
+                    temp = std::format("{}x{}", temp, span[i]);
+                return temp;
+            }
+
+            case Type::Float:
+            {
+                const auto span = GetValueUnsafe<float>();
+                temp = std::format("{}", span[0]);
+                for(size_t i = 1; i < span.size(); i++)
+                    temp = std::format("{}x{}", temp, span[i]);
+                return temp;
+            }
+
+            default:
+                std::unreachable();
+                return {};
         }
     }
 }
@@ -1656,8 +2622,8 @@ namespace fdf
 
 namespace fdf
 {
-    template<auto DIAGNOSTIC_CALLBACK> requires(IsValidDiagnosticCallback<decltype(DIAGNOSTIC_CALLBACK)>)
-    inline Entry* ParseFile(const std::filesystem::path& filepath) noexcept
+    template<auto DIAGNOSTIC_CALLBACK> requires(detail::IsValidDiagnosticCallback<decltype(DIAGNOSTIC_CALLBACK)>)
+    inline Entry* Entry::ParseFile(const std::filesystem::path& filepath) noexcept
     {
         if(!std::filesystem::exists(filepath) || !std::filesystem::is_regular_file(filepath))
             return nullptr;
@@ -1667,19 +2633,56 @@ namespace fdf
             return nullptr;
 
         std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        return ParseFileContent(content);
+        return ParseBuffer(content);
     }
 
-    template<auto DIAGNOSTIC_CALLBACK> requires(IsValidDiagnosticCallback<decltype(DIAGNOSTIC_CALLBACK)>)
-    constexpr Entry* ParseFileContent(std::string_view content) noexcept
+    template<auto DIAGNOSTIC_CALLBACK> requires(detail::IsValidDiagnosticCallback<decltype(DIAGNOSTIC_CALLBACK)>)
+    constexpr Entry* Entry::ParseBuffer(std::string_view content) noexcept
     {
-        return detail::Utils<DIAGNOSTIC_CALLBACK>::ParseFileContent(content);
+        return detail::Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(content);
     }
 
-    template <auto DIAGNOSTIC_CALLBACK> requires (IsValidDiagnosticCallback<decltype(DIAGNOSTIC_CALLBACK)>)
-    constexpr void Release(Entry* e) noexcept
+    template<Style STYLE>
+    bool Entry::WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists) noexcept
     {
-        return detail::Utils<DIAGNOSTIC_CALLBACK>::Destroy(e);
+        if(!std::filesystem::exists(filepath))
+        {
+            if(!bCreateIfNotExists)
+                return false;
+
+            auto parentDir = filepath.parent_path();
+            if(!parentDir.empty() && !std::filesystem::exists(parentDir))
+            {
+                std::error_code ec;
+                std::filesystem::create_directories(parentDir, ec);
+                if(ec)
+                    return false;
+            }
+        }
+        else if(!std::filesystem::is_regular_file(filepath))
+        {
+            return false;
+        }
+
+        std::ofstream file(filepath);
+        if(!file)
+            return false;
+
+        std::string buffer;
+        WriteBuffer(e, buffer);
+
+        file << buffer;
+        return static_cast<bool>(file);
+    }
+    template<Style STYLE>
+    constexpr void Entry::WriteBuffer(const Entry& root, std::string& buffer) noexcept
+    {
+        detail::Utils<0>::WriteBuffer<STYLE>(root, buffer);
+    }
+
+    constexpr void Entry::Destroy(Entry& e) noexcept
+    {
+        detail::Utils<0>::Destroy(&e);
     }
 }
 
@@ -1695,7 +2698,7 @@ namespace fdf::detail
         }
         else
         {
-            return new(detail::GlobalAllocator::Allocate<sizeof(Entry)>()) Entry{std::forward<Args>(args)...};
+            return new(ENTRY_ALLOCATOR.Allocate()) Entry{std::forward<Args>(args)...};
         }
     }
 
@@ -1709,12 +2712,12 @@ namespace fdf::detail
         else
         {
             e->~Entry();
-            (void)detail::GlobalAllocator::Deallocate<sizeof(Entry)>(e);
+            (void)ENTRY_ALLOCATOR.Deallocate(e);
         }
     }
 
     template<auto DIAGNOSTIC_CALLBACK>
-    inline constexpr Entry* Utils<DIAGNOSTIC_CALLBACK>::ParseFileContent(std::string_view content) noexcept
+    inline constexpr Entry* Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(std::string_view content) noexcept
     {
         Tokenizer tokenizer(content);
         #if !FDF_NO_COMMENTS
@@ -1723,7 +2726,7 @@ namespace fdf::detail
 
         Entry* root = Create();
         root->type = Type::Map;
-        root->depth = static_cast<uint16_t>(-1);
+        root->depth = static_cast<uint8_t>(-1);
         
         while(true)
         {
@@ -1840,7 +2843,7 @@ namespace fdf::detail
     {
         Token currentToken = tokenizer.Current();
         Entry* entry = Create();
-        parent.AddChild(*entry);
+        (void)parent.AddChild(*entry);
 
         if(parent.type != Type::Array)
         {
@@ -1855,7 +2858,7 @@ namespace fdf::detail
             throw std::runtime_error("Non-supported parent type");
 
         entry->depth = parent.depth + 1;
-        if(entry->depth == static_cast<uint16_t>(-1))
+        if(entry->depth == static_cast<uint8_t>(-1))
             throw std::runtime_error("Invalid depth");
 
 
@@ -2502,6 +3505,246 @@ namespace fdf::detail
             }
             else
                 return false;
+        }
+    }
+
+
+
+
+
+
+
+
+
+
+    template<auto DIAGNOSTIC_CALLBACK>
+    template<Style STYLE>
+    constexpr void Utils<DIAGNOSTIC_CALLBACK>::WriteBuffer(const Entry& root, std::string& buffer, const bool bOverwrite) noexcept
+    {
+        auto isShortArrayFn   = [ ](const Entry& e) -> bool  { return e.GetTotalChildCount_EXPENSIVE() <= STYLE.singleLineArrayLimit; };
+        auto isShortMapFn     = [ ](const Entry& e) -> bool  { return e.GetTotalChildCount_EXPENSIVE() <= STYLE.singleLineMapLimit; };
+        auto writeEntryNameFn = [&](const Entry& e) -> void  { buffer.append(e.GetIdentifier()); };
+
+        auto addTabFn = [&buffer](size_t count) -> void
+        {
+            if constexpr(STYLE.bUseSpacesOverTabs)
+                buffer.append(count * STYLE.tabSize, ' ');
+            else
+                buffer.append(count, '\t');
+        };
+        auto addEqualSignFn = [&buffer]() -> void
+        {
+            if constexpr(STYLE.bSpaceBeforeAndAfterEqualSign)
+                buffer.append(" = ");
+            else
+                buffer.push_back('=');
+        };
+        auto addCommaFn = [&buffer]() -> void
+        {
+            if constexpr(STYLE.bSpaceAfterComma)
+                buffer.append(", ");
+            else
+                buffer.push_back(',');
+        };
+
+        std::array<bool, 254> scopes; // max amount of scopes is 254 (depth 0 has no scope, depth 1 has 1 scope, ... and 255 means root, so last possible depth is 254) NOLINT(*-pro-type-member-init)
+        uint8_t scopeCount = 0;
+        auto addScopeFn    = [&](const bool bIsMap)   -> void { scopes[scopeCount++] = bIsMap; };
+        auto removeScopeFn = [&]()                    -> void { scopeCount--; };
+        auto getScopeFn    = [&](const uint8_t index) -> bool { return scopes[index]; };
+
+        uint8_t lastDepth = root.depth;
+        Type lastType = root.type;
+
+        const size_t totalChildCount = root.GetTotalChildCount_EXPENSIVE();
+        size_t writtenCount = 0; //? might be unnecessary
+        if(bOverwrite)
+            buffer.clear();
+        buffer.reserve(buffer.size() + totalChildCount * 50);
+
+
+        #if !FDF_NO_COMMENTS
+            if constexpr(STYLE.bFileComment)
+            {
+                if(root.depth == static_cast<uint8_t>(-1))
+                {
+                    const std::string_view fileComment = root.GetComment();
+                    if(!fileComment.empty())
+                    {
+                        buffer.append("/*#\n");
+                        size_t prevNewLinePos = -1;
+                        size_t newLinePos = fileComment.find_first_of('\n');
+                        while(newLinePos != std::string::npos)
+                        {
+                            addTabFn(1);
+                            buffer.append(fileComment, prevNewLinePos + 1, newLinePos - prevNewLinePos);
+                            prevNewLinePos = newLinePos;
+                            newLinePos = fileComment.find_first_of('\n', newLinePos + 1);
+                        }
+                        addTabFn(1);
+                        buffer.append(fileComment, prevNewLinePos + 1);
+                        buffer.append("\n*/\n\n\n");
+                    }
+                }
+            }
+        #endif
+
+
+
+
+
+
+
+
+
+
+        auto writeSimpleEntryValueFn = [&](const Entry& e) -> void
+        {
+            std::string temp;
+            const std::string_view view = e.DataToView<STYLE>(temp);
+            if(e.type != Type::String)
+            {
+                buffer.append(view);
+            }
+            else
+            {
+                //TODO: Check out this logic... wtf is going on here?
+                bool bContainsQuote = view.find_first_of('\"') != std::string_view::npos; // does it contain double quote?
+                if(bContainsQuote)
+                {
+                    if constexpr(STYLE.bAlwaysUseDoubleQuoteForStrings)
+                    {
+                        buffer.push_back('\"');
+                        for(char c : view)
+                        {
+                            if(c == '\"')
+                                buffer.append("\\\"");
+                            else
+                                buffer.push_back(c);
+                        }
+                        buffer.push_back('\"');
+                    }
+                    else
+                    {
+                        bContainsQuote = view.find_first_of('\'') != std::string_view::npos; // does it contain single quote?
+                        if(bContainsQuote)
+                        {
+                            buffer.push_back('\"');
+                            for(char c : view)
+                            {
+                                if(c == '\"')
+                                    buffer.append("\\\"");
+                                else
+                                    buffer.push_back(c);
+                            }
+                            buffer.push_back('\"');
+                        }
+                        else
+                        {
+                            buffer.push_back('\'');
+                            buffer.append(view);
+                            buffer.push_back('\'');
+                        }
+                    }
+                }
+                else
+                {
+                    buffer.push_back('\"');
+                    buffer.append(view);
+                    buffer.push_back('\"');
+                }
+            }
+        };
+        auto writeSimpleEntryFn = [&](const Entry& e) -> void
+        {
+            writeEntryNameFn(e);
+            addEqualSignFn();
+            writeSimpleEntryValueFn(e);
+        };
+
+
+
+
+
+
+
+
+
+
+        auto writeFn = [&](const Entry& e) -> void
+        {
+            if(e.depth == static_cast<uint8_t>(-1))
+            {
+                lastDepth = 0;
+                lastType = Type::Invalid;
+                return;
+            }
+
+            for(int i = 0; i < lastDepth - e.depth; i++)
+            {
+                const bool bWasMap = getScopeFn(scopeCount - 1);
+                addTabFn(lastDepth - 1 - i);
+                buffer.push_back(bWasMap? '}' : ']');
+                buffer.push_back('\n');
+                removeScopeFn();
+            }
+
+            if(!e.IsContainer())
+            {
+                addTabFn(e.depth);
+                if(!e.parent || e.parent->type != Type::Array)
+                {
+                    writeEntryNameFn(e);
+                    addEqualSignFn();
+                }
+                writeSimpleEntryValueFn(e);
+                buffer.push_back('\n');
+            }
+            else
+            {
+                buffer.push_back('\n');
+                const bool bIsMap = e.type == Type::Map;
+                addTabFn(e.depth);
+                
+                if(!e.parent || e.parent->type != Type::Array)
+                {
+                    writeEntryNameFn(e);
+                    if constexpr(STYLE.bParenthesesOnNewLine)
+                    {
+                        buffer.push_back('\n');
+                        addTabFn(e.depth);
+                    }
+                }
+                
+                buffer.push_back(bIsMap? '{' : '[');
+                buffer.push_back('\n');
+                addScopeFn(bIsMap);
+            }
+            //TODO: implement
+            
+            lastDepth = e.depth;
+            lastType = e.type;
+            writtenCount++;
+        };
+
+
+        if constexpr(STYLE.bGroupSimilarTypes)
+        {
+            root.ForEach<ForEachFlags::Recursive | ForEachFlags::Group | ForEachFlags::IncludeSelf>(writeFn);
+        }
+        else
+        {
+            root.ForEach<ForEachFlags::Recursive | ForEachFlags::IncludeSelf>(writeFn);
+        }
+
+
+        for(int i = 0; i < lastDepth; i++)
+        {
+            const bool bWasMap = getScopeFn(scopeCount - 1);
+            addTabFn(lastDepth - 1 - i);
+            buffer.push_back(bWasMap? '}' : ']');
+            buffer.push_back('\n');
+            removeScopeFn();
         }
     }
 }

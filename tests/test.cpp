@@ -568,11 +568,21 @@ int main()
 
 int main()
 {
-    fdf::Entry* e = fdf::ParseFile("D:/DEV/GithubPK/fdf/designs/Design_5.txt");
+    //TODO implement merge
+    fdf::Entry* e = fdf::Entry::ParseFile("D:/DEV/GithubPK/fdf/designs/Design_5.txt");
     if(e)
     {
+        size_t count = e->GetTotalChildCount_EXPENSIVE();
+        std::string temp;
+        //e->ForEach_AllChildren_EXPENSIVE([&temp](fdf::Entry& myEntry){std::print("name: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.DataToView(temp));});
+        /*for(const fdf::Entry* entry : e->GetChildrenUnsafe())
+        {
+            std::print("name: {}   -   data: {}\n", entry->GetIdentifier(), entry->DataToView(temp));
+        }*/
         std::cout << "comment: " << e->GetComment().data() << '\n';
-        fdf::Release(e);
+        temp.clear();
+        fdf::Entry::WriteBuffer(*e, temp);
+        fdf::Entry::Destroy(*e);
     }
     std::puts("Hello World!");
 }

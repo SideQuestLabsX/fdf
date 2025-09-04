@@ -20,6 +20,8 @@ if(FDF_USE_CPP_MODULES)
     target_include_directories(fdf PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_sources(fdf
         PRIVATE
+            include/fdf.h
+        PRIVATE
             FILE_SET my_modules
             TYPE CXX_MODULES
             FILES src/fdf.ixx
@@ -32,6 +34,7 @@ if(FDF_USE_CPP_MODULES)
 else()
     add_library(fdf INTERFACE)
     target_include_directories(fdf INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_sources(fdf INTERFACE include/fdf.h)
 
     target_compile_definitions(fdf INTERFACE FDF_USE_CPP_MODULES=false)
     target_compile_definitions(fdf INTERFACE FDF_NO_COMMENTS=$<IF:$<BOOL:${FDF_NO_COMMENTS}>,true,false>)

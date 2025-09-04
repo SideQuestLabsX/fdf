@@ -115,8 +115,10 @@ gameItems3
 [
     { id=1, name="Potion" }
     { id=2, name="Elixir" }
+    15
     { id=3 }            // Unspecified fields defaults to null
     { id=4, name=null } // Same as previous one
+    false
 ]
 
 // Array of maps within other maps
