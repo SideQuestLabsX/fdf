@@ -12,7 +12,7 @@
 
 
 
-/*namespace fdf::detail
+namespace fdf::detail
 {
     constexpr std::string_view TOKEN_TYPE_TO_STRING[] =
     {
@@ -103,12 +103,12 @@
             std::vector<Token> tokens;
             std::vector<std::string_view> views;
             tokens.push_back(tokenizer.Current());
-            views.push_back(tokens[0].ToView(content));
+            views.push_back(tokenizer.ToView(tokens[0]));
             while(true)
             {
                 Token token = tokenizer.Advance();
                 tokens.push_back(token);
-                views.push_back(token.ToView(content));
+                views.push_back(tokenizer.ToView(token));
         
                 if(token.type == TokenType::EndOfFile || token.type == TokenType::Invalid)
                     break;
@@ -138,7 +138,7 @@
             return static_cast<bool>(oFile);
         }
 
-        static bool PrintAllEntries(const std::vector<Entry>& entries, std::string_view outFile)
+        static bool PrintAllEntries(const Entry* e, std::string_view outFile)
         {
             std::ofstream file(outFile.data());
             if(!file)
@@ -157,56 +157,28 @@
             };
 
             std::string temp;
-            for(const Entry& entry : entries)
+            e->ForEach<ForEachFlags::Recursive | ForEachFlags::Group>([&](const Entry& entry)
             {
             #if !FDF_NO_COMMENTS
-                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}--Comment={}", "", 4 * entry.depth, ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.fullIdentifier, entry.DataToView(temp), entry.comment));
+                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}--Comment={}", "", 4 * entry.depth, ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.GetFullIdentifier_EXPENSIVE(), entry.DataToView(temp), entry.comment));
             #else
-                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}", "", 4 * entry.depth, ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.fullIdentifier, entry.DataToView(temp)));
+                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}", "", 4 * entry.depth, ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.GetFullIdentifier_EXPENSIVE(), entry.DataToView(temp)));
             #endif
                 buffer.push_back('\n');
-            }
+            });
 
             file << buffer;
             return static_cast<bool>(file);
         }
 
         template<Style STYLE = {}>
-        static bool PrintFile(const auto& io, std::string_view outFile)
+        static bool PrintFile(const Entry* e, std::string_view outFile)
         {
-            return io.template WriteToFile<STYLE>(outFile);
-        }
-
-
-
-
-        static bool ErrorCallback(Error error, std::string_view message)
-        {
-            if(output.empty())
-                output = std::format("{}: {}"    ,         IsWarning(error)? "Warning" : "Error", message);
-            else
-                output = std::format("{}\n{}: {}", output, IsWarning(error)? "Warning" : "Error", message);
-
-            return true;
+            return Entry::WriteFile<STYLE>(*e, outFile);
         }
 
         
 
-
-        static void PrintLastSuccessfullyParsedEntry(auto& io)
-        {
-            size_t lastID = -1;
-            for(size_t i = io.entries.size() - 1; i != -1; i++)
-            {
-                if(io.entries[i].type != Type::Invalid)
-                {
-                    lastID = i;
-                    break;
-                }
-            }
-
-            std::println("-----LAST SUCCESSFULLY PARSED ENTRY: {} (id: {})-----", lastID == -1? "<None>" : io.entries[lastID].fullIdentifier, static_cast<int64_t>(lastID));
-        }
 
         static bool ParseTest()
         {
@@ -217,16 +189,12 @@
                 std::print("[{:02}/{:02}] {:<{}}", i + 1, filesToTest.size(), directories.inputFile, longestFilename);
 
                 auto startTime = std::chrono::high_resolution_clock::now();
-                IO<ErrorCallback> io;
-                bool bSuccess = io.Parse(std::filesystem::path(directories.inputFile));
+                Entry* e = Entry::ParseFile(std::filesystem::path(directories.inputFile));
                 auto endTime = std::chrono::high_resolution_clock::now();
                 auto duration = duration_cast<std::chrono::nanoseconds>(endTime - startTime);
 
-                std::string durationString = std::format("{:.6f}ms", duration.count() / 1'000'000.0);
-                std::println(" -- Result: {:<7} -- Took: {:<9}", bSuccess? "SUCCESS" : "FAIL", durationString);
-
-                if(!bSuccess)
-                    PrintLastSuccessfullyParsedEntry(io);
+                std::string durationString = std::format("{:.6f}ms", static_cast<double>(duration.count()) / 1'000'000.0);
+                std::println(" -- Result: {:<7} -- Took: {:<9}", e? "SUCCESS" : "FAIL", durationString);
 
                 if(!output.empty())
                 {
@@ -236,10 +204,11 @@
                 std::println();
                 
                 PrintAllTokens(directories.inputFile, directories.tokenizedFile);
-                PrintAllEntries(io.entries, directories.entriesFile);
-                PrintFile(io, directories.outputFile);
+                PrintAllEntries(e, directories.entriesFile);
+                PrintFile(e, directories.outputFile);
 
-                bResult = bResult && bSuccess;
+                bResult = bResult && e;
+                Entry::Destroy(e);
             }
 
             return bResult;
@@ -252,11 +221,10 @@
         // TODO: Maybe automate ReadTest so we don't need to implement each Entry by hand? (and manually adjust formatting (currently 24))
         static bool ReadTest()
         {
-            IO io;
-            if(!io.Parse(std::filesystem::path(filesToTest[0].inputFile)))
+            Entry* e = Entry::ParseFile(std::filesystem::path(filesToTest[0].inputFile));
+            if(!e)
             {
                 std::puts("[ERROR]: Failed to parse the design file... Should never happen unless initial parse failed too!");
-                PrintLastSuccessfullyParsedEntry(io);
                 return false;
             }
 
@@ -265,10 +233,10 @@
 
 
             {
-                std::println("          Entry Count: {:>3} (should be 135) (update when editing design file)", io.GetEntryCount());
-                std::println("Top Level Entry Count: {:>3} (should be  56) (update when editing design file)", io.GetTopLevelEntryCount());
+                std::println("          Entry Count: {:>3} (should be 135) (update when editing design file)", e->GetTotalChildCount_EXPENSIVE());
+                std::println("Top Level Entry Count: {:>3} (should be  56) (update when editing design file)", e->GetChildCount());
 
-                if(io.GetEntryCount() != 135 || io.GetTopLevelEntryCount() != 56)
+                if(e->GetTotalChildCount_EXPENSIVE() != 135 || e->GetChildCount() != 56)
                 {
                     bResult = false;
                     std::puts("[ERROR]: Invalid 'Entry Count' or 'Top Level Entry Count'");
@@ -279,9 +247,9 @@
 
 
             {
-                auto entry = io.GetEntry("appVersion");
+                Entry* entry = e->GetChild("appVersion");
                 std::print("{:<24}  ->  ", "appVersion");
-                if(entry->type == Type::Version)
+                if(entry && entry->type == Type::Version)
                 {
                     auto val = entry->GetValue<uint64_t>();
                     std::println("{}.{}.{}.{}", val[0], val[1], val[2], val[3]);
@@ -295,9 +263,9 @@
 
 
             {
-                auto entry = io.GetEntry("name");
+                Entry* entry = e->GetChild("name");
                 std::print("{:<24}  ->  ", "name");
-                if(entry->type == Type::String)
+                if(entry && entry->type == Type::String)
                 {
                     auto val = entry->GetValue<std::string_view>();
                     std::println("{}", val);
@@ -311,9 +279,9 @@
 
 
             {
-                auto entry = io.GetEntry("enabled1");
+                Entry* entry = e->GetChild("enabled1");
                 std::print("{:<24}  ->  ", "enabled1");
-                if(entry->type == Type::Bool && entry->size == 1)
+                if(entry && entry->type == Type::Bool && entry->size == 1)
                 {
                     auto val = entry->GetValue<bool>();
                     std::println("{}", val[0]);
@@ -327,9 +295,9 @@
 
 
             {
-                auto entry = io.GetEntry("id");
+                Entry* entry = e->GetChild("id");
                 std::print("{:<24}  ->  ", "id");
-                if(entry->type == Type::Int)
+                if(entry && entry->type == Type::Int)
                 {
                     auto val = entry->GetValue<int>();
                     std::println("{}", val[0]);
@@ -343,9 +311,9 @@
 
 
             {
-                auto entry = io.GetEntry("uuid");
+                Entry* entry = e->GetChild("uuid");
                 std::print("{:<24}  ->  ", "uuid");
-                if(entry->type == Type::String)
+                if(entry && entry->type == Type::String)
                 {
                     auto val = entry->GetValue<char>();
                     for(char c : val)
@@ -366,9 +334,9 @@
 
 
             {
-                auto entry = io.GetEntry("pi");
+                Entry* entry = e->GetChild("pi");
                 std::print("{:<24}  ->  ", "pi");
-                if(entry->type == Type::Float)
+                if(entry && entry->type == Type::Float)
                 {
                     auto val = entry->GetValue<float>();
                     std::println("{}", val[0]);
@@ -382,9 +350,9 @@
 
 
             {
-                auto entry = io.GetEntry("value");
+                Entry* entry = e->GetChild("value");
                 std::print("{:<24}  ->  ", "value");
-                if(entry->type == Type::Null)
+                if(entry && entry->type == Type::Null)
                 {
                     std::puts("null");
                 }
@@ -397,9 +365,9 @@
 
 
             {
-                auto entry = io.GetEntry("value2");
+                Entry* entry = e->GetChild("value2");
                 std::print("{:<24}  ->  ", "value2");
-                if(entry->type == Type::Null)
+                if(entry && entry->type == Type::Null)
                 {
                     std::puts("null");
                 }
@@ -412,9 +380,9 @@
 
 
             {
-                auto entry = io.GetEntry("gameSettings1.resolution");
+                Entry* entry = e->GetChild("gameSettings1.resolution");
                 std::print("{:<24}  ->  ", "gameSettings1.resolution");
-                if(entry->type == Type::Int && entry->size == 2)
+                if(entry && entry->type == Type::Int && entry->size == 2)
                 {
                     auto val = entry->GetValue<int64_t>();
                     std::println("{}x{}", val[0], val[1]);
@@ -428,9 +396,9 @@
 
 
             {
-                auto entry = io.GetEntry("NON_EXISTING");
+                Entry* entry = e->GetChild("NON_EXISTING");
                 std::print("{:<24}  ->  ", "NON_EXISTING");
-                if(entry->type == Type::Invalid)
+                if(!entry)
                 {
                     std::puts("<NON_EXISTING>");
                 }
@@ -443,9 +411,9 @@
 
 
             {
-                auto entry = io.GetEntry("escaped1");
+                Entry* entry = e->GetChild("escaped1");
                 std::print("{:<24}  ->  ", "escaped1");
-                if(entry->type == Type::String)
+                if(entry && entry->type == Type::String)
                 {
                     auto val = entry->GetValue<std::string_view>();
                     std::println("{}", val);
@@ -459,9 +427,9 @@
 
 
             {
-                auto entry = io.GetEntry("escaped2");
+                Entry* entry = e->GetChild("escaped2");
                 std::print("{:<24}  ->  ", "escaped2");
-                if(entry->type == Type::String)
+                if(entry && entry->type == Type::String)
                 {
                     auto val = entry->GetValue<std::string_view>();
                     std::println("{}", val);
@@ -475,9 +443,9 @@
 
 
             {
-                auto entry = io.GetEntry("escaped5");
+                Entry* entry = e->GetChild("escaped5");
                 std::print("{:<24}  ->  ", "escaped5");
-                if(entry->type == Type::String)
+                if(entry && entry->type == Type::String)
                 {
                     auto val = entry->GetValue<std::string_view>();
                     std::println("{}", val);
@@ -491,9 +459,9 @@
 
 
             {
-                auto entry = io.GetEntry("escaped6");
+                Entry* entry = e->GetChild("escaped6");
                 std::print("{:<24}  ->  ", "escaped6");
-                if(entry->type == Type::String)
+                if(entry && entry->type == Type::String)
                 {
                     auto val = entry->GetValue<std::string_view>();
                     std::println("{}", val);
@@ -506,6 +474,7 @@
             }
 
             
+            Entry::Destroy(e);
             return bResult;
         }
 
@@ -514,11 +483,12 @@
 
         static bool WriteTest()
         {
-            IO io;
+            /*IO io;
 
             std::puts("<Placeholder>");
 
-            return io.WriteToFile<Style{.bCommasOnLastElement = false}>(FDF_TEST_DIRECTORY "/output/WriteTest.txt");;
+            return io.WriteToFile<Style{.bCommasOnLastElement = false}>(FDF_TEST_DIRECTORY "/output/WriteTest.txt");;*/
+            return true;
         }
     };
 }
@@ -533,7 +503,6 @@ int main()
     std::filesystem::path currentDesignFile = FDF_ROOT_DIRECTORY "/designs/Design_5.txt";
     std::filesystem::path testDir = FDF_TEST_DIRECTORY;
     std::filesystem::path outputDir = FDF_TEST_DIRECTORY "/output";
-    bool result = true;
 
     if(!std::filesystem::exists(outputDir))
         std::filesystem::create_directory(outputDir);
@@ -563,10 +532,10 @@ int main()
     bResult = Test::WriteTest() && bResult;
 
     return bResult? 0 : -1;
-}*/
+}
 
 
-template<typename T>
+/*template<typename T>
 constexpr T ExtractValue(std::string_view buffer)
 {
     fdf::Entry* eRoot = fdf::Entry::ParseBuffer(buffer);
@@ -623,10 +592,10 @@ int main()
     
     if(fdf::Entry* e = fdf::Entry::ParseFile(FDF_ROOT_DIRECTORY "/designs/Design_5.txt"))
     {
-        /*e->ForEach<fdf::ForEachFlags::Recursive | fdf::ForEachFlags::IncludeSelf | fdf::ForEachFlags::Group>([&temp](fdf::Entry& myEntry)
+        e->ForEach<fdf::ForEachFlags::Recursive | fdf::ForEachFlags::IncludeSelf | fdf::ForEachFlags::Group>([&temp](fdf::Entry& myEntry)
         {
             std::print("name: {}   -   depth: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.GetDepth(), myEntry.DataToView(temp));
-        });*/
+        });
         [[maybe_unused]] auto* id = e->GetDirectChild("id");
         [[maybe_unused]] size_t count = e->GetTotalChildCount_EXPENSIVE();
         std::cout << "comment: " << e->GetComment().data() << '\n';
@@ -636,4 +605,4 @@ int main()
         fdf::Entry::Destroy(e);
     }
     std::puts("\n\n");
-}
+}*/
