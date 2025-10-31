@@ -566,23 +566,74 @@ int main()
 }*/
 
 
+template<typename T>
+constexpr T ExtractValue(std::string_view buffer)
+{
+    fdf::Entry* eRoot = fdf::Entry::ParseBuffer(buffer);
+    auto* eValue = eRoot->GetDirectChild("value");
+    T value = 0;
+
+    if(eValue)
+    {
+        auto span = eValue->GetValue<T>();
+        if(!span.empty())
+            value = span[0];
+    }
+    fdf::Entry::Destroy(eRoot);
+    return value;
+}
+
+
+//[[maybe_unused]] constexpr auto value0 = ExtractValue<int64_t>("value = 25x50");
+//[[maybe_unused]] constexpr auto value1 = ExtractValue<bool>("value = truexfalsextrue");
 int main()
 {
-    //TODO implement merge
-    fdf::Entry* e = fdf::Entry::ParseFile("D:/DEV/GithubPK/fdf/designs/Design_5.txt");
-    if(e)
+    std::string temp;
+    temp.reserve(1024);
+    
+    if(fdf::Entry* e = fdf::Entry::ParseBuffer("category{ name = 'test' }"))
     {
-        size_t count = e->GetTotalChildCount_EXPENSIVE();
-        std::string temp;
-        //e->ForEach_AllChildren_EXPENSIVE([&temp](fdf::Entry& myEntry){std::print("name: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.DataToView(temp));});
-        /*for(const fdf::Entry* entry : e->GetChildrenUnsafe())
+        (void)e->ParseCombineBuffer("pi = 3.14");
+        (void)e->ParseCombineBuffer("pi = 3.2");
+        e->ForEach<fdf::ForEachFlags::Recursive | fdf::ForEachFlags::IncludeSelf>([&temp](fdf::Entry& myEntry)
         {
-            std::print("name: {}   -   data: {}\n", entry->GetIdentifier(), entry->DataToView(temp));
-        }*/
+            std::print("name: {}   -   depth: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.GetDepth(), myEntry.DataToView(temp));
+        });
+        std::puts("\n\n");
+        
+        if(fdf::Entry* ee = fdf::Entry::ParseBuffer("pi = 3.3"))
+        {
+            if(e->Combine(ee))
+            {
+                e->ForEach<fdf::ForEachFlags::Recursive | fdf::ForEachFlags::IncludeSelf>([&temp](fdf::Entry& myEntry)
+                {
+                    std::print("name: {}   -   depth: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.GetDepth(), myEntry.DataToView(temp));
+                });
+                std::puts("\n\n");
+            }
+            else
+                fdf::Entry::Destroy(ee);
+        }
+        fdf::Entry::Destroy(e);
+    }
+    
+    //TODO implement SetValue() functions
+    //TODO implement creating new entries
+    //TODO try to recover as much as possible when it comes to failures, but emit a warning for each failure
+    
+    if(fdf::Entry* e = fdf::Entry::ParseFile(FDF_ROOT_DIRECTORY "/designs/Design_5.txt"))
+    {
+        /*e->ForEach<fdf::ForEachFlags::Recursive | fdf::ForEachFlags::IncludeSelf | fdf::ForEachFlags::Group>([&temp](fdf::Entry& myEntry)
+        {
+            std::print("name: {}   -   depth: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.GetDepth(), myEntry.DataToView(temp));
+        });*/
+        [[maybe_unused]] auto* id = e->GetDirectChild("id");
+        [[maybe_unused]] size_t count = e->GetTotalChildCount_EXPENSIVE();
         std::cout << "comment: " << e->GetComment().data() << '\n';
         temp.clear();
+        e->SetIdentifier("TestTest");
         fdf::Entry::WriteBuffer(*e, temp);
-        fdf::Entry::Destroy(*e);
+        fdf::Entry::Destroy(e);
     }
-    std::puts("Hello World!");
+    std::puts("\n\n");
 }

@@ -2,21 +2,25 @@ cmake_minimum_required(VERSION 3.28.3...3.31)
 
 
 if(PROJECT_IS_TOP_LEVEL)
-    set(CMAKE_CXX_STANDARD 23)
-    set(CMAKE_CXX_STANDARD_REQUIRED ON)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 
-option(FDF_USE_CPP_MODULES "Enable C++ modules" OFF)
-option(FDF_NO_COMMENTS     "Disable comment processing" OFF)
+option(FDF_USE_CPP_MODULES                 "Enable C++ modules" OFF)
+option(FDF_NO_COMMENTS                     "Disable comment processing" OFF)
+option(FDF_EXTENDED_NO_COMMENT_IDENTIFIERS "Use extended identifier size limit when comments are disabled (otherwise keep standard limit)" OFF)
 
 
 project(fdf VERSION 0.1.0 LANGUAGES CXX)
 if(FDF_USE_CPP_MODULES)
     add_library(fdf STATIC)
-    target_compile_features(fdf PUBLIC cxx_std_23)
+    
+    if(MSVC)
+        target_compile_options(fdf PUBLIC /std:c++latest)
+    else()
+        target_compile_features(fdf PUBLIC cxx_std_26)
+    endif()
+
     target_include_directories(fdf PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_sources(fdf
         PRIVATE
@@ -28,6 +32,7 @@ if(FDF_USE_CPP_MODULES)
     )
     target_compile_definitions(fdf PUBLIC FDF_USE_CPP_MODULES=true)
     target_compile_definitions(fdf PUBLIC FDF_NO_COMMENTS=$<IF:$<BOOL:${FDF_NO_COMMENTS}>,true,false>)
+    target_compile_definitions(fdf PUBLIC FDF_EXTENDED_NO_COMMENT_IDENTIFIERS=$<IF:$<BOOL:${FDF_EXTENDED_NO_COMMENT_IDENTIFIERS}>,true,false>)
 
     target_compile_definitions(fdf PUBLIC FDF_ROOT_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_definitions(fdf PUBLIC FDF_TEST_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/tests")
@@ -38,6 +43,7 @@ else()
 
     target_compile_definitions(fdf INTERFACE FDF_USE_CPP_MODULES=false)
     target_compile_definitions(fdf INTERFACE FDF_NO_COMMENTS=$<IF:$<BOOL:${FDF_NO_COMMENTS}>,true,false>)
+    target_compile_definitions(fdf INTERFACE FDF_EXTENDED_NO_COMMENT_IDENTIFIERS=$<IF:$<BOOL:${FDF_EXTENDED_NO_COMMENT_IDENTIFIERS}>,true,false>)
 
     target_compile_definitions(fdf INTERFACE FDF_ROOT_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_definitions(fdf INTERFACE FDF_TEST_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/tests")
