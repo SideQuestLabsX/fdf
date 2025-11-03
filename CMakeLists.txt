@@ -16,6 +16,7 @@ if(FDF_USE_CPP_MODULES)
     add_library(fdf STATIC)
     
     if(MSVC)
+        target_compile_features(fdf PUBLIC cxx_std_23)
         target_compile_options(fdf PUBLIC /std:c++latest)
     else()
         target_compile_features(fdf PUBLIC cxx_std_26)
@@ -25,7 +26,7 @@ if(FDF_USE_CPP_MODULES)
     target_sources(fdf
         PRIVATE
             include/fdf.h
-        PRIVATE
+        PUBLIC
             FILE_SET my_modules
             TYPE CXX_MODULES
             FILES src/fdf.ixx

@@ -1,5 +1,6 @@
 
 module;
+#include <cassert>
 export module fdf;
 import std;
 import std.compat;

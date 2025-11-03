@@ -160,9 +160,9 @@ namespace fdf::detail
             e->ForEach<ForEachFlags::Recursive | ForEachFlags::Group>([&](const Entry& entry)
             {
             #if !FDF_NO_COMMENTS
-                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}--Comment={}", "", 4 * entry.depth, ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.GetFullIdentifier_EXPENSIVE(), entry.DataToView(temp), entry.comment));
+                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}--Comment={}", "", 4 * entry.depth, ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.GetFullIdentifier(), entry.DataToView(temp), entry.comment));
             #else
-                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}", "", 4 * entry.depth, ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.GetFullIdentifier_EXPENSIVE(), entry.DataToView(temp)));
+                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}", "", 4 * entry.depth, ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.GetFullIdentifier(), entry.DataToView(temp)));
             #endif
                 buffer.push_back('\n');
             });
@@ -189,7 +189,7 @@ namespace fdf::detail
                 std::print("[{:02}/{:02}] {:<{}}", i + 1, filesToTest.size(), directories.inputFile, longestFilename);
 
                 auto startTime = std::chrono::high_resolution_clock::now();
-                Entry* e = Entry::ParseFile(std::filesystem::path(directories.inputFile));
+                UniqueEntryPtr e = Entry::ParseFile(std::filesystem::path(directories.inputFile));
                 auto endTime = std::chrono::high_resolution_clock::now();
                 auto duration = duration_cast<std::chrono::nanoseconds>(endTime - startTime);
 
@@ -204,11 +204,10 @@ namespace fdf::detail
                 std::println();
                 
                 PrintAllTokens(directories.inputFile, directories.tokenizedFile);
-                PrintAllEntries(e, directories.entriesFile);
-                PrintFile(e, directories.outputFile);
+                PrintAllEntries(e.get(), directories.entriesFile);
+                PrintFile(e.get(), directories.outputFile);
 
                 bResult = bResult && e;
-                Entry::Destroy(e);
             }
 
             return bResult;
@@ -221,7 +220,7 @@ namespace fdf::detail
         // TODO: Maybe automate ReadTest so we don't need to implement each Entry by hand? (and manually adjust formatting (currently 24))
         static bool ReadTest()
         {
-            Entry* e = Entry::ParseFile(std::filesystem::path(filesToTest[0].inputFile));
+            UniqueEntryPtr e = Entry::ParseFile(std::filesystem::path(filesToTest[0].inputFile));
             if(!e)
             {
                 std::puts("[ERROR]: Failed to parse the design file... Should never happen unless initial parse failed too!");
@@ -233,10 +232,10 @@ namespace fdf::detail
 
 
             {
-                std::println("          Entry Count: {:>3} (should be 135) (update when editing design file)", e->GetTotalChildCount_EXPENSIVE());
+                std::println("          Entry Count: {:>3} (should be 135) (update when editing design file)", e->GetChildCountRecursive());
                 std::println("Top Level Entry Count: {:>3} (should be  56) (update when editing design file)", e->GetChildCount());
 
-                if(e->GetTotalChildCount_EXPENSIVE() != 135 || e->GetChildCount() != 56)
+                if(e->GetChildCountRecursive() != 135 || e->GetChildCount() != 56)
                 {
                     bResult = false;
                     std::puts("[ERROR]: Invalid 'Entry Count' or 'Top Level Entry Count'");
@@ -474,7 +473,6 @@ namespace fdf::detail
             }
 
             
-            Entry::Destroy(e);
             return bResult;
         }
 
@@ -535,12 +533,13 @@ int main()
 }
 
 
-/*template<typename T>
+template<typename T>
 constexpr T ExtractValue(std::string_view buffer)
 {
-    fdf::Entry* eRoot = fdf::Entry::ParseBuffer(buffer);
-    auto* eValue = eRoot->GetDirectChild("value");
     T value = 0;
+    
+    fdf::UniqueEntryPtr eRoot = fdf::Entry::ParseBuffer(buffer);
+    auto* eValue = eRoot->GetDirectChild("value");
 
     if(eValue)
     {
@@ -548,19 +547,19 @@ constexpr T ExtractValue(std::string_view buffer)
         if(!span.empty())
             value = span[0];
     }
-    fdf::Entry::Destroy(eRoot);
+    
     return value;
 }
 
 
 //[[maybe_unused]] constexpr auto value0 = ExtractValue<int64_t>("value = 25x50");
 //[[maybe_unused]] constexpr auto value1 = ExtractValue<bool>("value = truexfalsextrue");
-int main()
+/*int main()
 {
     std::string temp;
     temp.reserve(1024);
     
-    if(fdf::Entry* e = fdf::Entry::ParseBuffer("category{ name = 'test' }"))
+    if(fdf::UniqueEntryPtr e = fdf::Entry::ParseBuffer("category{ name = 'test' }"))
     {
         (void)e->ParseCombineBuffer("pi = 3.14");
         (void)e->ParseCombineBuffer("pi = 3.2");
@@ -570,7 +569,7 @@ int main()
         });
         std::puts("\n\n");
         
-        if(fdf::Entry* ee = fdf::Entry::ParseBuffer("pi = 3.3"))
+        if(fdf::UniqueEntryPtr ee = fdf::Entry::ParseBuffer("pi = 3.3"))
         {
             if(e->Combine(ee))
             {
@@ -580,29 +579,25 @@ int main()
                 });
                 std::puts("\n\n");
             }
-            else
-                fdf::Entry::Destroy(ee);
         }
-        fdf::Entry::Destroy(e);
     }
     
     //TODO implement SetValue() functions
     //TODO implement creating new entries
     //TODO try to recover as much as possible when it comes to failures, but emit a warning for each failure
     
-    if(fdf::Entry* e = fdf::Entry::ParseFile(FDF_ROOT_DIRECTORY "/designs/Design_5.txt"))
+    if(fdf::UniqueEntryPtr e = fdf::Entry::ParseFile(FDF_ROOT_DIRECTORY "/designs/Design_5.txt"))
     {
         e->ForEach<fdf::ForEachFlags::Recursive | fdf::ForEachFlags::IncludeSelf | fdf::ForEachFlags::Group>([&temp](fdf::Entry& myEntry)
         {
             std::print("name: {}   -   depth: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.GetDepth(), myEntry.DataToView(temp));
         });
         [[maybe_unused]] auto* id = e->GetDirectChild("id");
-        [[maybe_unused]] size_t count = e->GetTotalChildCount_EXPENSIVE();
-        std::cout << "comment: " << e->GetComment().data() << '\n';
+        [[maybe_unused]] size_t count = e->GetChildCountRecursive();
+        std::cout << "comment: " << e->GetComment() << '\n';
         temp.clear();
         e->SetIdentifier("TestTest");
         fdf::Entry::WriteBuffer(*e, temp);
-        fdf::Entry::Destroy(e);
     }
     std::puts("\n\n");
 }*/

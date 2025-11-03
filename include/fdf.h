@@ -3,6 +3,7 @@
 
 #if !FDF_USE_CPP_MODULES
     #include <algorithm>
+    #include <cassert>
     #include <cctype>
     #include <cstdint>
     #include <filesystem>
@@ -140,6 +141,8 @@ namespace fdf::detail
     constexpr bool IsValidDiagnosticCallback = std::is_invocable_v<Callable, DiagnosticSeverity, DiagnosticType, std::string_view>;
 
     constexpr size_t MAX_IDENTIFIER_LENGTH = FDF_NO_COMMENTS && FDF_EXTENDED_NO_COMMENT_IDENTIFIERS? 40 : 32;
+    
+    struct EntryDeleter { static constexpr void operator()(Entry* e) noexcept; };
 }
 
 
@@ -159,15 +162,16 @@ FDF_EXPORT namespace fdf
             All = Recursive | Group | IncludeSelf
         };
 
-        constexpr bool IsSet(std::underlying_type_t<Flag> flags, std::underlying_type_t<Flag> checkFlag)     { return (flags & checkFlag) != Flag::None; }
-        constexpr bool IsNotSet(std::underlying_type_t<Flag> flags, std::underlying_type_t<Flag> checkFlag)  { return (flags & checkFlag) == Flag::None; }
-        constexpr bool IsValidForEachFlag(std::underlying_type_t<Flag> flags)                                { return (flags & ~Flag::All) == 0; }
+        constexpr bool IsSet(std::underlying_type_t<Flag> flags, std::underlying_type_t<Flag> checkFlag)    noexcept  { return (flags & checkFlag) != Flag::None; }
+        constexpr bool IsNotSet(std::underlying_type_t<Flag> flags, std::underlying_type_t<Flag> checkFlag) noexcept  { return (flags & checkFlag) == Flag::None; }
+        constexpr bool IsValidForEachFlag(std::underlying_type_t<Flag> flags)                               noexcept  { return (flags & ~Flag::All) == 0; }
     }
 
 
 
 
 
+    using UniqueEntryPtr = std::unique_ptr<Entry, detail::EntryDeleter>;
     class Entry
     {
     public:
@@ -179,7 +183,7 @@ FDF_EXPORT namespace fdf
         
     private:
         constexpr  Entry() noexcept = default;
-        constexpr ~Entry();
+        constexpr ~Entry() noexcept;
 
         friend struct detail::Test;
 
@@ -213,8 +217,10 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr const T* GetDataAs() const noexcept  { return static_cast<const T*>(data); }
         
         
-        [[nodiscard]]       CommentControlBlock* GetCommentControlBlock()       noexcept  { return static_cast<      CommentControlBlock*>(comment); }
-        [[nodiscard]] const CommentControlBlock* GetCommentControlBlock() const noexcept  { return static_cast<const CommentControlBlock*>(comment); }
+        [[nodiscard]] constexpr       CommentControlBlock* GetCommentControlBlock()       noexcept  { return static_cast<      CommentControlBlock*>(comment); }
+        [[nodiscard]] constexpr const CommentControlBlock* GetCommentControlBlock() const noexcept  { return static_cast<const CommentControlBlock*>(comment); }
+        [[nodiscard]] constexpr       char*                GetCommentData()               noexcept  { return static_cast<      char*>(comment) + sizeof(CommentControlBlock); }
+        [[nodiscard]] constexpr const char*                GetCommentData()         const noexcept  { return static_cast<const char*>(comment) + sizeof(CommentControlBlock); }
 
         [[nodiscard]] constexpr       std::string* GetCommentString()       noexcept  { return static_cast<      std::string*>(data); }
         [[nodiscard]] constexpr const std::string* GetCommentString() const noexcept  { return static_cast<const std::string*>(data); }
@@ -232,7 +238,7 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr Entry*   GetParent()     const noexcept  { return parent; }
 
         [[nodiscard]] constexpr std::string_view GetIdentifier() const noexcept  { return {identifier, identifierSize}; }
-        [[nodiscard]] constexpr std::string GetFullIdentifier_EXPENSIVE() const noexcept
+        [[nodiscard]] constexpr std::string GetFullIdentifier() const noexcept
         {
             const Entry* cur = parent;
             std::string temp = std::string(GetIdentifier());
@@ -255,87 +261,93 @@ FDF_EXPORT namespace fdf
                 else
                 {
                     if(comment)
-                        return {reinterpret_cast<const char*>(GetCommentControlBlock() + 1), GetCommentControlBlock()->size};
+                        return {GetCommentData(), GetCommentControlBlock()->size};
                 }
             #endif
                 return {};
         }
 
     public:
-        constexpr void SetIdentifier(std::string_view newIdentifier, bool bClampIfLongerThanMax = true);
-        constexpr void SetComment(std::string_view newComment);
-        constexpr void ReleaseData();
-        constexpr void ReleaseComment();
+        constexpr bool SetIdentifier(std::string_view newIdentifier) noexcept;
+        constexpr void SetComment(std::string_view newComment) noexcept;
+        constexpr void ReleaseData() noexcept;
+        constexpr void ReleaseComment() noexcept;
+        constexpr void ReleaseEverything() noexcept;
 
+    private:
+        [[nodiscard]] constexpr Entry* Emplace() noexcept;
     public:
-        [[nodiscard]] constexpr bool AddChild(Entry& e, bool bForceEvenIfHasParent = false);
-        [[nodiscard]] constexpr bool RemoveChild(Entry& e);
-        [[nodiscard]] constexpr bool RemoveChild(std::string_view _identifier);
-        [[nodiscard]] constexpr bool RemoveChild(uint32_t index);
-        [[nodiscard]] constexpr bool ClearChildren();
+        [[nodiscard]] constexpr Entry* AddChild(UniqueEntryPtr& e) noexcept;
+        [[nodiscard]] constexpr bool   RemoveChild(Entry& e) noexcept;
+        [[nodiscard]] constexpr bool   RemoveChild(std::string_view _identifier) noexcept;
+        [[nodiscard]] constexpr bool   RemoveChild(uint32_t index) noexcept;
+        [[nodiscard]] constexpr bool   ClearChildren() noexcept;
         
-        [[nodiscard]] constexpr Entry* OrphanChild(Entry& e);
-        [[nodiscard]] constexpr Entry* OrphanChild(std::string_view _identifier);
-        [[nodiscard]] constexpr Entry* OrphanChild(uint32_t index);
-        [[nodiscard]] constexpr std::span<Entry*> OrphanChildren();
+        [[nodiscard]] constexpr UniqueEntryPtr OrphanChild(Entry& e) noexcept;
+        [[nodiscard]] constexpr UniqueEntryPtr OrphanChild(std::string_view _identifier) noexcept;
+        [[nodiscard]] constexpr UniqueEntryPtr OrphanChild(uint32_t index) noexcept;
+        [[nodiscard]] constexpr std::vector<UniqueEntryPtr> OrphanChildren() noexcept;
+        
+    private:
+        [[nodiscard]] constexpr Entry* OrphanChild_INTERNAL(Entry& e) noexcept;
+        [[nodiscard]] constexpr Entry* OrphanChild_INTERNAL(std::string_view _identifier) noexcept;
+        [[nodiscard]] constexpr Entry* OrphanChild_INTERNAL(uint32_t index) noexcept;
+        [[nodiscard]] constexpr std::span<Entry*> OrphanChildren_INTERNAL() noexcept;
 
     public:
         template<detail::IsValidIDType T, detail::IsValidIDType... Args>
-        [[nodiscard]] constexpr       Entry* GetChild(T&& param, Args&&... args);
+        [[nodiscard]] constexpr       Entry* GetChild(T&& param, Args&&... args) noexcept;
         template<detail::IsValidIDType T, detail::IsValidIDType... Args>
-        [[nodiscard]] constexpr const Entry* GetChild(T&& param, Args&&... args) const;
+        [[nodiscard]] constexpr const Entry* GetChild(T&& param, Args&&... args) const noexcept;
 
-        [[nodiscard]] constexpr       Entry* GetDirectChild(std::string_view _identifier);
-        [[nodiscard]] constexpr const Entry* GetDirectChild(std::string_view _identifier) const;
-        [[nodiscard]] constexpr       Entry* GetDirectChild(uint32_t index);
-        [[nodiscard]] constexpr const Entry* GetDirectChild(uint32_t index) const;
+        [[nodiscard]] constexpr       Entry* GetDirectChild(std::string_view _identifier) noexcept;
+        [[nodiscard]] constexpr const Entry* GetDirectChild(std::string_view _identifier) const noexcept;
+        [[nodiscard]] constexpr       Entry* GetDirectChild(uint32_t index) noexcept;
+        [[nodiscard]] constexpr const Entry* GetDirectChild(uint32_t index) const noexcept;
         
-        [[nodiscard]] constexpr std::span<Entry*>       GetChildren();
-        [[nodiscard]] constexpr std::span<const Entry*> GetChildren() const;
-        [[nodiscard]] constexpr std::span<Entry*>       GetChildrenUnsafe();
-        [[nodiscard]] constexpr std::span<const Entry*> GetChildrenUnsafe() const;
+        [[nodiscard]] constexpr std::span<Entry*>         GetChildren() noexcept;
+        [[nodiscard]] constexpr std::span<const Entry*>   GetChildren() const noexcept;
+        [[nodiscard]] constexpr std::vector<Entry*>       GetChildrenRecursive() noexcept;
+        [[nodiscard]] constexpr std::vector<const Entry*> GetChildrenRecursive() const noexcept;
+        [[nodiscard]] constexpr size_t                    GetChildCountRecursive() const noexcept;
+    
+    private:
+        [[nodiscard]] constexpr std::span<Entry*>         GetChildren_INTERNAL() noexcept;
+        [[nodiscard]] constexpr std::span<const Entry*>   GetChildren_INTERNAL() const noexcept;
 
-        [[nodiscard]] constexpr size_t GetTotalChildCount_EXPENSIVE() const noexcept;
-        [[nodiscard]] constexpr std::vector<Entry*>       GetAllChildren_VERY_EXPENSIVE();
-        [[nodiscard]] constexpr std::vector<const Entry*> GetAllChildren_VERY_EXPENSIVE() const;
 
+    public:
         template<std::underlying_type_t<ForEachFlags::Flag> FLAGS = ForEachFlags::None, typename Callable> requires(std::is_invocable_v<Callable, Entry&>)
-        constexpr void ForEach(Callable callback);
+        constexpr void ForEach(Callable callback) noexcept(std::is_nothrow_invocable_v<Callable, Entry&>);
         template<std::underlying_type_t<ForEachFlags::Flag> FLAGS = ForEachFlags::None, typename Callable> requires(std::is_invocable_v<Callable, const Entry&>)
-        constexpr void ForEach(Callable callback) const;
+        constexpr void ForEach(Callable callback) const noexcept(std::is_nothrow_invocable_v<Callable, const Entry&>);
 
     public:
         template<typename T>
-        [[nodiscard]] constexpr auto GetValue()             { static_assert(false, "Invalid type"); }
+        [[nodiscard]] constexpr auto GetValue()       noexcept       { static_assert(false, "Invalid type"); }
         template<typename T>
-        [[nodiscard]] constexpr auto GetValue() const       { static_assert(false, "Invalid type"); }
-        template<typename T>
-        [[nodiscard]] constexpr auto GetValueUnsafe()       { static_assert(false, "Invalid type"); }
-        template<typename T>
-        [[nodiscard]] constexpr auto GetValueUnsafe() const { static_assert(false, "Invalid type"); }
+        [[nodiscard]] constexpr auto GetValue() const noexcept       { static_assert(false, "Invalid type"); }
 
         template<Style STYLE = {}>
-        [[nodiscard]] constexpr std::string_view DataToView(std::string& temp) const;
+        [[nodiscard]] constexpr std::string_view DataToView(std::string& temp) const noexcept;
 
     public:
         template<auto DIAGNOSTIC_CALLBACK = nullptr>
         [[nodiscard]] bool ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty);
         template<auto DIAGNOSTIC_CALLBACK = nullptr>
-        [[nodiscard]] constexpr bool ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty);
-        [[nodiscard]] constexpr bool Combine(Entry* other, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty);
+        [[nodiscard]] constexpr bool ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty) noexcept;
+        [[nodiscard]] constexpr bool Combine(UniqueEntryPtr& other, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty) noexcept;
 
     public:
         template<auto DIAGNOSTIC_CALLBACK = nullptr>
-        [[nodiscard]] static Entry* ParseFile(const std::filesystem::path& filepath) noexcept;
+        [[nodiscard]] static UniqueEntryPtr ParseFile(const std::filesystem::path& filepath);
         template<auto DIAGNOSTIC_CALLBACK = nullptr>
-        [[nodiscard]] static constexpr Entry* ParseBuffer(std::string_view content) noexcept;
+        [[nodiscard]] static constexpr UniqueEntryPtr ParseBuffer(std::string_view content) noexcept;
         
         template<Style STYLE = {}>
-        [[nodiscard]] static bool WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists = true) noexcept;
+        [[nodiscard]] static bool WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists = true);
         template<Style STYLE = {}>
         static constexpr void WriteBuffer(const Entry& root, std::string& buffer) noexcept;
-        
-        static constexpr void Destroy(Entry* e) noexcept;
     };
 }
 
@@ -360,7 +372,7 @@ namespace fdf::detail
         constexpr size_t DATA_OVERHEAD_SIZE = sizeof(size_t) + sizeof(void*);
     #endif
 
-    constexpr size_t INITIAL_PARENT_DATA_SIZE = DATA_OVERHEAD_SIZE + 4 * sizeof(void*);
+    constexpr size_t INITIAL_PARENT_DATA_SIZE = DATA_OVERHEAD_SIZE + (4 * sizeof(void*));
 
 
     constexpr std::string_view KEYWORDS[] =
@@ -962,7 +974,7 @@ namespace fdf::detail
                 firstNonAlpha++;
 
             token.count = static_cast<uint32_t>(firstNonAlpha) - token.startPosition;
-            std::string_view view = ToView(token);
+            const std::string_view view = ToView(token);
 
             if(firstNonAlpha >= content.size()) // we reached eof before any space or any other token
             {
@@ -982,9 +994,9 @@ namespace fdf::detail
         {
             if(content[index] == '0' && index + 3 < content.size() && content[index + 1] == 'x')  // Hex
             {
-                size_t firstNonHex = content.find_first_not_of("0123456789abcdefABCDEF", index + 2);
-                size_t firstChar = content.find_first_of("abcdefABCDEF", index + 2);
-                size_t firstHash = content.find_first_of('#', index + 2);
+                const size_t firstNonHex = content.find_first_not_of("0123456789abcdefABCDEF", index + 2);
+                const size_t firstChar = content.find_first_of("abcdefABCDEF", index + 2);
+                const size_t firstHash = content.find_first_of('#', index + 2);
                 if(firstNonHex == firstHash && firstNonHex != std::string_view::npos) // First non-hex character is "#"
                 {
                     Token token = Token(TokenType::HexLiteral, index, static_cast<uint32_t>(firstNonHex) - index);
@@ -1120,7 +1132,7 @@ namespace fdf::detail
                 size_t dotCount = 0;
                 while(true)
                 {
-                    size_t previous = firstNonDigit;
+                    const size_t previous = firstNonDigit;
                     firstNonDigit = content.find_first_not_of("0123456789", firstNonDigit + 1);
 
                     if(firstNonDigit == std::string_view::npos) // we reached eof before any space or any other token
@@ -1130,7 +1142,7 @@ namespace fdf::detail
                         return token;
                     }
 
-                    if(previous + 1 == firstNonDigit && !(content[previous] == ',' && constexpr_isspace(content[firstNonDigit])) && !(content[previous] == 'x' && content[firstNonDigit] == '-'))
+                    if(previous + 1 == firstNonDigit && (content[previous] != ',' || !constexpr_isspace(content[firstNonDigit])) && (content[previous] != 'x' || content[firstNonDigit] != '-'))
                         return TokenType::Invalid;  // It must have number(s) in between
 
                     if(constexpr_isspace(content[firstNonDigit]) || content[firstNonDigit] == ',')
@@ -1197,7 +1209,7 @@ namespace fdf::detail
                 Token token = Token(TokenType::TimestampLiteral, index);
                 token.line = line;
                 token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
-                size_t firstNonDate = content.find_first_not_of("0123456789TZW-+:.", index);
+                const size_t firstNonDate = content.find_first_not_of("0123456789TZW-+:.", index);
                 if(firstNonDate == std::string_view::npos)
                 {
                     token.count = static_cast<uint32_t>(content.size()) - token.startPosition;
@@ -1222,7 +1234,7 @@ namespace fdf::detail
                 Token token = Token(TokenType::TimestampLiteral, index);
                 token.line = line;
                 token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
-                size_t firstNonDate = content.find_first_not_of("0123456789+:.", index);  // idk if it can include timezone ("+" sign)
+                const size_t firstNonDate = content.find_first_not_of("0123456789+:.", index);  // idk if it can include timezone ("+" sign)
                 if(firstNonDate == std::string_view::npos)
                 {
                     token.count = static_cast<uint32_t>(content.size()) - token.startPosition;
@@ -1265,17 +1277,17 @@ namespace fdf::detail
     struct Utils
     {
         template<typename... Args>
-        [[nodiscard]] static constexpr Entry* Create(Args&&... args);
-                      static constexpr void   Destroy(Entry* e);
+        [[nodiscard]] static constexpr UniqueEntryPtr Create(Args&&... args);
+                      static constexpr void           Destroy(Entry* e);
 
-        [[nodiscard]] static constexpr Entry* ParseBuffer(std::string_view content) noexcept;
-        [[nodiscard]] static constexpr bool   ParseVariable   (Tokenizer& tokenizer, Entry& parent   FDF_COMMENT_SWITCH(, Token comment));
-        [[nodiscard]] static constexpr bool   ParseSimpleValue(Tokenizer& tokenizer, Entry& entry    FDF_COMMENT_SWITCH(, Token comment));
-        [[nodiscard]] static constexpr bool   ParseArray      (Tokenizer& tokenizer, Entry& array    FDF_COMMENT_SWITCH(, Token comment));
-        [[nodiscard]] static constexpr bool   ParseMap        (Tokenizer& tokenizer, Entry& map      FDF_COMMENT_SWITCH(, Token comment));
+        [[nodiscard]] static constexpr UniqueEntryPtr ParseBuffer(std::string_view content) noexcept;
+        [[nodiscard]] static constexpr bool           ParseVariable   (Tokenizer& tokenizer, Entry& parent   FDF_COMMENT_SWITCH(, Token comment));
+        [[nodiscard]] static constexpr bool           ParseSimpleValue(Tokenizer& tokenizer, Entry& entry    FDF_COMMENT_SWITCH(, Token comment));
+        [[nodiscard]] static constexpr bool           ParseArray      (Tokenizer& tokenizer, Entry& array    FDF_COMMENT_SWITCH(, Token comment));
+        [[nodiscard]] static constexpr bool           ParseMap        (Tokenizer& tokenizer, Entry& map      FDF_COMMENT_SWITCH(, Token comment));
 
         template<Style STYLE>
-        static constexpr void WriteBuffer(const Entry& root, std::string& buffer, const bool bOverwrite = true) noexcept;
+        static constexpr void WriteBuffer(const Entry& root, std::string& buffer, bool bOverwrite = true) noexcept;
     };
 }
 
@@ -1344,39 +1356,36 @@ namespace fdf
     }
     
     
-    constexpr Entry::~Entry()
+    constexpr Entry::~Entry() noexcept
     {
         if(parent)
-            (void)parent->OrphanChild(*this);
+            (void)parent->OrphanChild_INTERNAL(*this);
         ReleaseData();
         ReleaseComment();
     }
     
     
-    constexpr void Entry::SetIdentifier(std::string_view newIdentifier, const bool bClampIfLongerThanMax)
+    constexpr bool Entry::SetIdentifier(std::string_view newIdentifier) noexcept
     {
         if(newIdentifier.size() > detail::MAX_IDENTIFIER_LENGTH)
-        {
-            if(bClampIfLongerThanMax)
-                identifierSize = detail::MAX_IDENTIFIER_LENGTH;
-            else
-                throw std::runtime_error(std::format("new identifier is too long for Entry::SetIdentifier\nLimit: {} - Provided: {} ({})", detail::MAX_IDENTIFIER_LENGTH, newIdentifier.size(), newIdentifier));
-        }
-        else
-            identifierSize = static_cast<uint8_t>(newIdentifier.size());
-        
+            return false;
+        identifierSize = static_cast<uint8_t>(newIdentifier.size());
         detail::constexpr_memcpy(identifier, newIdentifier.data(), identifierSize);
         identifier[identifierSize] = '\0';
+        return true;
     }
 
-    constexpr void Entry::SetComment(std::string_view newComment)
+    constexpr void Entry::SetComment(std::string_view newComment) noexcept
     {
         if consteval
         {
             if(comment)
                 *GetCommentString() = newComment;
             else
-                comment = new std::string(newComment);
+            {
+                comment = new (std::nothrow) std::string(newComment);
+                assert(comment);
+            }
         }
         else
         {
@@ -1401,12 +1410,12 @@ namespace fdf
                 GetCommentControlBlock()->size = 0;
             }
 
-            detail::constexpr_memcpy(reinterpret_cast<char*>(GetCommentControlBlock() + 1), newComment.data(), newComment.size());
-            std::launder(reinterpret_cast<char*>(GetCommentControlBlock() + 1))[newComment.size()] = '\0';
+            detail::constexpr_memcpy(GetCommentData(), newComment.data(), newComment.size());
+            GetCommentData()[newComment.size()] = '\0';
         }
     }
 
-    constexpr void Entry::ReleaseData()
+    constexpr void Entry::ReleaseData() noexcept
     {
         switch(type)
         {
@@ -1476,8 +1485,9 @@ namespace fdf
         type = Type::Null;
     }
 
-    constexpr void Entry::ReleaseComment()
+    constexpr void Entry::ReleaseComment() noexcept
     {
+    #if !FDF_NO_COMMENTS
         if consteval
         {
             if(comment)
@@ -1490,71 +1500,67 @@ namespace fdf
         }
 
         comment = nullptr;
+    #endif
+    }
+    
+    constexpr void Entry::ReleaseEverything() noexcept
+    {
+        ReleaseData();
+        ReleaseComment();
     }
 
 
 
     
-    constexpr bool Entry::AddChild(Entry& e, bool bForceEvenIfHasParent)
+    constexpr Entry* Entry::Emplace() noexcept
     {
-        if(!IsContainer())
-            return false;
+        auto e = detail::Utils<>::Create();
+        return AddChild(e);
+    }
+    
+    constexpr Entry* Entry::AddChild(UniqueEntryPtr& e) noexcept
+    {
+        if(!IsContainer() || e->parent || e->depth == static_cast<uint8_t>(-1))
+            return nullptr;
         
-        if(e.depth == static_cast<uint8_t>(-1))
-        {
-            std::span<Entry*> children = e.OrphanChildren();
-            for(Entry* child : children)
-            {
-                if(!AddChild(*child))
-                    throw std::runtime_error("This shouldn't ever happen! (Entry::AddChild())");
-            }
-            Destroy(&e);
-            return true;
-        }
-        
-        if(e.parent)
-        {
-            if(!bForceEvenIfHasParent)
-                return false;
-            if(!e.parent->OrphanChild(e))
-                throw std::runtime_error("Entry::AddChild - Failed to orphan child from its parent");
-        }
-        e.parent = this;
+        e->parent = this;
         
         //TODO: In this case, we always prefer new one silently. We should allow customizing that behaviour
         if(type == Type::Map)
         {
-            if(Entry* found = GetDirectChild(e.GetIdentifier()))
+            if(Entry* found = GetDirectChild(e->GetIdentifier()))
             {
-                std::swap(found->type, e.type);
-                std::swap(found->size, e.size);
-                std::swap(found->data, e.data);
+                std::swap(found->type, e->type);
+                std::swap(found->size, e->size);
+                std::swap(found->data, e->data);
             #if !FDF_NO_COMMENTS
-                std::swap(found->comment, e.comment);
+                std::swap(found->comment, e->comment);
             #endif
-                Destroy(&e);
-                return true;
+                e.reset();
+                return found;
             }
         }
         
-        if(e.depth != depth + 1)
+        if(e->depth != depth + 1)
         {
-            if(e.IsContainer())
+            if(e->IsContainer())
             {
-                e.ForEach<ForEachFlags::Recursive>([diff = e.depth - (depth + 1)](Entry& entry)
+                e->ForEach<ForEachFlags::Recursive>([diff = e->depth - (depth + 1)](Entry& entry)
                 {
                     entry.depth = static_cast<uint8_t>(entry.depth + diff);
                 });
             }
-            e.depth = depth + 1;
+            e->depth = depth + 1;
         }
 
         if consteval
         {
             if(!data)
-                data = new std::vector<Entry*>();
-            GetDataVector<Entry*>()->push_back(&e);
+                data = new (std::nothrow) std::vector<Entry*>();
+            assert(data);
+            GetDataVector<Entry*>()->push_back(e.get());
             size = static_cast<uint32_t>(GetDataVector<Entry*>()->size());
+            return e.release();
         }
         else
         {
@@ -1564,31 +1570,30 @@ namespace fdf
             
                 if(static_cast<size_t>(size) >= capacity) //TODO: convert >= to == and add an assert as a sanity check
                 {
-                    void* newBuffer = detail::GlobalAllocator::Allocate(2 * capacity * sizeof(void*) + sizeof(size_t));
+                    void* newBuffer = detail::GlobalAllocator::Allocate((2 * capacity * sizeof(void*)) + sizeof(size_t));
                     *static_cast<size_t*>(newBuffer) = 2 * capacity;
 
                     for(size_t i = 0; i < size; i++)
                         (static_cast<Entry**>(newBuffer) + 1)[i] = (static_cast<Entry**>(data) + 1)[i];
 
-                    (void)detail::GlobalAllocator::Deallocate(data, capacity * sizeof(void*) + sizeof(size_t));
+                    (void)detail::GlobalAllocator::Deallocate(data, (capacity * sizeof(void*)) + sizeof(size_t));
                     data = newBuffer;
                 }
             }
             else
             {
-                data = detail::GlobalAllocator::Allocate(4 * sizeof(void*) + sizeof(size_t));
+                data = detail::GlobalAllocator::Allocate((4 * sizeof(void*)) + sizeof(size_t));
                 *static_cast<size_t*>(data) = 4;
                 size = 0;  // Just in case
             }
 
-            (static_cast<Entry**>(data) + 1)[size++] = &e;
+            (static_cast<Entry**>(data) + 1)[size++] = e.get();
+            return e.release();
         }
-
-        return true;
     }
 
     // ReSharper disable once CppParameterMayBeConstPtrOrRef (technically we don't modify provided object, but it's modified through another mechanism)
-    constexpr bool Entry::RemoveChild(Entry& e)
+    constexpr bool Entry::RemoveChild(Entry& e) noexcept
     {
         if(size == 0 || !IsContainer())
             return false;
@@ -1609,7 +1614,7 @@ namespace fdf
         return false;
     }
 
-    constexpr bool Entry::RemoveChild(std::string_view _identifier)
+    constexpr bool Entry::RemoveChild(std::string_view _identifier) noexcept
     {
         if(size == 0 || type != Type::Map)
             return false;
@@ -1630,7 +1635,7 @@ namespace fdf
         return false;
     }
 
-    constexpr bool Entry::RemoveChild(uint32_t index)
+    constexpr bool Entry::RemoveChild(uint32_t index) noexcept
     {
         if(index >= size || !IsContainer())
             return false;
@@ -1652,7 +1657,7 @@ namespace fdf
         return true;
     }
     
-    constexpr bool Entry::ClearChildren()
+    constexpr bool Entry::ClearChildren() noexcept
     {
         if(!IsContainer() || !data)
             return false;
@@ -1683,8 +1688,35 @@ namespace fdf
 
 
     
+    constexpr UniqueEntryPtr Entry::OrphanChild(Entry& e) noexcept
+    {
+        return UniqueEntryPtr(OrphanChild_INTERNAL(e));
+    }
+
+    constexpr UniqueEntryPtr Entry::OrphanChild(std::string_view _identifier) noexcept
+    {
+        return UniqueEntryPtr(OrphanChild_INTERNAL(_identifier));
+    }
+
+    constexpr UniqueEntryPtr Entry::OrphanChild(uint32_t index) noexcept
+    {
+        return UniqueEntryPtr(OrphanChild_INTERNAL(index));
+    }
+    
+    constexpr std::vector<UniqueEntryPtr> Entry::OrphanChildren() noexcept
+    {
+        std::vector<UniqueEntryPtr> vec;
+        vec.reserve(size);
+        for(Entry* e : OrphanChildren_INTERNAL())
+            vec.emplace_back(e);
+        return vec;
+    }
+    
+    
+    
+    
     // ReSharper disable once CppParameterMayBeConstPtrOrRef (technically we don't modify provided object, but it's modified through another mechanism)
-    constexpr Entry* Entry::OrphanChild(Entry& e)
+    constexpr Entry* Entry::OrphanChild_INTERNAL(Entry& e) noexcept
     {
         if(size == 0 || !IsContainer())
             return nullptr;
@@ -1694,18 +1726,18 @@ namespace fdf
             if consteval
             {
                 if((*GetDataVector<Entry*>())[i] == &e)
-                    return OrphanChild(i);
+                    return OrphanChild_INTERNAL(i);
             }
             else
             {
                 if((static_cast<Entry**>(data) + 1)[i] == &e)
-                    return OrphanChild(i);
+                    return OrphanChild_INTERNAL(i);
             }
         }
         return nullptr;
     }
-
-    constexpr Entry* Entry::OrphanChild(std::string_view _identifier)
+    
+    constexpr Entry* Entry::OrphanChild_INTERNAL(std::string_view _identifier) noexcept
     {
         if(size == 0 || type != Type::Map)
             return nullptr;
@@ -1715,18 +1747,18 @@ namespace fdf
             if consteval
             {
                 if((*GetDataVector<Entry*>())[i]->GetIdentifier() == _identifier)
-                    return OrphanChild(i);
+                    return OrphanChild_INTERNAL(i);
             }
             else
             {
                 if((static_cast<Entry**>(data) + 1)[i]->GetIdentifier() == _identifier)
-                    return OrphanChild(i);
+                    return OrphanChild_INTERNAL(i);
             }
         }
         return nullptr;
     }
-
-    constexpr Entry* Entry::OrphanChild(uint32_t index)
+    
+    constexpr Entry* Entry::OrphanChild_INTERNAL(uint32_t index) noexcept
     {
         if(index >= size || !IsContainer())
             return nullptr;
@@ -1750,7 +1782,7 @@ namespace fdf
         return original;
     }
     
-    constexpr std::span<Entry*> Entry::OrphanChildren()
+    constexpr std::span<Entry*> Entry::OrphanChildren_INTERNAL() noexcept
     {
         if(!IsContainer() || !data)
             return {};
@@ -1758,6 +1790,7 @@ namespace fdf
         const auto children = GetChildren();
         for(Entry* e : children)
             e->parent = nullptr;
+        
         size = 0;
         return children;
     }
@@ -1766,13 +1799,13 @@ namespace fdf
 
 
     template<detail::IsValidIDType T, detail::IsValidIDType ... Args>
-    constexpr Entry* Entry::GetChild(T&& param, Args&&... args)
+    constexpr Entry* Entry::GetChild(T&& param, Args&&... args) noexcept
     {
         return const_cast<Entry*>(static_cast<const Entry*>(this)->GetChild(std::forward<T>(param), std::forward<Args>(args)...));
     }
 
     template<detail::IsValidIDType T, detail::IsValidIDType ... Args>
-    constexpr const Entry* Entry::GetChild(T&& param, Args&&... args) const
+    constexpr const Entry* Entry::GetChild(T&& param, Args&&... args) const noexcept
     {
         if(size == 0 || !IsContainer())
             return nullptr;
@@ -1817,11 +1850,11 @@ namespace fdf
 
 
     
-    constexpr Entry* Entry::GetDirectChild(std::string_view _identifier)
+    constexpr Entry* Entry::GetDirectChild(std::string_view _identifier) noexcept
     {
         return const_cast<Entry*>(static_cast<const Entry*>(this)->GetDirectChild(_identifier));
     }
-    constexpr const Entry* Entry::GetDirectChild(std::string_view _identifier) const
+    constexpr const Entry* Entry::GetDirectChild(std::string_view _identifier) const noexcept
     {
         if(size == 0 || type != Type::Map)
             return nullptr;
@@ -1843,11 +1876,11 @@ namespace fdf
         return nullptr;
     }
     
-    constexpr Entry* Entry::GetDirectChild(uint32_t index)
+    constexpr Entry* Entry::GetDirectChild(uint32_t index) noexcept
     {
         return const_cast<Entry*>(static_cast<const Entry*>(this)->GetDirectChild(index));
     }
-    constexpr const Entry* Entry::GetDirectChild(uint32_t index) const
+    constexpr const Entry* Entry::GetDirectChild(uint32_t index) const noexcept
     {
         if(index >= size || !IsContainer())
             return nullptr;
@@ -1865,7 +1898,7 @@ namespace fdf
     
     
     
-    constexpr std::span<Entry*> Entry::GetChildren()
+    constexpr std::span<Entry*> Entry::GetChildren() noexcept
     {
         if(size == 0 || !IsContainer())
             return {};
@@ -1876,7 +1909,7 @@ namespace fdf
         }
         return {(static_cast<Entry**>(data) + 1), size};
     }
-    constexpr std::span<const Entry*> Entry::GetChildren() const
+    constexpr std::span<const Entry*> Entry::GetChildren() const noexcept
     {
         if(size == 0 || !IsContainer())
             return {};
@@ -1888,16 +1921,20 @@ namespace fdf
         return {(static_cast<const Entry**>(data) + 1), size};
     }
     
-    constexpr std::span<Entry*> Entry::GetChildrenUnsafe()
+    constexpr std::span<Entry*> Entry::GetChildren_INTERNAL() noexcept
     {
+        assert(size != 0 || IsContainer());
+        
         if consteval
         {
             return *GetDataVector<Entry*>();
         }
         return {(static_cast<Entry**>(data) + 1), size};
     }
-    constexpr std::span<const Entry*> Entry::GetChildrenUnsafe() const
+    constexpr std::span<const Entry*> Entry::GetChildren_INTERNAL() const noexcept
     {
+        assert(size != 0 || IsContainer());
+        
         if consteval
         {
             return {const_cast<const Entry**>(const_cast<Entry*>(this)->GetDataVector<Entry*>()->data()), size};
@@ -1914,7 +1951,7 @@ namespace fdf
 
 
 
-    constexpr size_t Entry::GetTotalChildCount_EXPENSIVE() const noexcept
+    constexpr size_t Entry::GetChildCountRecursive() const noexcept
     {
         if(size == 0 || !IsContainer())
             return 0;
@@ -1931,7 +1968,7 @@ namespace fdf
             if((current->type == Type::Array || current->type == Type::Map) && current->size > 0)
             {
                 total += current->size;
-                for(const Entry* child : std::ranges::reverse_view(current->GetChildrenUnsafe()))
+                for(const Entry* child : std::ranges::reverse_view(current->GetChildren_INTERNAL()))
                     stack.push_back(child);
             }
         }
@@ -1939,7 +1976,7 @@ namespace fdf
         return total;
     }
 
-    constexpr std::vector<Entry*> Entry::GetAllChildren_VERY_EXPENSIVE()
+    constexpr std::vector<Entry*> Entry::GetChildrenRecursive() noexcept
     {
         if(size == 0 || !IsContainer())
             return {};
@@ -1956,7 +1993,7 @@ namespace fdf
 
             if((current->type == Type::Array || current->type == Type::Map) && current->size > 0)
             {
-                for(Entry* child : std::ranges::reverse_view(current->GetChildrenUnsafe()))
+                for(Entry* child : std::ranges::reverse_view(current->GetChildren_INTERNAL()))
                     stack.push_back(child);
             }
         }
@@ -1964,7 +2001,7 @@ namespace fdf
         return result;
     }
 
-    constexpr std::vector<const Entry*> Entry::GetAllChildren_VERY_EXPENSIVE() const
+    constexpr std::vector<const Entry*> Entry::GetChildrenRecursive() const noexcept
     {
         if(size == 0 || !IsContainer())
             return {};
@@ -1981,7 +2018,7 @@ namespace fdf
 
             if((current->type == Type::Array || current->type == Type::Map) && current->size > 0)
             {
-                for(const Entry* child : std::ranges::reverse_view(current->GetChildrenUnsafe()))
+                for(const Entry* child : std::ranges::reverse_view(current->GetChildren_INTERNAL()))
                     stack.push_back(child);
             }
         }
@@ -1993,7 +2030,7 @@ namespace fdf
 
 
     template<std::underlying_type_t<ForEachFlags::Flag> FLAGS, typename Callable> requires (std::is_invocable_v<Callable, Entry&>)
-    constexpr void Entry::ForEach(Callable callback)
+    constexpr void Entry::ForEach(Callable callback) noexcept(std::is_nothrow_invocable_v<Callable, Entry&>)
     {
         if constexpr(!ForEachFlags::IsValidForEachFlag(FLAGS))
         {
@@ -2016,7 +2053,7 @@ namespace fdf
             if(size == 0 || !IsContainer())
                 return;
 
-            const auto children = GetChildrenUnsafe();
+            const auto children = GetChildren_INTERNAL();
             for(Entry* e : children)
             {
                 if(!e->IsContainer())
@@ -2050,7 +2087,7 @@ namespace fdf
             }
             else
             {
-                for(Entry* child : std::ranges::reverse_view(GetChildrenUnsafe()))
+                for(Entry* child : std::ranges::reverse_view(GetChildren_INTERNAL()))
                     stack.push(child);
             }
 
@@ -2102,7 +2139,7 @@ namespace fdf
                     }
                     case Phase::Leaf:
                     {
-                        for(Entry* c : f.e->GetChildrenUnsafe())
+                        for(Entry* c : f.e->GetChildren_INTERNAL())
                         {
                             if(!c->IsContainer())
                                 callback(*c);
@@ -2113,7 +2150,7 @@ namespace fdf
                     }
                     case Phase::Array:
                     {
-                        auto children = f.e->GetChildrenUnsafe();
+                        auto children = f.e->GetChildren_INTERNAL();
                         bool pushed = false;
                         while(f.idx < children.size())
                         {
@@ -2134,7 +2171,7 @@ namespace fdf
                     }
                     case Phase::Map:
                     {
-                        auto children = f.e->GetChildrenUnsafe();
+                        auto children = f.e->GetChildren_INTERNAL();
                         bool pushed = false;
                         while(f.idx < children.size())
                         {
@@ -2158,7 +2195,7 @@ namespace fdf
     }
 
     template<std::underlying_type_t<ForEachFlags::Flag> FLAGS, typename Callable> requires (std::is_invocable_v<Callable, const Entry&>)
-    constexpr void Entry::ForEach(Callable callback) const
+    constexpr void Entry::ForEach(Callable callback) const noexcept(std::is_nothrow_invocable_v<Callable, const Entry&>)
     {
         if constexpr(!ForEachFlags::IsValidForEachFlag(FLAGS))
         {
@@ -2181,7 +2218,7 @@ namespace fdf
             if(size == 0 || !IsContainer())
                 return;
 
-            const auto children = GetChildrenUnsafe();
+            const auto children = GetChildren_INTERNAL();
             for(const Entry* e : children)
             {
                 if(!e->IsContainer())
@@ -2215,7 +2252,7 @@ namespace fdf
             }
             else
             {
-                for(const Entry* child : std::ranges::reverse_view(GetChildrenUnsafe()))
+                for(const Entry* child : std::ranges::reverse_view(GetChildren_INTERNAL()))
                     stack.push(child);
             }
 
@@ -2267,7 +2304,7 @@ namespace fdf
                     }
                     case Phase::Leaf:
                     {
-                        for(const Entry* c : f.e->GetChildrenUnsafe())
+                        for(const Entry* c : f.e->GetChildren_INTERNAL())
                         {
                             if(!c->IsContainer())
                                 callback(*c);
@@ -2278,7 +2315,7 @@ namespace fdf
                     }
                     case Phase::Array:
                     {
-                        auto children = f.e->GetChildrenUnsafe();
+                        auto children = f.e->GetChildren_INTERNAL();
                         bool pushed = false;
                         while(f.idx < children.size())
                         {
@@ -2299,7 +2336,7 @@ namespace fdf
                     }
                     case Phase::Map:
                     {
-                        auto children = f.e->GetChildrenUnsafe();
+                        auto children = f.e->GetChildren_INTERNAL();
                         bool pushed = false;
                         while(f.idx < children.size())
                         {
@@ -2332,255 +2369,135 @@ namespace fdf
 
 
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<bool>()
+    [[nodiscard]] constexpr auto Entry::GetValue<bool>() noexcept
     {
         if(type != Type::Bool)
-            throw std::runtime_error("Entry::GetValue<bool>: Invalid type");
+            return std::span<bool>();
         if consteval
             { return std::span(GetDataAs<bool>(), size); }
         return std::span(static_cast<bool*>(data), size);
     }
 
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<int64_t>()
+    [[nodiscard]] constexpr auto Entry::GetValue<int64_t>() noexcept
     {
         if(type != Type::Int)
-            throw std::runtime_error("Entry::GetValue<int64_t>: Invalid type");
+            return std::span<int64_t>();
         if consteval
             { return std::span(*GetDataVector<int64_t>()); }
         return std::span(static_cast<int64_t*>(data), size);
     }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<int>()  { return GetValue<int64_t>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<int>() noexcept  { return GetValue<int64_t>(); }
     
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<uint64_t>()
+    [[nodiscard]] constexpr auto Entry::GetValue<uint64_t>() noexcept
     {
         if(type != Type::UInt && type != Type::Version)
-            throw std::runtime_error("Entry::GetValue<uint64_t>: Invalid type");
+            return std::span<uint64_t>();
         if consteval
             { return std::span(*GetDataVector<uint64_t>()); }
         return std::span(static_cast<uint64_t*>(data), size);
     }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<unsigned int>()  { return GetValue<uint64_t>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<unsigned int>() noexcept  { return GetValue<uint64_t>(); }
 
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<double>()
+    [[nodiscard]] constexpr auto Entry::GetValue<double>() noexcept
     {
         if(type != Type::Float)
-            throw std::runtime_error("Entry::GetValue<double>: Invalid type");
+            return std::span<double>();
         if consteval
             { return std::span(*GetDataVector<double>()); }
         return std::span(static_cast<double*>(data), size);
     }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<float>()  { return GetValue<double>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<float>() noexcept  { return GetValue<double>(); }
 
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<char>()
+    [[nodiscard]] constexpr auto Entry::GetValue<char>() noexcept
     {
         if(type != Type::String && type != Type::Hex && type != Type::Timestamp)
-            throw std::runtime_error("Entry::GetValue<char>: Invalid type");
+            return std::string_view();
         if consteval
             { return std::string_view(*GetDataAs<std::string>()); }
         return std::string_view((static_cast<char*>(data) + sizeof(uint32_t)), size);
     }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<std::string>()  { return GetValue<char>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<std::string>() noexcept  { return GetValue<char>(); }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<std::string_view>()  { return GetValue<char>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<std::string_view>() noexcept  { return GetValue<char>(); }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<char*>()  { return GetValue<char>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<char*>() noexcept  { return GetValue<char>(); }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<const char*>()  { return GetValue<char>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<const char*>() noexcept  { return GetValue<char>(); }
 
 
 
 
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<bool>() const
+    [[nodiscard]] constexpr auto Entry::GetValue<bool>() const noexcept
     {
         if(type != Type::Bool)
-            throw std::runtime_error("Entry::GetValue<bool>: Invalid type");
+            return std::span<const bool>();
         if consteval
             { return std::span(GetDataAs<bool>(), size); }
         return std::span(static_cast<const bool*>(data), size);
     }
 
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<int64_t>() const
+    [[nodiscard]] constexpr auto Entry::GetValue<int64_t>() const noexcept
     {
         if(type != Type::Int)
-            throw std::runtime_error("Entry::GetValue<int64_t>: Invalid type");
+            return std::span<const int64_t>();
         if consteval
             { return std::span(*GetDataVector<int64_t>()); }
         return std::span(static_cast<const int64_t*>(data), size);
     }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<int>() const  { return GetValue<int64_t>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<int>() const noexcept  { return GetValue<int64_t>(); }
     
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<uint64_t>() const
+    [[nodiscard]] constexpr auto Entry::GetValue<uint64_t>() const noexcept
     {
         if(type != Type::UInt && type != Type::Version)
-            throw std::runtime_error("Entry::GetValue<uint64_t>: Invalid type");
+            return std::span<const uint64_t>();
         if consteval
             { return std::span(*GetDataVector<uint64_t>()); }
         return std::span(static_cast<const uint64_t*>(data), size);
     }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<unsigned int>() const  { return GetValue<uint64_t>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<unsigned int>() const noexcept  { return GetValue<uint64_t>(); }
 
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<double>() const
+    [[nodiscard]] constexpr auto Entry::GetValue<double>() const noexcept
     {
         if(type != Type::Float)
-            throw std::runtime_error("Entry::GetValue<double>: Invalid type");
+            return std::span<const double>();
         if consteval
             { return std::span(*GetDataVector<double>()); }
         return std::span(static_cast<const double*>(data), size);
     }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<float>() const  { return GetValue<double>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<float>() const noexcept  { return GetValue<double>(); }
 
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<char>() const
+    [[nodiscard]] constexpr auto Entry::GetValue<char>() const noexcept
     {
         if(type != Type::String && type != Type::Hex && type != Type::Timestamp)
-            throw std::runtime_error("Entry::GetValue<char>: Invalid type");
+            return std::string_view();
         if consteval
             { return std::string_view(*GetDataAs<std::string>()); }
         return std::string_view((static_cast<const char*>(data) + sizeof(uint32_t)), size);
     }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<std::string>() const  { return GetValue<char>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<std::string>() const noexcept  { return GetValue<char>(); }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<std::string_view>() const  { return GetValue<char>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<std::string_view>() const noexcept  { return GetValue<char>(); }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<char*>() const  { return GetValue<char>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<char*>() const noexcept  { return GetValue<char>(); }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<const char*>() const  { return GetValue<char>(); }
-
-
-
-
-
-
-
-
-
-
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<bool>()
-    {
-        if consteval
-            { return std::span(GetDataAs<bool>(), size); }
-        return std::span(static_cast<bool*>(data), size);
-    }
-
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<int64_t>()
-    {
-        if consteval
-            { return std::span(*GetDataVector<int64_t>()); }
-        return std::span(static_cast<int64_t*>(data), size);
-    }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<int>()  { return GetValueUnsafe<int64_t>(); }
-    
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<uint64_t>()
-    {
-        if consteval
-            { return std::span(*GetDataVector<uint64_t>()); }
-        return std::span(static_cast<uint64_t*>(data), size);
-    }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<unsigned int>()  { return GetValueUnsafe<uint64_t>(); }
-
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<double>()
-    {
-        if consteval
-            { return std::span(*GetDataVector<double>()); }
-        return std::span(static_cast<double*>(data), size);
-    }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<float>()  { return GetValueUnsafe<double>(); }
-
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<char>()
-    {
-        if consteval
-            { return std::string_view(*GetDataAs<std::string>()); }
-        return std::string_view((static_cast<char*>(data) + sizeof(uint32_t)), size);
-    }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<std::string>()  { return GetValueUnsafe<char>(); }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<std::string_view>()  { return GetValueUnsafe<char>(); }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<char*>()  { return GetValueUnsafe<char>(); }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<const char*>()  { return GetValueUnsafe<char>(); }
-
-
-
-
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<bool>() const
-    {
-        if consteval
-            { return std::span(GetDataAs<bool>(), size); }
-        return std::span(static_cast<const bool*>(data), size);
-    }
-
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<int64_t>() const
-    {
-        if consteval
-            { return std::span(*GetDataVector<int64_t>()); }
-        return std::span(static_cast<const int64_t*>(data), size);
-    }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<int>() const  { return GetValueUnsafe<int64_t>(); }
-    
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<uint64_t>() const
-    {
-        if consteval
-            { return std::span(*GetDataVector<uint64_t>()); }
-        return std::span(static_cast<const uint64_t*>(data), size);
-    }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<unsigned int>() const  { return GetValueUnsafe<uint64_t>(); }
-
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<double>() const
-    {
-        if consteval
-            { return std::span(*GetDataVector<double>()); }
-        return std::span(static_cast<const double*>(data), size);
-    }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<float>() const  { return GetValueUnsafe<double>(); }
-
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<char>() const
-    {
-        if consteval
-            { return std::string_view(*GetDataAs<std::string>()); }
-        return std::string_view((static_cast<const char*>(data) + sizeof(uint32_t)), size);
-    }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<std::string>() const  { return GetValueUnsafe<char>(); }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<std::string_view>() const  { return GetValueUnsafe<char>(); }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<char*>() const  { return GetValueUnsafe<char>(); }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValueUnsafe<const char*>() const  { return GetValueUnsafe<char>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<const char*>() const noexcept  { return GetValue<char>(); }
 
 
 
@@ -2596,7 +2513,7 @@ namespace fdf
     #pragma warning(disable : 4702)
 #endif
     template<Style STYLE>
-    [[nodiscard]] constexpr std::string_view Entry::DataToView(std::string& temp) const
+    [[nodiscard]] constexpr std::string_view Entry::DataToView(std::string& temp) const noexcept
     {
         switch(type)
         {
@@ -2607,11 +2524,16 @@ namespace fdf
 
             case Type::String:
             case Type::Timestamp:
-                return GetValueUnsafe<char>();
+            {
+                const std::string_view view = GetValue<char>();
+                assert(!view.empty());
+                return view;
+            }
             
             case Type::Hex:
             {
-                std::string_view view = GetValueUnsafe<char>();
+                const std::string_view view = GetValue<char>();
+                assert(!view.empty());
 
                 if constexpr(STYLE.bUppercaseHex)
                 {
@@ -2625,7 +2547,8 @@ namespace fdf
 
             case Type::Version:
             {
-                const auto span = GetValueUnsafe<uint64_t>();
+                const auto span = GetValue<uint64_t>();
+                assert(span.size() == 3 || span.size() == 4);
                 if(size == 3)
                     temp = std::format("{}.{}.{}", span[0], span[1], span[2]);
                 else
@@ -2635,7 +2558,8 @@ namespace fdf
 
             case Type::Bool:
             {
-                const auto span = GetValueUnsafe<bool>();
+                const auto span = GetValue<bool>();
+                assert(!span.empty());
                 temp = std::format("{}", (span[0]? detail::KEYWORDS[2] : detail::KEYWORDS[3]));
                 for(size_t i = 1; i < span.size(); i++)
                     temp = std::format("{}x{}", temp, (span[i]? detail::KEYWORDS[2] : detail::KEYWORDS[3]));
@@ -2644,7 +2568,8 @@ namespace fdf
 
             case Type::Int:
             {
-                const auto span = GetValueUnsafe<int64_t>();
+                const auto span = GetValue<int64_t>();
+                assert(!span.empty());
                 temp = std::format("{}", span[0]);
                 for(size_t i = 1; i < span.size(); i++)
                     temp = std::format("{}x{}", temp, span[i]);
@@ -2653,7 +2578,8 @@ namespace fdf
 
             case Type::UInt:
             {
-                const auto span = GetValueUnsafe<uint64_t>();
+                const auto span = GetValue<uint64_t>();
+                assert(!span.empty());
                 temp = std::format("{}", span[0]);
                 for(size_t i = 1; i < span.size(); i++)
                     temp = std::format("{}x{}", temp, span[i]);
@@ -2662,7 +2588,8 @@ namespace fdf
 
             case Type::Float:
             {
-                const auto span = GetValueUnsafe<float>();
+                const auto span = GetValue<float>();
+                assert(!span.empty());
                 temp = std::format("{}", span[0]);
                 for(size_t i = 1; i < span.size(); i++)
                     temp = std::format("{}x{}", temp, span[i]);
@@ -2705,16 +2632,16 @@ namespace fdf
     }
     
     template <auto DIAGNOSTIC_CALLBACK>
-    constexpr bool Entry::ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy)
+    constexpr bool Entry::ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy) noexcept
     {
         if(type != Type::Map)
             return false;
         
-        Entry* other = detail::Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(content);
+        UniqueEntryPtr other = detail::Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(content);
         return Combine(other, fileCommentCombineStrategy);
     }
     
-    constexpr bool Entry::Combine(Entry* other, CommentCombineStrategy fileCommentCombineStrategy)
+    constexpr bool Entry::Combine(UniqueEntryPtr& other, CommentCombineStrategy fileCommentCombineStrategy) noexcept
     {
         if(!IsContainer() || type != other->type)
             return false;
@@ -2739,7 +2666,7 @@ namespace fdf
         }
     #endif
         
-        return AddChild(*other);
+        return AddChild(other);
     }
     
     
@@ -2747,7 +2674,7 @@ namespace fdf
     
     
     template<auto DIAGNOSTIC_CALLBACK>
-    Entry* Entry::ParseFile(const std::filesystem::path& filepath) noexcept
+    UniqueEntryPtr Entry::ParseFile(const std::filesystem::path& filepath)
     {
         if(!std::filesystem::exists(filepath) || !std::filesystem::is_regular_file(filepath))
             return nullptr;
@@ -2757,31 +2684,23 @@ namespace fdf
             return nullptr;
 
         std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        return ParseBuffer<DIAGNOSTIC_CALLBACK>(content);
+        return detail::Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(content);
     }
 
     template<auto DIAGNOSTIC_CALLBACK>
-    constexpr Entry* Entry::ParseBuffer(std::string_view content) noexcept
+    constexpr UniqueEntryPtr Entry::ParseBuffer(std::string_view content) noexcept
     {
         return detail::Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(content);
     }
 
     template<Style STYLE>
-    bool Entry::WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists) noexcept
+    bool Entry::WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists)
     {
-        if(!std::filesystem::exists(filepath))
+        auto parentDir = filepath.parent_path();
+        if(!std::filesystem::exists(parentDir))
         {
-            if(!bCreateIfNotExists)
+            if(!bCreateIfNotExists || !std::filesystem::create_directories(parentDir))
                 return false;
-
-            auto parentDir = filepath.parent_path();
-            if(!parentDir.empty() && !std::filesystem::exists(parentDir))
-            {
-                std::error_code ec;
-                std::filesystem::create_directories(parentDir, ec);
-                if(ec)
-                    return false;
-            }
         }
         else if(!std::filesystem::is_regular_file(filepath))
         {
@@ -2793,7 +2712,7 @@ namespace fdf
             return false;
 
         std::string buffer;
-        WriteBuffer(e, buffer);
+        detail::Utils<>::WriteBuffer<STYLE>(e, buffer);
 
         file << buffer;
         return static_cast<bool>(file);
@@ -2803,31 +2722,26 @@ namespace fdf
     {
         detail::Utils<>::WriteBuffer<STYLE>(root, buffer);
     }
-
-    constexpr void Entry::Destroy(Entry* e) noexcept
-    {
-        detail::Utils<>::Destroy(e);
-    }
 }
 
 namespace fdf::detail
 {
     template<auto DIAGNOSTIC_CALLBACK>
     template<typename... Args>
-    constexpr Entry* detail::Utils<DIAGNOSTIC_CALLBACK>::Create(Args&&... args)
+    constexpr UniqueEntryPtr Utils<DIAGNOSTIC_CALLBACK>::Create(Args&&... args)
     {
         if consteval
         {
-            return new Entry{std::forward<Args>(args)...};
+            return UniqueEntryPtr(new Entry{std::forward<Args>(args)...});
         }
         else
         {
-            return new(GlobalAllocator::ENTRY_ALLOCATOR.Allocate()) Entry{std::forward<Args>(args)...};
+            return UniqueEntryPtr(new(GlobalAllocator::ENTRY_ALLOCATOR.Allocate()) Entry{std::forward<Args>(args)...});
         }
     }
 
     template<auto DIAGNOSTIC_CALLBACK>
-    constexpr void detail::Utils<DIAGNOSTIC_CALLBACK>::Destroy(Entry* e)
+    constexpr void Utils<DIAGNOSTIC_CALLBACK>::Destroy(Entry* e)
     {
         if consteval
         {
@@ -2835,20 +2749,28 @@ namespace fdf::detail
         }
         else
         {
-            e->~Entry();
-            (void)GlobalAllocator::ENTRY_ALLOCATOR.Deallocate(e);
+            if(e)
+            {
+                e->~Entry();
+                (void)GlobalAllocator::ENTRY_ALLOCATOR.Deallocate(e);
+            }
         }
+    }
+    
+    constexpr void EntryDeleter::operator()(Entry* e) noexcept
+    {
+        Utils<>::Destroy(e);
     }
 
     template<auto DIAGNOSTIC_CALLBACK>
-    constexpr Entry* Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(std::string_view content) noexcept
+    constexpr UniqueEntryPtr Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(std::string_view content) noexcept
     {
         Tokenizer tokenizer(content);
         #if !FDF_NO_COMMENTS
             Token fileCommentToken = TokenType::NonExisting;
         #endif
 
-        Entry* root = Create();
+        UniqueEntryPtr root = Create();
         root->type = Type::Map;
         root->depth = static_cast<uint8_t>(-1);
         
@@ -2860,7 +2782,6 @@ namespace fdf::detail
             Token currentToken = tokenizer.Current();
             if(currentToken.type == TokenType::Invalid)
             {
-                Destroy(root);
                 return nullptr;
             }
         
@@ -2911,7 +2832,6 @@ namespace fdf::detail
             {
                 if(!ParseVariable(tokenizer, *root   FDF_COMMENT_SWITCH(,comment)))
                 {
-                    Destroy(root);
                     return nullptr;
                 }
         
@@ -2921,7 +2841,6 @@ namespace fdf::detail
             if(currentToken.type == TokenType::EndOfFile)
                 break;
         
-            Destroy(root);
             return nullptr;  // First token can't be anything else
         }
 
@@ -2932,7 +2851,8 @@ namespace fdf::detail
                 std::string_view view = tokenizer.ToView(fileCommentToken);
                 if consteval
                 {
-                    root->comment = new std::string();
+                    root->comment = new (std::nothrow) std::string();
+                    assert(root->comment);
                     root->GetCommentString()->reserve(view.size());
                     
                     bool bAfterNewLine = true;
@@ -2959,7 +2879,7 @@ namespace fdf::detail
                     root->GetCommentControlBlock()->capacity = static_cast<uint32_t>(view.size());
                     root->GetCommentControlBlock()->size = 0;
 
-                    char* cur = reinterpret_cast<char*>(root->GetCommentControlBlock() + 1);
+                    char* cur = root->GetCommentData();
                     bool bAfterNewLine = true;
                     for(char c : view)
                     {
@@ -2989,25 +2909,23 @@ namespace fdf::detail
     template<auto DIAGNOSTIC_CALLBACK>
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseVariable   (Tokenizer& tokenizer, Entry& parent   FDF_COMMENT_SWITCH(, Token comment))
     {
+        assert(parent.IsContainer());
+        assert(parent.depth + 1 != static_cast<uint8_t>(-1));
+        
         Token currentToken = tokenizer.Current();
-        Entry* entry = Create();
-        (void)parent.AddChild(*entry);
+        Entry* entry = parent.Emplace();
+        entry->depth = parent.depth + 1;
 
         if(parent.type != Type::Array)
         {
-            entry->SetIdentifier(tokenizer.ToView(currentToken), true);
+            assert(tokenizer.Current().type == TokenType::Identifier);
+            if(!entry->SetIdentifier(tokenizer.ToView(currentToken)))
+                return false; // TODO: report too long identifier and continue?
             currentToken = tokenizer.Advance();
         }
 
         FDF_CHECK_TOKEN(currentToken);
         FDF_CHECK_TOKEN_FOR_EOF(currentToken);
-
-        if(parent.type != Type::Array && parent.type != Type::Map)
-            throw std::runtime_error("Non-supported parent type");
-
-        entry->depth = parent.depth + 1;
-        if(entry->depth == static_cast<uint8_t>(-1))
-            throw std::runtime_error("Invalid depth");
 
 
         bool bHasEqual = false;
@@ -3035,29 +2953,21 @@ namespace fdf::detail
             FDF_CHECK_TOKEN(currentToken);
             FDF_CHECK_TOKEN_FOR_EOF(currentToken);
         }
-
-        const bool result = [&]() -> bool
-        {
-            if(IsValueLiteral(currentToken.type) && (bHasEqual || parent.type == Type::Array))
-                return ParseSimpleValue(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
-            if(currentToken.type == TokenType::CurlyBraceOpen)
-                return ParseMap(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
-            if(currentToken.type == TokenType::SquareBraceOpen)
-                return ParseArray(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
         
-            return false;  // Something we didn't process yet?
-        }();
-
-        if(!result)
-        {
-            Destroy(entry);
-        }
-
-        return result;
+        if(IsValueLiteral(currentToken.type) && (bHasEqual || parent.type == Type::Array))
+            return ParseSimpleValue(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
+        if(currentToken.type == TokenType::CurlyBraceOpen)
+            return ParseMap(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
+        if(currentToken.type == TokenType::SquareBraceOpen)
+            return ParseArray(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
+    
+        return false;  // Something we didn't process yet?
     }
     template<auto DIAGNOSTIC_CALLBACK>
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseSimpleValue(Tokenizer& tokenizer, Entry& entry    FDF_COMMENT_SWITCH(, Token comment))
     {
+        assert(IsValueLiteral(tokenizer.Current().type));
+        
         Token currentToken = tokenizer.Current();
         const std::string_view view = tokenizer.ToView(currentToken);
 
@@ -3617,6 +3527,8 @@ namespace fdf::detail
     template<auto DIAGNOSTIC_CALLBACK>
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseArray      (Tokenizer& tokenizer, Entry& array   FDF_COMMENT_SWITCH(, Token comment))
     {
+        assert(tokenizer.Current().type == TokenType::SquareBraceOpen);
+        
         array.type = Type::Array;
         
         Token currentToken = tokenizer.Advance();
@@ -3697,6 +3609,8 @@ namespace fdf::detail
     template<auto DIAGNOSTIC_CALLBACK>
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseMap        (Tokenizer& tokenizer, Entry& map   FDF_COMMENT_SWITCH(, Token comment))
     {
+        assert(tokenizer.Current().type == TokenType::CurlyBraceOpen);
+        
         map.type = Type::Map;
 
         Token currentToken = tokenizer.Advance();
@@ -3788,8 +3702,8 @@ namespace fdf::detail
     template<Style STYLE>
     constexpr void Utils<DIAGNOSTIC_CALLBACK>::WriteBuffer(const Entry& root, std::string& buffer, const bool bOverwrite) noexcept
     {
-        [[maybe_unused]] auto isShortArrayFn   = [ ](const Entry& e) -> bool  { return e.GetTotalChildCount_EXPENSIVE() <= STYLE.singleLineArrayLimit; };
-        [[maybe_unused]] auto isShortMapFn     = [ ](const Entry& e) -> bool  { return e.GetTotalChildCount_EXPENSIVE() <= STYLE.singleLineMapLimit; };
+        [[maybe_unused]] auto isShortArrayFn   = [ ](const Entry& e) -> bool  { return e.GetChildCountRecursive() <= STYLE.singleLineArrayLimit; };
+        [[maybe_unused]] auto isShortMapFn     = [ ](const Entry& e) -> bool  { return e.GetChildCountRecursive() <= STYLE.singleLineMapLimit; };
         auto writeEntryNameFn = [&](const Entry& e) -> void  { buffer.append(e.GetIdentifier()); };
 
         auto addTabFn = [&buffer](uint32_t count) -> void
@@ -3823,7 +3737,7 @@ namespace fdf::detail
         uint8_t lastDepth = root.depth;
         [[maybe_unused]] Type lastType = root.type;
 
-        const size_t totalChildCount = root.GetTotalChildCount_EXPENSIVE();
+        const size_t totalChildCount = root.GetChildCountRecursive();
         [[maybe_unused]] size_t writtenCount = 0; //? might be unnecessary
         if(bOverwrite)
             buffer.clear();
