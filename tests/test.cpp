@@ -564,9 +564,47 @@ constexpr T ExtractValue(std::string_view buffer)
     return value;
 }
 
+consteval size_t ExtractCommentSize(auto buffer)
+{
+    fdf::UniqueEntryPtr eRoot = fdf::Entry::ParseBuffer(buffer);
+    if(!eRoot)
+        return 0;
+    auto* eValue = eRoot->GetDirectChild("value");
+    if(eValue)
+    {
+        return eValue->GetComment().size();
+    }
+    return 0;
+}
+
+template<size_t SIZE>
+consteval auto ExtractCommentArray(auto buffer)
+{
+    std::array<char, SIZE + 1> result = {};
+    fdf::UniqueEntryPtr eRoot = fdf::Entry::ParseBuffer(buffer);
+    if(!eRoot)
+        return result;
+    auto* eValue = eRoot->GetDirectChild("value");
+    if(eValue)
+        fdf::detail::constexpr_memcpy(result.data(), eValue->GetComment().data(), SIZE);
+    return result;
+}
+
+template<const char* buffer>
+constexpr auto ExtractComment()
+{
+    constexpr size_t size = ExtractCommentSize(buffer);
+    static constexpr auto commentArray = ExtractCommentArray<size>(buffer);
+    return std::string_view(commentArray.data(), size);
+}
+
 
 //[[maybe_unused]] constexpr auto value0 = ExtractValue<int64_t>("value = 25x50");
 //[[maybe_unused]] constexpr auto value1 = ExtractValue<bool>("value = truexfalsextrue");
+//constexpr char str[] = "//TestComment\nvalue = 0";
+//[[maybe_unused]] constexpr auto comment = ExtractComment<str>();
+
+
 /*int main()
 {
     std::string temp;

@@ -182,10 +182,7 @@ FDF_EXPORT namespace fdf
         constexpr Entry& operator=(Entry&& other) noexcept;
         
     private:
-        constexpr  Entry() noexcept
-        {
-            SetIdentifierSize(0);
-        }
+        constexpr  Entry() noexcept;
         constexpr ~Entry() noexcept;
 
         friend struct detail::Test;
@@ -224,8 +221,8 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr       char*                GetCommentData()               noexcept  { return static_cast<      char*>(comment) + sizeof(CommentControlBlock); }
         [[nodiscard]] constexpr const char*                GetCommentData()         const noexcept  { return static_cast<const char*>(comment) + sizeof(CommentControlBlock); }
 
-        [[nodiscard]] constexpr       std::string* GetCommentString()       noexcept  { return static_cast<      std::string*>(data); }
-        [[nodiscard]] constexpr const std::string* GetCommentString() const noexcept  { return static_cast<const std::string*>(data); }
+        [[nodiscard]] constexpr       std::string* GetCommentString()       noexcept  { return static_cast<      std::string*>(comment); }
+        [[nodiscard]] constexpr const std::string* GetCommentString() const noexcept  { return static_cast<const std::string*>(comment); }
         
         [[nodiscard]] constexpr uint8_t GetIdentifierSize()                    const noexcept  { return static_cast<uint8_t>(detail::MAX_IDENTIFIER_LENGTH) - static_cast<uint8_t>(identifier[detail::MAX_IDENTIFIER_LENGTH]); }
                       constexpr void    SetIdentifierSize(const uint8_t value)       noexcept  { identifier[detail::MAX_IDENTIFIER_LENGTH] = static_cast<char>(detail::MAX_IDENTIFIER_LENGTH - value); }
@@ -1347,9 +1344,8 @@ namespace fdf
     constexpr Entry& Entry::operator=(Entry&& other) noexcept
     {
         if(parent)
-            (void)parent->OrphanChild(*this);
-        ReleaseData();
-        ReleaseComment();
+            (void)parent->OrphanChild_INTERNAL(*this);
+        ReleaseEverything();
         
         type = other.type;
         depth = other.depth;
@@ -1372,12 +1368,15 @@ namespace fdf
     }
     
     
+    constexpr Entry::Entry() noexcept
+    {
+        SetIdentifierSize(0);
+    }
     constexpr Entry::~Entry() noexcept
     {
         if(parent)
             (void)parent->OrphanChild_INTERNAL(*this);
-        ReleaseData();
-        ReleaseComment();
+        ReleaseEverything();
     }
     
     
