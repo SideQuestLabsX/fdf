@@ -247,15 +247,16 @@ namespace fdf::detail
 
             {
                 Entry* entry = e->GetChild("appVersion");
-                std::print("{:<24}  ->  ", "appVersion");
                 if(entry && entry->type == Type::Version)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<uint64_t>();
                     std::println("{}.{}.{}.{}", val[0], val[1], val[2], val[3]);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "appVersion");
                     std::puts("<ERROR>");
                 }
             }
@@ -263,15 +264,16 @@ namespace fdf::detail
 
             {
                 Entry* entry = e->GetChild("name");
-                std::print("{:<24}  ->  ", "name");
                 if(entry && entry->type == Type::String)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<std::string_view>();
                     std::println("{}", val);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "name");
                     std::puts("<ERROR>");
                 }
             }
@@ -279,15 +281,16 @@ namespace fdf::detail
 
             {
                 Entry* entry = e->GetChild("enabled1");
-                std::print("{:<24}  ->  ", "enabled1");
                 if(entry && entry->type == Type::Bool && entry->size == 1)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<bool>();
                     std::println("{}", val[0]);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "enabled1");
                     std::puts("<ERROR>");
                 }
             }
@@ -295,15 +298,16 @@ namespace fdf::detail
 
             {
                 Entry* entry = e->GetChild("id");
-                std::print("{:<24}  ->  ", "id");
                 if(entry && entry->type == Type::Int)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<int>();
                     std::println("{}", val[0]);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "id");
                     std::puts("<ERROR>");
                 }
             }
@@ -311,9 +315,9 @@ namespace fdf::detail
 
             {
                 Entry* entry = e->GetChild("uuid");
-                std::print("{:<24}  ->  ", "uuid");
                 if(entry && entry->type == Type::String)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<char>();
                     for(char c : val)
                     {
@@ -327,6 +331,7 @@ namespace fdf::detail
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "uuid");
                     std::puts("<ERROR>");
                 }
             }
@@ -334,15 +339,16 @@ namespace fdf::detail
 
             {
                 Entry* entry = e->GetChild("pi");
-                std::print("{:<24}  ->  ", "pi");
                 if(entry && entry->type == Type::Float)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<float>();
                     std::println("{}", val[0]);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "pi");
                     std::puts("<ERROR>");
                 }
             }
@@ -350,14 +356,15 @@ namespace fdf::detail
 
             {
                 Entry* entry = e->GetChild("value");
-                std::print("{:<24}  ->  ", "value");
                 if(entry && entry->type == Type::Null)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     std::puts("null");
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "value");
                     std::puts("<ERROR>");
                 }
             }
@@ -365,14 +372,15 @@ namespace fdf::detail
 
             {
                 Entry* entry = e->GetChild("value2");
-                std::print("{:<24}  ->  ", "value2");
                 if(entry && entry->type == Type::Null)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     std::puts("null");
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "value2");
                     std::puts("<ERROR>");
                 }
             }
@@ -380,15 +388,16 @@ namespace fdf::detail
 
             {
                 Entry* entry = e->GetChild("gameSettings1.resolution");
-                std::print("{:<24}  ->  ", "gameSettings1.resolution");
                 if(entry && entry->type == Type::Int && entry->size == 2)
                 {
+                    std::print("{:<32}  ->  ", entry->GetFullIdentifier());
                     auto val = entry->GetValue<int64_t>();
                     std::println("{}x{}", val[0], val[1]);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "gameSettings1.resolution");
                     std::puts("<ERROR>");
                 }
             }
@@ -396,7 +405,7 @@ namespace fdf::detail
 
             {
                 Entry* entry = e->GetChild("NON_EXISTING");
-                std::print("{:<24}  ->  ", "NON_EXISTING");
+                std::print("{:<32}  ->  ", "NON_EXISTING");
                 if(!entry)
                 {
                     std::puts("<NON_EXISTING>");
@@ -411,15 +420,16 @@ namespace fdf::detail
 
             {
                 Entry* entry = e->GetChild("escaped1");
-                std::print("{:<24}  ->  ", "escaped1");
                 if(entry && entry->type == Type::String)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<std::string_view>();
                     std::println("{}", val);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "escaped1");
                     std::puts("<ERROR>");
                 }
             }
@@ -427,15 +437,16 @@ namespace fdf::detail
 
             {
                 Entry* entry = e->GetChild("escaped2");
-                std::print("{:<24}  ->  ", "escaped2");
                 if(entry && entry->type == Type::String)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<std::string_view>();
                     std::println("{}", val);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "escaped2");
                     std::puts("<ERROR>");
                 }
             }
@@ -443,15 +454,16 @@ namespace fdf::detail
 
             {
                 Entry* entry = e->GetChild("escaped5");
-                std::print("{:<24}  ->  ", "escaped5");
                 if(entry && entry->type == Type::String)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<std::string_view>();
                     std::println("{}", val);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "escaped5");
                     std::puts("<ERROR>");
                 }
             }
@@ -459,15 +471,16 @@ namespace fdf::detail
 
             {
                 Entry* entry = e->GetChild("escaped6");
-                std::print("{:<24}  ->  ", "escaped6");
                 if(entry && entry->type == Type::String)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<std::string_view>();
                     std::println("{}", val);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "escaped6");
                     std::puts("<ERROR>");
                 }
             }

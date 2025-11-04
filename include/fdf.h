@@ -182,7 +182,10 @@ FDF_EXPORT namespace fdf
         constexpr Entry& operator=(Entry&& other) noexcept;
         
     private:
-        constexpr  Entry() noexcept = default;
+        constexpr  Entry() noexcept
+        {
+            SetIdentifierSize(0);
+        }
         constexpr ~Entry() noexcept;
 
         friend struct detail::Test;
@@ -193,12 +196,11 @@ FDF_EXPORT namespace fdf
         struct CommentControlBlock { uint32_t capacity, size; };
 
     private:
-        Type type = Type::Invalid;
-        uint8_t identifierSize = 0;
-        uint8_t depth = 0;
         char identifier[detail::MAX_IDENTIFIER_LENGTH + 1] = {};
+        Type type = Type::Invalid;
+        uint8_t depth = 0;
+        uint8_t unused = 0;
         uint32_t size = 0;
-        //uint32_t capacity = 0;
         Entry* parent = nullptr;
         void* data = nullptr;
     #if !FDF_NO_COMMENTS
@@ -224,6 +226,9 @@ FDF_EXPORT namespace fdf
 
         [[nodiscard]] constexpr       std::string* GetCommentString()       noexcept  { return static_cast<      std::string*>(data); }
         [[nodiscard]] constexpr const std::string* GetCommentString() const noexcept  { return static_cast<const std::string*>(data); }
+        
+        [[nodiscard]] constexpr uint8_t GetIdentifierSize()                    const noexcept  { return static_cast<uint8_t>(detail::MAX_IDENTIFIER_LENGTH) - static_cast<uint8_t>(identifier[detail::MAX_IDENTIFIER_LENGTH]); }
+                      constexpr void    SetIdentifierSize(const uint8_t value)       noexcept  { identifier[detail::MAX_IDENTIFIER_LENGTH] = static_cast<char>(detail::MAX_IDENTIFIER_LENGTH - value); }
 
     public:
         [[nodiscard]] constexpr uint32_t GetChildCount() const noexcept  { return IsContainer()? size : 0; }
@@ -237,13 +242,19 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr Entry*   GetParent()           noexcept  { return parent; }
         [[nodiscard]] constexpr Entry*   GetParent()     const noexcept  { return parent; }
 
-        [[nodiscard]] constexpr std::string_view GetIdentifier() const noexcept  { return {identifier, identifierSize}; }
+        [[nodiscard]] constexpr std::string_view GetIdentifier() const noexcept  { return {identifier, GetIdentifierSize()}; }
         [[nodiscard]] constexpr std::string GetFullIdentifier() const noexcept
         {
             const Entry* cur = parent;
             std::string temp = std::string(GetIdentifier());
             while(cur)
             {
+                if(cur->depth == static_cast<uint8_t>(-1))
+                {
+                    assert(cur->parent == nullptr && "If depth is '-1', it should be head!");
+                    return temp;
+                }
+                
                 temp = std::format("{}.{}", cur->GetIdentifier(), temp);
                 cur = cur->parent;
             }
@@ -416,7 +427,7 @@ namespace fdf::detail
     struct Token
     {
         constexpr Token() noexcept = default;
-        constexpr Token(TokenType type_, uint32_t startPosition_ = 0, uint32_t count_ = 0)
+        constexpr Token(TokenType type_, uint32_t startPosition_ = 0, uint32_t count_ = 0) noexcept
             : type(type_), count(count_), startPosition(startPosition_)  { }
 
         TokenType type = TokenType::NonExisting;
@@ -454,7 +465,7 @@ namespace fdf::detail
 
 namespace fdf::detail
 {
-    constexpr void constexpr_memcpy(char* dest, const char* src, size_t size)
+    constexpr void constexpr_memcpy(char* dest, const char* src, size_t size) noexcept
     {
         for(size_t i = 0; i < size; i++)
             dest[i] = src[i];
@@ -466,17 +477,17 @@ namespace fdf::detail
                static_cast<uint8_t>(type) <= static_cast<uint8_t>(TokenType::ValueLiteral_End);
     }
 
-    [[nodiscard]] constexpr bool constexpr_isspace(char c)
+    [[nodiscard]] constexpr bool constexpr_isspace(char c) noexcept
     {
         return (c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r');
     }
 
-    [[nodiscard]] constexpr bool constexpr_isalpha(char c)
+    [[nodiscard]] constexpr bool constexpr_isalpha(char c) noexcept
     {
         return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
     }
 
-    [[nodiscard]] constexpr bool constexpr_isdigit(char c)
+    [[nodiscard]] constexpr bool constexpr_isdigit(char c) noexcept
     {
         return c >= '0' && c <= '9';
     }
@@ -571,7 +582,7 @@ namespace fdf::detail
 
 
 
-        [[nodiscard]] void* Allocate()
+        [[nodiscard]] void* Allocate() noexcept
         {
             for(Chunk* chunk = head; chunk; chunk = chunk->next)
             {
@@ -587,13 +598,14 @@ namespace fdf::detail
                 }
             }
 
-            Chunk* newChunk = new Chunk();
+            Chunk* newChunk = new (std::nothrow) Chunk();
+            assert(newChunk && "Allocation shouldn't fail");
             newChunk->next = head;
             head = newChunk;
             return newChunk->Allocate();
         }
 
-        [[nodiscard]] bool Deallocate(void* ptr)
+        [[nodiscard]] bool Deallocate(void* ptr) noexcept
         {
             Chunk** nextOfPrev = &head; // next pointer of previous chunk
             for(Chunk* chunk = head; chunk; nextOfPrev = &chunk->next, chunk = chunk->next)
@@ -630,14 +642,14 @@ namespace fdf::detail
 
 
         template<typename T, typename... Args>
-        [[nodiscard]] T* Create(Args&&... args)
+        [[nodiscard]] T* Create(Args&&... args) noexcept(std::is_nothrow_constructible_v<T, Args...>)
         {
             static_assert(sizeof(T) <= BLOCK_SIZE, "T is too large for this SlabAllocator.");
             return new(Allocate()) T(std::forward<Args>(args)...);
         }
 
         template<typename T>
-        [[nodiscard]] bool Destroy(T* obj)
+        [[nodiscard]] bool Destroy(T* obj) noexcept(std::is_nothrow_destructible_v<T>)
         {
             static_assert(sizeof(T) <= BLOCK_SIZE, "T is too large for this SlabAllocator.");
             obj->~T();
@@ -666,7 +678,7 @@ namespace fdf::detail
         inline static constinit SlabAllocator<sizeof(Entry), alignof(Entry), 4096>  ENTRY_ALLOCATOR;
 
     public:
-        static void* Allocate(size_t size)
+        static void* Allocate(size_t size) noexcept
         {
             if(size <= 8)
                 return B8.Allocate();
@@ -677,10 +689,12 @@ namespace fdf::detail
             if(size <= 64)
                 return B64.Allocate();
             
-            return ::operator new(size);
+            void* p = ::operator new(size, std::nothrow);
+            assert(p && "Allocation shouldn't fail");
+            return p;
         }
 
-        static bool Deallocate(void* p, size_t size)
+        static bool Deallocate(void* p, size_t size) noexcept
         {
             if(size <= 8)
                 return B8.Deallocate(p);
@@ -699,7 +713,7 @@ namespace fdf::detail
 
 
         template<size_t size>
-        static void* Allocate()
+        static void* Allocate() noexcept
         {
             if constexpr(size <= 8)
                 return B8.Allocate();
@@ -710,11 +724,15 @@ namespace fdf::detail
             else if constexpr(size <= 64)
                 return B64.Allocate();
             else
-                return ::operator new(size);
+            {
+                void* p = ::operator new(size, std::nothrow);
+                assert(p && "Allocation shouldn't fail");
+                return p;
+            }
         }
 
         template<size_t size>
-        static bool Deallocate(void* p)
+        static bool Deallocate(void* p) noexcept
         {
             if constexpr(size <= 8)
                 return B8.Deallocate(p);
@@ -735,7 +753,7 @@ namespace fdf::detail
 
 
         template<typename T, typename... Args>
-        [[nodiscard]] static T* Create(Args&&... args)
+        [[nodiscard]] static T* Create(Args&&... args) noexcept(std::is_nothrow_constructible_v<T, Args...>)
         {
             if constexpr(sizeof(T) <= 8)
                 return B8.Create<T>(std::forward<Args>(args)...);
@@ -746,11 +764,15 @@ namespace fdf::detail
             else if constexpr(sizeof(T) <= 64)
                 return B64.Create<T>(std::forward<Args>(args)...);
             else
-                return new T(std::forward<Args>(args)...);
+            {
+                T* p = new (std::nothrow) T(std::forward<Args>(args)...);
+                assert(p && "Allocation shouldn't fail");
+                return p;
+            }
         }
 
         template<typename T>
-        [[nodiscard]] static bool Destroy(T* obj)
+        [[nodiscard]] static bool Destroy(T* obj) noexcept(std::is_nothrow_destructible_v<T>)
         {
             if constexpr(sizeof(T) <= 8)
                 return B8.Destroy(obj);
@@ -1277,14 +1299,14 @@ namespace fdf::detail
     struct Utils
     {
         template<typename... Args>
-        [[nodiscard]] static constexpr UniqueEntryPtr Create(Args&&... args);
-                      static constexpr void           Destroy(Entry* e);
+        [[nodiscard]] static constexpr UniqueEntryPtr Create(Args&&... args) noexcept;
+                      static constexpr void           Destroy(Entry* e) noexcept;
 
         [[nodiscard]] static constexpr UniqueEntryPtr ParseBuffer(std::string_view content) noexcept;
-        [[nodiscard]] static constexpr bool           ParseVariable   (Tokenizer& tokenizer, Entry& parent   FDF_COMMENT_SWITCH(, Token comment));
-        [[nodiscard]] static constexpr bool           ParseSimpleValue(Tokenizer& tokenizer, Entry& entry    FDF_COMMENT_SWITCH(, Token comment));
-        [[nodiscard]] static constexpr bool           ParseArray      (Tokenizer& tokenizer, Entry& array    FDF_COMMENT_SWITCH(, Token comment));
-        [[nodiscard]] static constexpr bool           ParseMap        (Tokenizer& tokenizer, Entry& map      FDF_COMMENT_SWITCH(, Token comment));
+        [[nodiscard]] static constexpr bool           ParseVariable   (Tokenizer& tokenizer, Entry& parent   FDF_COMMENT_SWITCH(, Token comment)) noexcept;
+        [[nodiscard]] static constexpr bool           ParseSimpleValue(Tokenizer& tokenizer, Entry& entry    FDF_COMMENT_SWITCH(, Token comment)) noexcept;
+        [[nodiscard]] static constexpr bool           ParseArray      (Tokenizer& tokenizer, Entry& array    FDF_COMMENT_SWITCH(, Token comment)) noexcept;
+        [[nodiscard]] static constexpr bool           ParseMap        (Tokenizer& tokenizer, Entry& map      FDF_COMMENT_SWITCH(, Token comment)) noexcept;
 
         template<Style STYLE>
         static constexpr void WriteBuffer(const Entry& root, std::string& buffer, bool bOverwrite = true) noexcept;
@@ -1305,19 +1327,16 @@ namespace fdf
     constexpr Entry::Entry(Entry&& other) noexcept
     {
         type = other.type;
-        identifierSize = other.identifierSize;
         depth = other.depth;
         size = other.size;
         parent = other.parent;
         data = other.data;
             
         other.type = Type::Invalid;
-        other.identifierSize = 0;
         other.parent = nullptr;
         other.data = nullptr;
-            
-        detail::constexpr_memcpy(identifier, other.identifier, identifierSize);
-        identifier[identifierSize] = '\0';
+        
+        detail::constexpr_memcpy(identifier, other.identifier, detail::MAX_IDENTIFIER_LENGTH + 1);
             
 #if !FDF_NO_COMMENTS
         comment = other.comment;
@@ -1333,19 +1352,16 @@ namespace fdf
         ReleaseComment();
         
         type = other.type;
-        identifierSize = other.identifierSize;
         depth = other.depth;
         size = other.size;
         parent = other.parent;
         data = other.data;
             
         other.type = Type::Invalid;
-        other.identifierSize = 0;
         other.parent = nullptr;
         other.data = nullptr;
             
-        detail::constexpr_memcpy(identifier, other.identifier, identifierSize);
-        identifier[identifierSize] = '\0';
+        detail::constexpr_memcpy(identifier, other.identifier, detail::MAX_IDENTIFIER_LENGTH + 1);
             
 #if !FDF_NO_COMMENTS
         comment = other.comment;
@@ -1369,9 +1385,9 @@ namespace fdf
     {
         if(newIdentifier.size() > detail::MAX_IDENTIFIER_LENGTH)
             return false;
-        identifierSize = static_cast<uint8_t>(newIdentifier.size());
-        detail::constexpr_memcpy(identifier, newIdentifier.data(), identifierSize);
-        identifier[identifierSize] = '\0';
+        SetIdentifierSize(static_cast<uint8_t>(newIdentifier.size()));
+        detail::constexpr_memcpy(identifier, newIdentifier.data(), GetIdentifierSize());
+        identifier[GetIdentifierSize()] = '\0';
         return true;
     }
 
@@ -1384,7 +1400,7 @@ namespace fdf
             else
             {
                 comment = new (std::nothrow) std::string(newComment);
-                assert(comment);
+                assert(comment && "Allocation shouldn't fail");
             }
         }
         else
@@ -1557,7 +1573,7 @@ namespace fdf
         {
             if(!data)
                 data = new (std::nothrow) std::vector<Entry*>();
-            assert(data);
+            assert(data && "Allocation shouldn't fail");
             GetDataVector<Entry*>()->push_back(e.get());
             size = static_cast<uint32_t>(GetDataVector<Entry*>()->size());
             return e.release();
@@ -1923,7 +1939,7 @@ namespace fdf
     
     constexpr std::span<Entry*> Entry::GetChildren_INTERNAL() noexcept
     {
-        assert(size != 0 || IsContainer());
+        assert(size != 0 || IsContainer() && "If we opt into this version which doesn't checks these, it should be already in a known good state!");
         
         if consteval
         {
@@ -1933,7 +1949,7 @@ namespace fdf
     }
     constexpr std::span<const Entry*> Entry::GetChildren_INTERNAL() const noexcept
     {
-        assert(size != 0 || IsContainer());
+        assert(size != 0 || IsContainer() && "If we opt into this version which doesn't checks these, it should be already in a known good state!");
         
         if consteval
         {
@@ -2526,14 +2542,14 @@ namespace fdf
             case Type::Timestamp:
             {
                 const std::string_view view = GetValue<char>();
-                assert(!view.empty());
+                assert(!view.empty() && "This being empty either means type was wrong or it was really empty which shouldn't happen! (If it was really empty, it would be Type::Null)");
                 return view;
             }
             
             case Type::Hex:
             {
                 const std::string_view view = GetValue<char>();
-                assert(!view.empty());
+                assert(!view.empty() && "This being empty either means type was wrong or it was really empty which shouldn't happen! (If it was really empty, it would be Type::Null)");
 
                 if constexpr(STYLE.bUppercaseHex)
                 {
@@ -2548,7 +2564,7 @@ namespace fdf
             case Type::Version:
             {
                 const auto span = GetValue<uint64_t>();
-                assert(span.size() == 3 || span.size() == 4);
+                assert((span.size() == 3 || span.size() == 4) && "This being empty either means type was wrong or it was really empty which shouldn't happen! (If it was really empty, it would be Type::Null)");
                 if(size == 3)
                     temp = std::format("{}.{}.{}", span[0], span[1], span[2]);
                 else
@@ -2559,7 +2575,7 @@ namespace fdf
             case Type::Bool:
             {
                 const auto span = GetValue<bool>();
-                assert(!span.empty());
+                assert(!span.empty() && "This being empty either means type was wrong or it was really empty which shouldn't happen! (If it was really empty, it would be Type::Null)");
                 temp = std::format("{}", (span[0]? detail::KEYWORDS[2] : detail::KEYWORDS[3]));
                 for(size_t i = 1; i < span.size(); i++)
                     temp = std::format("{}x{}", temp, (span[i]? detail::KEYWORDS[2] : detail::KEYWORDS[3]));
@@ -2569,7 +2585,7 @@ namespace fdf
             case Type::Int:
             {
                 const auto span = GetValue<int64_t>();
-                assert(!span.empty());
+                assert(!span.empty() && "This being empty either means type was wrong or it was really empty which shouldn't happen! (If it was really empty, it would be Type::Null)");
                 temp = std::format("{}", span[0]);
                 for(size_t i = 1; i < span.size(); i++)
                     temp = std::format("{}x{}", temp, span[i]);
@@ -2579,7 +2595,7 @@ namespace fdf
             case Type::UInt:
             {
                 const auto span = GetValue<uint64_t>();
-                assert(!span.empty());
+                assert(!span.empty() && "This being empty either means type was wrong or it was really empty which shouldn't happen! (If it was really empty, it would be Type::Null)");
                 temp = std::format("{}", span[0]);
                 for(size_t i = 1; i < span.size(); i++)
                     temp = std::format("{}x{}", temp, span[i]);
@@ -2589,7 +2605,7 @@ namespace fdf
             case Type::Float:
             {
                 const auto span = GetValue<float>();
-                assert(!span.empty());
+                assert(!span.empty() && "This being empty either means type was wrong or it was really empty which shouldn't happen! (If it was really empty, it would be Type::Null)");
                 temp = std::format("{}", span[0]);
                 for(size_t i = 1; i < span.size(); i++)
                     temp = std::format("{}x{}", temp, span[i]);
@@ -2728,11 +2744,13 @@ namespace fdf::detail
 {
     template<auto DIAGNOSTIC_CALLBACK>
     template<typename... Args>
-    constexpr UniqueEntryPtr Utils<DIAGNOSTIC_CALLBACK>::Create(Args&&... args)
+    constexpr UniqueEntryPtr Utils<DIAGNOSTIC_CALLBACK>::Create(Args&&... args) noexcept
     {
         if consteval
         {
-            return UniqueEntryPtr(new Entry{std::forward<Args>(args)...});
+            UniqueEntryPtr p = UniqueEntryPtr(new (std::nothrow) Entry{std::forward<Args>(args)...});
+            assert(p && "Allocation shouldn't fail");
+            return p;
         }
         else
         {
@@ -2741,7 +2759,7 @@ namespace fdf::detail
     }
 
     template<auto DIAGNOSTIC_CALLBACK>
-    constexpr void Utils<DIAGNOSTIC_CALLBACK>::Destroy(Entry* e)
+    constexpr void Utils<DIAGNOSTIC_CALLBACK>::Destroy(Entry* e) noexcept
     {
         if consteval
         {
@@ -2771,6 +2789,10 @@ namespace fdf::detail
         #endif
 
         UniqueEntryPtr root = Create();
+        if(!root)
+        {
+            std::unreachable();
+        }
         root->type = Type::Map;
         root->depth = static_cast<uint8_t>(-1);
         
@@ -2852,7 +2874,7 @@ namespace fdf::detail
                 if consteval
                 {
                     root->comment = new (std::nothrow) std::string();
-                    assert(root->comment);
+                    assert(root->comment && "Allocation shouldn't fail");
                     root->GetCommentString()->reserve(view.size());
                     
                     bool bAfterNewLine = true;
@@ -2907,18 +2929,22 @@ namespace fdf::detail
     }
 
     template<auto DIAGNOSTIC_CALLBACK>
-    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseVariable   (Tokenizer& tokenizer, Entry& parent   FDF_COMMENT_SWITCH(, Token comment))
+    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseVariable   (Tokenizer& tokenizer, Entry& parent   FDF_COMMENT_SWITCH(, Token comment)) noexcept
     {
-        assert(parent.IsContainer());
-        assert(parent.depth + 1 != static_cast<uint8_t>(-1));
+        assert(parent.IsContainer() && "Sanity check!");
+        assert(parent.depth + 1 != static_cast<uint8_t>(-1) && "Too much nesting check!");
         
         Token currentToken = tokenizer.Current();
         Entry* entry = parent.Emplace();
+        if(!entry)
+        {
+            std::unreachable();
+        }
         entry->depth = parent.depth + 1;
 
         if(parent.type != Type::Array)
         {
-            assert(tokenizer.Current().type == TokenType::Identifier);
+            assert(tokenizer.Current().type == TokenType::Identifier && "Sanity check!");
             if(!entry->SetIdentifier(tokenizer.ToView(currentToken)))
                 return false; // TODO: report too long identifier and continue?
             currentToken = tokenizer.Advance();
@@ -2964,9 +2990,9 @@ namespace fdf::detail
         return false;  // Something we didn't process yet?
     }
     template<auto DIAGNOSTIC_CALLBACK>
-    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseSimpleValue(Tokenizer& tokenizer, Entry& entry    FDF_COMMENT_SWITCH(, Token comment))
+    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseSimpleValue(Tokenizer& tokenizer, Entry& entry    FDF_COMMENT_SWITCH(, Token comment)) noexcept
     {
-        assert(IsValueLiteral(tokenizer.Current().type));
+        assert(IsValueLiteral(tokenizer.Current().type) && "Sanity check!");
         
         Token currentToken = tokenizer.Current();
         const std::string_view view = tokenizer.ToView(currentToken);
@@ -3008,7 +3034,8 @@ namespace fdf::detail
                 entry.size = 1;
                 if consteval
                 {
-                    entry.data = new bool[1];
+                    entry.data = new (std::nothrow) bool[1];
+                    assert(entry.data && "Allocation shouldn't fail");
                     *entry.GetDataAs<bool>() = currentToken.extra8 == 2;
                 }
                 else
@@ -3027,7 +3054,8 @@ namespace fdf::detail
                 entry.size = static_cast<uint32_t>(std::ranges::count(mdBool, 'x')) + 1;
                 if consteval
                 {
-                    entry.data = new bool[entry.size];
+                    entry.data = new (std::nothrow) bool[entry.size];
+                    assert(entry.data && "Allocation shouldn't fail");
                 }
                 else
                 {
@@ -3101,7 +3129,8 @@ namespace fdf::detail
             entry.type = Type::String;
             if consteval
             {
-                entry.data = new std::string();
+                entry.data = new (std::nothrow) std::string();
+                assert(entry.data && "Allocation shouldn't fail");
                 (*entry.GetDataAs<std::string>()) = EVALUATE_LITERAL_TEXT;
             }
             else
@@ -3128,7 +3157,8 @@ namespace fdf::detail
         {
             if consteval
             {
-                entry.data = new std::vector<int64_t>();
+                entry.data = new (std::nothrow) std::vector<int64_t>();
+                assert(entry.data && "Allocation shouldn't fail");
                 entry.GetDataVector<int64_t>()->resize(entry.size);
             }
             else
@@ -3175,7 +3205,8 @@ namespace fdf::detail
                         {
                             if consteval
                             {
-                                auto* temp = new std::vector<uint64_t>();
+                                auto* temp = new (std::nothrow) std::vector<uint64_t>();
+                                assert(temp && "Allocation shouldn't fail");
                                 auto& oldVec = *entry.GetDataVector<int64_t>();
                                 temp->resize(oldVec.size());
                                 
@@ -3277,7 +3308,8 @@ namespace fdf::detail
             entry.type = Type::Float;
             if consteval
             {
-                entry.data = new std::vector<double>();
+                entry.data = new (std::nothrow) std::vector<double>();
+                assert(entry.data && "Allocation shouldn't fail");
                 entry.GetDataVector<double>()->resize(entry.size);
             }
             else
@@ -3366,7 +3398,8 @@ namespace fdf::detail
             entry.type = Type::Version;
             if consteval
             {
-                entry.data = new std::vector<uint64_t>();
+                entry.data = new (std::nothrow) std::vector<uint64_t>();
+                assert(entry.data && "Allocation shouldn't fail");
                 entry.GetDataVector<uint64_t>()->resize(4);
                 (*entry.GetDataVector<uint64_t>())[3] = 0;
             }
@@ -3426,7 +3459,8 @@ namespace fdf::detail
 
         if consteval
         {
-            entry.data = new std::string();
+            entry.data = new (std::nothrow) std::string();
+            assert(entry.data && "Allocation shouldn't fail");
             entry.GetDataAs<std::string>()->resize(entry.size);
         }
         else
@@ -3525,9 +3559,9 @@ namespace fdf::detail
         return false;  // Something we didn't process yet?
     }
     template<auto DIAGNOSTIC_CALLBACK>
-    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseArray      (Tokenizer& tokenizer, Entry& array   FDF_COMMENT_SWITCH(, Token comment))
+    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseArray      (Tokenizer& tokenizer, Entry& array   FDF_COMMENT_SWITCH(, Token comment)) noexcept
     {
-        assert(tokenizer.Current().type == TokenType::SquareBraceOpen);
+        assert(tokenizer.Current().type == TokenType::SquareBraceOpen && "Sanity check!");
         
         array.type = Type::Array;
         
@@ -3607,9 +3641,9 @@ namespace fdf::detail
         }
     }
     template<auto DIAGNOSTIC_CALLBACK>
-    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseMap        (Tokenizer& tokenizer, Entry& map   FDF_COMMENT_SWITCH(, Token comment))
+    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseMap        (Tokenizer& tokenizer, Entry& map   FDF_COMMENT_SWITCH(, Token comment)) noexcept
     {
-        assert(tokenizer.Current().type == TokenType::CurlyBraceOpen);
+        assert(tokenizer.Current().type == TokenType::CurlyBraceOpen && "Sanity check!");
         
         map.type = Type::Map;
 
