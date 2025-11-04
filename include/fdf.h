@@ -1939,7 +1939,7 @@ namespace fdf
     
     constexpr std::span<Entry*> Entry::GetChildren_INTERNAL() noexcept
     {
-        assert(size != 0 || IsContainer() && "If we opt into this version which doesn't checks these, it should be already in a known good state!");
+        assert((size != 0 || IsContainer()) && "If we opt into this version which doesn't checks these, it should be already in a known good state!");
         
         if consteval
         {
@@ -1949,7 +1949,7 @@ namespace fdf
     }
     constexpr std::span<const Entry*> Entry::GetChildren_INTERNAL() const noexcept
     {
-        assert(size != 0 || IsContainer() && "If we opt into this version which doesn't checks these, it should be already in a known good state!");
+        assert((size != 0 || IsContainer()) && "If we opt into this version which doesn't checks these, it should be already in a known good state!");
         
         if consteval
         {
