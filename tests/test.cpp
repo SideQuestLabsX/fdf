@@ -103,12 +103,12 @@ namespace fdf::detail
             std::vector<Token> tokens;
             std::vector<std::string_view> views;
             tokens.push_back(tokenizer.Current());
-            views.push_back(tokens[0].ToView(content));
+            views.push_back(tokenizer.ToView(tokens[0]));
             while(true)
             {
                 Token token = tokenizer.Advance();
                 tokens.push_back(token);
-                views.push_back(token.ToView(content));
+                views.push_back(tokenizer.ToView(token));
         
                 if(token.type == TokenType::EndOfFile || token.type == TokenType::Invalid)
                     break;
@@ -138,7 +138,7 @@ namespace fdf::detail
             return static_cast<bool>(oFile);
         }
 
-        static bool PrintAllEntries(const std::vector<Entry>& entries, std::string_view outFile)
+        static bool PrintAllEntries(const Entry* e, std::string_view outFile)
         {
             std::ofstream file(outFile.data());
             if(!file)
@@ -157,56 +157,28 @@ namespace fdf::detail
             };
 
             std::string temp;
-            for(const Entry& entry : entries)
+            e->ForEach<ForEachFlags::Recursive | ForEachFlags::Group>([&](const Entry& entry)
             {
             #if !FDF_NO_COMMENTS
-                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}--Comment={}", "", 4 * entry.depth, ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.fullIdentifier, entry.DataToView(temp), entry.comment));
+                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}--Comment={}", "", 4 * entry.depth, ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.GetFullIdentifier(), entry.DataToView(temp), entry.comment));
             #else
-                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}", "", 4 * entry.depth, ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.fullIdentifier, entry.DataToView(temp)));
+                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}", "", 4 * entry.depth, ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.GetFullIdentifier(), entry.DataToView(temp)));
             #endif
                 buffer.push_back('\n');
-            }
+            });
 
             file << buffer;
             return static_cast<bool>(file);
         }
 
         template<Style STYLE = {}>
-        static bool PrintFile(const auto& io, std::string_view outFile)
+        static bool PrintFile(const Entry* e, std::string_view outFile)
         {
-            return io.template WriteToFile<STYLE>(outFile);
-        }
-
-
-
-
-        static bool ErrorCallback(Error error, std::string_view message)
-        {
-            if(output.empty())
-                output = std::format("{}: {}"    ,         IsWarning(error)? "Warning" : "Error", message);
-            else
-                output = std::format("{}\n{}: {}", output, IsWarning(error)? "Warning" : "Error", message);
-
-            return true;
+            return Entry::WriteFile<STYLE>(*e, outFile);
         }
 
         
 
-
-        static void PrintLastSuccessfullyParsedEntry(auto& io)
-        {
-            size_t lastID = -1;
-            for(size_t i = io.entries.size() - 1; i != -1; i++)
-            {
-                if(io.entries[i].type != Type::Invalid)
-                {
-                    lastID = i;
-                    break;
-                }
-            }
-
-            std::println("-----LAST SUCCESSFULLY PARSED ENTRY: {} (id: {})-----", lastID == -1? "<None>" : io.entries[lastID].fullIdentifier, static_cast<int64_t>(lastID));
-        }
 
         static bool ParseTest()
         {
@@ -217,16 +189,12 @@ namespace fdf::detail
                 std::print("[{:02}/{:02}] {:<{}}", i + 1, filesToTest.size(), directories.inputFile, longestFilename);
 
                 auto startTime = std::chrono::high_resolution_clock::now();
-                IO<ErrorCallback> io;
-                bool bSuccess = io.Parse(std::filesystem::path(directories.inputFile));
+                UniqueEntryPtr e = Entry::ParseFile(std::filesystem::path(directories.inputFile));
                 auto endTime = std::chrono::high_resolution_clock::now();
                 auto duration = duration_cast<std::chrono::nanoseconds>(endTime - startTime);
 
-                std::string durationString = std::format("{:.6f}ms", duration.count() / 1'000'000.0);
-                std::println(" -- Result: {:<7} -- Took: {:<9}", bSuccess? "SUCCESS" : "FAIL", durationString);
-
-                if(!bSuccess)
-                    PrintLastSuccessfullyParsedEntry(io);
+                std::string durationString = std::format("{:.6f}ms", static_cast<double>(duration.count()) / 1'000'000.0);
+                std::println(" -- Result: {:<7} -- Took: {:<9}", e? "SUCCESS" : "FAIL", durationString);
 
                 if(!output.empty())
                 {
@@ -236,10 +204,10 @@ namespace fdf::detail
                 std::println();
                 
                 PrintAllTokens(directories.inputFile, directories.tokenizedFile);
-                PrintAllEntries(io.entries, directories.entriesFile);
-                PrintFile(io, directories.outputFile);
+                PrintAllEntries(e.get(), directories.entriesFile);
+                PrintFile(e.get(), directories.outputFile);
 
-                bResult = bResult && bSuccess;
+                bResult = bResult && e;
             }
 
             return bResult;
@@ -252,11 +220,10 @@ namespace fdf::detail
         // TODO: Maybe automate ReadTest so we don't need to implement each Entry by hand? (and manually adjust formatting (currently 24))
         static bool ReadTest()
         {
-            IO io;
-            if(!io.Parse(std::filesystem::path(filesToTest[0].inputFile)))
+            UniqueEntryPtr e = Entry::ParseFile(std::filesystem::path(filesToTest[0].inputFile));
+            if(!e)
             {
                 std::puts("[ERROR]: Failed to parse the design file... Should never happen unless initial parse failed too!");
-                PrintLastSuccessfullyParsedEntry(io);
                 return false;
             }
 
@@ -265,10 +232,10 @@ namespace fdf::detail
 
 
             {
-                std::println("          Entry Count: {:>3} (should be 135) (update when editing design file)", io.GetEntryCount());
-                std::println("Top Level Entry Count: {:>3} (should be  56) (update when editing design file)", io.GetTopLevelEntryCount());
+                std::println("          Entry Count: {:>3} (should be 135) (update when editing design file)", e->GetChildCountRecursive());
+                std::println("Top Level Entry Count: {:>3} (should be  56) (update when editing design file)", e->GetChildCount());
 
-                if(io.GetEntryCount() != 135 || io.GetTopLevelEntryCount() != 56)
+                if(e->GetChildCountRecursive() != 135 || e->GetChildCount() != 56)
                 {
                     bResult = false;
                     std::puts("[ERROR]: Invalid 'Entry Count' or 'Top Level Entry Count'");
@@ -279,74 +246,78 @@ namespace fdf::detail
 
 
             {
-                auto entry = io.GetEntry("appVersion");
-                std::print("{:<24}  ->  ", "appVersion");
-                if(entry->type == Type::Version)
+                Entry* entry = e->GetChild("appVersion");
+                if(entry && entry->type == Type::Version)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<uint64_t>();
                     std::println("{}.{}.{}.{}", val[0], val[1], val[2], val[3]);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "appVersion");
                     std::puts("<ERROR>");
                 }
             }
 
 
             {
-                auto entry = io.GetEntry("name");
-                std::print("{:<24}  ->  ", "name");
-                if(entry->type == Type::String)
+                Entry* entry = e->GetChild("name");
+                if(entry && entry->type == Type::String)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<std::string_view>();
                     std::println("{}", val);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "name");
                     std::puts("<ERROR>");
                 }
             }
 
 
             {
-                auto entry = io.GetEntry("enabled1");
-                std::print("{:<24}  ->  ", "enabled1");
-                if(entry->type == Type::Bool && entry->size == 1)
+                Entry* entry = e->GetChild("enabled1");
+                if(entry && entry->type == Type::Bool && entry->size == 1)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<bool>();
                     std::println("{}", val[0]);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "enabled1");
                     std::puts("<ERROR>");
                 }
             }
 
 
             {
-                auto entry = io.GetEntry("id");
-                std::print("{:<24}  ->  ", "id");
-                if(entry->type == Type::Int)
+                Entry* entry = e->GetChild("id");
+                if(entry && entry->type == Type::Int)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<int>();
                     std::println("{}", val[0]);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "id");
                     std::puts("<ERROR>");
                 }
             }
 
 
             {
-                auto entry = io.GetEntry("uuid");
-                std::print("{:<24}  ->  ", "uuid");
-                if(entry->type == Type::String)
+                Entry* entry = e->GetChild("uuid");
+                if(entry && entry->type == Type::String)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<char>();
                     for(char c : val)
                     {
@@ -360,77 +331,82 @@ namespace fdf::detail
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "uuid");
                     std::puts("<ERROR>");
                 }
             }
 
 
             {
-                auto entry = io.GetEntry("pi");
-                std::print("{:<24}  ->  ", "pi");
-                if(entry->type == Type::Float)
+                Entry* entry = e->GetChild("pi");
+                if(entry && entry->type == Type::Float)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<float>();
                     std::println("{}", val[0]);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "pi");
                     std::puts("<ERROR>");
                 }
             }
 
 
             {
-                auto entry = io.GetEntry("value");
-                std::print("{:<24}  ->  ", "value");
-                if(entry->type == Type::Null)
+                Entry* entry = e->GetChild("value");
+                if(entry && entry->type == Type::Null)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     std::puts("null");
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "value");
                     std::puts("<ERROR>");
                 }
             }
 
 
             {
-                auto entry = io.GetEntry("value2");
-                std::print("{:<24}  ->  ", "value2");
-                if(entry->type == Type::Null)
+                Entry* entry = e->GetChild("value2");
+                if(entry && entry->type == Type::Null)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     std::puts("null");
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "value2");
                     std::puts("<ERROR>");
                 }
             }
 
 
             {
-                auto entry = io.GetEntry("gameSettings1.resolution");
-                std::print("{:<24}  ->  ", "gameSettings1.resolution");
-                if(entry->type == Type::Int && entry->size == 2)
+                Entry* entry = e->GetChild("gameSettings1.resolution");
+                if(entry && entry->type == Type::Int && entry->size == 2)
                 {
+                    std::print("{:<32}  ->  ", entry->GetFullIdentifier());
                     auto val = entry->GetValue<int64_t>();
                     std::println("{}x{}", val[0], val[1]);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "gameSettings1.resolution");
                     std::puts("<ERROR>");
                 }
             }
 
 
             {
-                auto entry = io.GetEntry("NON_EXISTING");
-                std::print("{:<24}  ->  ", "NON_EXISTING");
-                if(entry->type == Type::Invalid)
+                Entry* entry = e->GetChild("NON_EXISTING");
+                std::print("{:<32}  ->  ", "NON_EXISTING");
+                if(!entry)
                 {
                     std::puts("<NON_EXISTING>");
                 }
@@ -443,64 +419,68 @@ namespace fdf::detail
 
 
             {
-                auto entry = io.GetEntry("escaped1");
-                std::print("{:<24}  ->  ", "escaped1");
-                if(entry->type == Type::String)
+                Entry* entry = e->GetChild("escaped1");
+                if(entry && entry->type == Type::String)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<std::string_view>();
                     std::println("{}", val);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "escaped1");
                     std::puts("<ERROR>");
                 }
             }
 
 
             {
-                auto entry = io.GetEntry("escaped2");
-                std::print("{:<24}  ->  ", "escaped2");
-                if(entry->type == Type::String)
+                Entry* entry = e->GetChild("escaped2");
+                if(entry && entry->type == Type::String)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<std::string_view>();
                     std::println("{}", val);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "escaped2");
                     std::puts("<ERROR>");
                 }
             }
 
 
             {
-                auto entry = io.GetEntry("escaped5");
-                std::print("{:<24}  ->  ", "escaped5");
-                if(entry->type == Type::String)
+                Entry* entry = e->GetChild("escaped5");
+                if(entry && entry->type == Type::String)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<std::string_view>();
                     std::println("{}", val);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "escaped5");
                     std::puts("<ERROR>");
                 }
             }
 
 
             {
-                auto entry = io.GetEntry("escaped6");
-                std::print("{:<24}  ->  ", "escaped6");
-                if(entry->type == Type::String)
+                Entry* entry = e->GetChild("escaped6");
+                if(entry && entry->type == Type::String)
                 {
+                    std::print("{:<32}  ->  ", entry->GetIdentifier());
                     auto val = entry->GetValue<std::string_view>();
                     std::println("{}", val);
                 }
                 else
                 {
                     bResult = false;
+                    std::print("{:<32}  ->  ", "escaped6");
                     std::puts("<ERROR>");
                 }
             }
@@ -514,11 +494,12 @@ namespace fdf::detail
 
         static bool WriteTest()
         {
-            IO io;
+            /*IO io;
 
             std::puts("<Placeholder>");
 
-            return io.WriteToFile<Style{.bCommasOnLastElement = false}>(FDF_TEST_DIRECTORY "/output/WriteTest.txt");;
+            return io.WriteToFile<Style{.bCommasOnLastElement = false}>(FDF_TEST_DIRECTORY "/output/WriteTest.txt");;*/
+            return true;
         }
     };
 }
@@ -533,7 +514,6 @@ int main()
     std::filesystem::path currentDesignFile = FDF_ROOT_DIRECTORY "/designs/Design_5.txt";
     std::filesystem::path testDir = FDF_TEST_DIRECTORY;
     std::filesystem::path outputDir = FDF_TEST_DIRECTORY "/output";
-    bool result = true;
 
     if(!std::filesystem::exists(outputDir))
         std::filesystem::create_directory(outputDir);
@@ -564,3 +544,73 @@ int main()
 
     return bResult? 0 : -1;
 }
+
+
+template<typename T>
+constexpr T ExtractValue(std::string_view buffer)
+{
+    T value = 0;
+    
+    fdf::UniqueEntryPtr eRoot = fdf::Entry::ParseBuffer(buffer);
+    auto* eValue = eRoot->GetDirectChild("value");
+
+    if(eValue)
+    {
+        auto span = eValue->GetValue<T>();
+        if(!span.empty())
+            value = span[0];
+    }
+    
+    return value;
+}
+
+
+//[[maybe_unused]] constexpr auto value0 = ExtractValue<int64_t>("value = 25x50");
+//[[maybe_unused]] constexpr auto value1 = ExtractValue<bool>("value = truexfalsextrue");
+/*int main()
+{
+    std::string temp;
+    temp.reserve(1024);
+    
+    if(fdf::UniqueEntryPtr e = fdf::Entry::ParseBuffer("category{ name = 'test' }"))
+    {
+        (void)e->ParseCombineBuffer("pi = 3.14");
+        (void)e->ParseCombineBuffer("pi = 3.2");
+        e->ForEach<fdf::ForEachFlags::Recursive | fdf::ForEachFlags::IncludeSelf>([&temp](fdf::Entry& myEntry)
+        {
+            std::print("name: {}   -   depth: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.GetDepth(), myEntry.DataToView(temp));
+        });
+        std::puts("\n\n");
+        
+        if(fdf::UniqueEntryPtr ee = fdf::Entry::ParseBuffer("pi = 3.3"))
+        {
+            if(e->Combine(ee))
+            {
+                e->ForEach<fdf::ForEachFlags::Recursive | fdf::ForEachFlags::IncludeSelf>([&temp](fdf::Entry& myEntry)
+                {
+                    std::print("name: {}   -   depth: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.GetDepth(), myEntry.DataToView(temp));
+                });
+                std::puts("\n\n");
+            }
+        }
+    }
+    
+    //TODO implement SetValue() functions
+    //TODO implement creating new entries
+    //TODO try to recover as much as possible when it comes to failures, but emit a warning for each failure
+    
+    if(fdf::UniqueEntryPtr e = fdf::Entry::ParseFile(FDF_ROOT_DIRECTORY "/designs/Design_5.txt"))
+    {
+        e->ForEach<fdf::ForEachFlags::Recursive | fdf::ForEachFlags::IncludeSelf | fdf::ForEachFlags::Group>([&temp](fdf::Entry& myEntry)
+        {
+            std::print("name: {}   -   depth: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.GetDepth(), myEntry.DataToView(temp));
+        });
+        [[maybe_unused]] auto* id = e->GetDirectChild("id");
+        [[maybe_unused]] size_t count = e->GetChildCountRecursive();
+        std::cout << "comment: " << e->GetComment() << '\n';
+        temp.clear();
+        e->SetIdentifier("TestTest");
+        fdf::Entry::WriteBuffer(*e, temp);
+    }
+    std::puts("\n\n");
+}*/

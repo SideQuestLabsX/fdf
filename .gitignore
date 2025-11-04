@@ -5,6 +5,7 @@ _PROJ/
 out/
 build/
 tests/output/
+cmake-build-*/
 
 
 
