@@ -344,19 +344,19 @@ FDF_EXPORT namespace fdf
 
     public:
         template<auto DIAGNOSTIC_CALLBACK = nullptr>
-        [[nodiscard]] bool ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty);
+        [[nodiscard]] bool ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty) noexcept;
         template<auto DIAGNOSTIC_CALLBACK = nullptr>
         [[nodiscard]] constexpr bool ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty) noexcept;
         [[nodiscard]] constexpr bool Combine(UniqueEntryPtr& other, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty) noexcept;
 
     public:
         template<auto DIAGNOSTIC_CALLBACK = nullptr>
-        [[nodiscard]] static UniqueEntryPtr ParseFile(const std::filesystem::path& filepath);
+        [[nodiscard]] static UniqueEntryPtr ParseFile(const std::filesystem::path& filepath) noexcept;
         template<auto DIAGNOSTIC_CALLBACK = nullptr>
         [[nodiscard]] static constexpr UniqueEntryPtr ParseBuffer(std::string_view content) noexcept;
         
         template<Style STYLE = {}>
-        [[nodiscard]] static bool WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists = true);
+        [[nodiscard]] static bool WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists = true) noexcept;
         template<Style STYLE = {}>
         static constexpr void WriteBuffer(const Entry& root, std::string& buffer) noexcept;
     };
@@ -2634,9 +2634,10 @@ namespace fdf
 namespace fdf
 {
     template <auto DIAGNOSTIC_CALLBACK>
-    bool Entry::ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy)
+    bool Entry::ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy) noexcept
     {
-        if(!std::filesystem::exists(filepath) || !std::filesystem::is_regular_file(filepath))
+        std::error_code ec;
+        if(!std::filesystem::exists(filepath, ec) || ec || !std::filesystem::is_regular_file(filepath, ec) || ec)
             return false;
 
         std::ifstream file(filepath);
@@ -2690,9 +2691,10 @@ namespace fdf
     
     
     template<auto DIAGNOSTIC_CALLBACK>
-    UniqueEntryPtr Entry::ParseFile(const std::filesystem::path& filepath)
+    UniqueEntryPtr Entry::ParseFile(const std::filesystem::path& filepath) noexcept
     {
-        if(!std::filesystem::exists(filepath) || !std::filesystem::is_regular_file(filepath))
+        std::error_code ec;
+        if(!std::filesystem::exists(filepath, ec) || ec || !std::filesystem::is_regular_file(filepath, ec) || ec)
             return nullptr;
 
         std::ifstream file(filepath);
@@ -2710,15 +2712,15 @@ namespace fdf
     }
 
     template<Style STYLE>
-    bool Entry::WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists)
+    bool Entry::WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists) noexcept
     {
         auto parentDir = filepath.parent_path();
-        if(!std::filesystem::exists(parentDir))
+        std::error_code ec;
+        if(!std::filesystem::exists(parentDir, ec) && (ec || !bCreateIfNotExists || !std::filesystem::create_directories(parentDir, ec) || ec))
         {
-            if(!bCreateIfNotExists || !std::filesystem::create_directories(parentDir))
-                return false;
+            return false;
         }
-        else if(!std::filesystem::is_regular_file(filepath))
+        if(!std::filesystem::is_regular_file(filepath, ec) || ec)
         {
             return false;
         }
