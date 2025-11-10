@@ -171,6 +171,16 @@ FDF_EXPORT namespace fdf
 
 
 
+    struct NullType    { consteval NullType()    noexcept = default; };
+    struct NilType     { consteval NilType()     noexcept = default; };
+    struct ArrayType   { consteval ArrayType()   noexcept = default; };
+    struct MapType     { consteval MapType()     noexcept = default; };
+    struct VersionType { consteval VersionType() noexcept = default; };
+
+
+
+
+
     using UniqueEntryPtr = std::unique_ptr<Entry, detail::EntryDeleter>;
     class Entry
     {
@@ -186,6 +196,7 @@ FDF_EXPORT namespace fdf
         constexpr ~Entry() noexcept;
 
         friend struct detail::Test;
+        friend constexpr UniqueEntryPtr NewEntry() noexcept;
 
         template<auto DIAGNOSTIC_CALLBACK>
         friend struct detail::Utils;
@@ -274,17 +285,19 @@ FDF_EXPORT namespace fdf
             #endif
                 return {};
         }
+        
+    private:
+        constexpr void SetIdentifier_INTERNAL(std::string_view newIdentifier) noexcept;
 
     public:
-        constexpr bool SetIdentifier(std::string_view newIdentifier) noexcept;
+        [[nodiscard]] constexpr bool SetIdentifier(std::string_view newIdentifier) noexcept;
         constexpr void SetComment(std::string_view newComment) noexcept;
         constexpr void ReleaseData() noexcept;
         constexpr void ReleaseComment() noexcept;
         constexpr void ReleaseEverything() noexcept;
 
-    private:
-        [[nodiscard]] constexpr Entry* Emplace() noexcept;
     public:
+        [[nodiscard]] constexpr Entry* Emplace(std::string_view _identifier) noexcept;
         [[nodiscard]] constexpr Entry* AddChild(UniqueEntryPtr& e) noexcept;
         [[nodiscard]] constexpr bool   RemoveChild(Entry& e) noexcept;
         [[nodiscard]] constexpr bool   RemoveChild(std::string_view _identifier) noexcept;
@@ -335,6 +348,32 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr auto GetValue()       noexcept       { static_assert(false, "Invalid type"); }
         template<typename T>
         [[nodiscard]] constexpr auto GetValue() const noexcept       { static_assert(false, "Invalid type"); }
+        
+        constexpr void SetType(Type _type) noexcept;
+        //constexpr void Resize(uint32_t _size) noexcept; //TODO Implement
+        
+        constexpr void SetValue(NullType) noexcept;
+        constexpr void SetValue(NilType) noexcept;
+        constexpr void SetValue(ArrayType) noexcept;
+        constexpr void SetValue(MapType) noexcept;
+        constexpr void SetValue(bool value) noexcept;
+        constexpr void SetValue(std::signed_integral   auto value) noexcept;
+        constexpr void SetValue(std::unsigned_integral auto value) noexcept;
+        constexpr void SetValue(std::floating_point    auto value) noexcept;
+        constexpr void SetValue(std::string_view value) noexcept;
+        constexpr void SetValue(char value) noexcept;
+        constexpr void SetValue(const char* value) noexcept;
+        constexpr void SetValue(auto* value) = delete; // We don't allow pointer types in here (except char*)
+        
+        constexpr void SetValue(std::span<bool> value) noexcept;
+        template<std::signed_integral T>
+        constexpr void SetValue(std::span<T> value) noexcept;
+        template<std::unsigned_integral T>
+        constexpr void SetValue(std::span<T> value) noexcept;
+        template<std::unsigned_integral T>
+        constexpr void SetValue(std::span<T> value, VersionType) noexcept;
+        template<std::floating_point T>
+        constexpr void SetValue(std::span<T> value) noexcept;
 
         template<Style STYLE = {}>
         [[nodiscard]] constexpr std::string_view DataToView(std::string& temp) const noexcept;
@@ -345,18 +384,23 @@ FDF_EXPORT namespace fdf
         template<auto DIAGNOSTIC_CALLBACK = nullptr>
         [[nodiscard]] constexpr bool ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty) noexcept;
         [[nodiscard]] constexpr bool Combine(UniqueEntryPtr& other, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty) noexcept;
-
-    public:
-        template<auto DIAGNOSTIC_CALLBACK = nullptr>
-        [[nodiscard]] static UniqueEntryPtr ParseFile(const std::filesystem::path& filepath) noexcept;
-        template<auto DIAGNOSTIC_CALLBACK = nullptr>
-        [[nodiscard]] static constexpr UniqueEntryPtr ParseBuffer(std::string_view content) noexcept;
-        
-        template<Style STYLE = {}>
-        [[nodiscard]] static bool WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists = true) noexcept;
-        template<Style STYLE = {}>
-        static constexpr void WriteBuffer(const Entry& root, std::string& buffer) noexcept;
     };
+    
+    
+    
+    
+    
+    template<auto DIAGNOSTIC_CALLBACK = nullptr>
+    [[nodiscard]] UniqueEntryPtr ParseFile(const std::filesystem::path& filepath) noexcept;
+    template<auto DIAGNOSTIC_CALLBACK = nullptr>
+    [[nodiscard]] constexpr UniqueEntryPtr ParseBuffer(std::string_view content) noexcept;
+        
+    template<Style STYLE = {}>
+    [[nodiscard]] bool WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists = true) noexcept;
+    template<Style STYLE = {}>
+    constexpr void WriteBuffer(const Entry& root, std::string& buffer) noexcept;
+    
+    [[nodiscard]] constexpr UniqueEntryPtr NewEntry() noexcept;
 }
 
 
@@ -487,6 +531,28 @@ namespace fdf::detail
     [[nodiscard]] constexpr bool constexpr_isdigit(char c) noexcept
     {
         return c >= '0' && c <= '9';
+    }
+    
+    [[nodiscard]] constexpr bool IsKeyword(std::string_view view) noexcept
+    {
+        for(size_t i = 0; i < KEYWORD_COUNT; i++)
+        {
+            if(view == KEYWORDS[i])
+                return true;
+        }
+        return false;
+    }
+    
+    [[nodiscard]] constexpr bool IsValidIdentifier(std::string_view identifier) noexcept
+    {
+        if(identifier.empty() || identifier.size() > MAX_IDENTIFIER_LENGTH || (!constexpr_isalpha(identifier[0]) && identifier[0] != '_'))
+            return false;
+        
+        size_t firstNonID = 1;
+        while(firstNonID < identifier.size() && (constexpr_isalpha(identifier[firstNonID]) || constexpr_isdigit(identifier[firstNonID]) || identifier[firstNonID] == '_'))
+            firstNonID++;
+        
+        return firstNonID >= identifier.size()? !IsKeyword(identifier) : false;
     }
 }
 
@@ -993,17 +1059,8 @@ namespace fdf::detail
                 firstNonAlpha++;
 
             token.count = static_cast<uint32_t>(firstNonAlpha) - token.startPosition;
-            const std::string_view view = ToView(token);
-
-            if(firstNonAlpha >= content.size()) // we reached eof before any space or any other token
-            {
-                checkKeywords(view);
-                index = static_cast<uint32_t>(-1);
-                return token;
-            }
-
-            checkKeywords(view);
-            index = static_cast<uint32_t>(firstNonAlpha);
+            checkKeywords(ToView(token));
+            index = firstNonAlpha >= content.size()? static_cast<uint32_t>(-1) : static_cast<uint32_t>(firstNonAlpha);
             return token;
         }
 
@@ -1380,9 +1437,16 @@ namespace fdf
     }
     
     
+    constexpr void Entry::SetIdentifier_INTERNAL(std::string_view newIdentifier) noexcept
+    {
+        SetIdentifierSize(static_cast<uint8_t>(std::min(newIdentifier.size(), detail::MAX_IDENTIFIER_LENGTH)));
+        detail::constexpr_memcpy(identifier, newIdentifier.data(), GetIdentifierSize());
+        identifier[GetIdentifierSize()] = '\0';
+    }
+    
     constexpr bool Entry::SetIdentifier(std::string_view newIdentifier) noexcept
     {
-        if(newIdentifier.size() > detail::MAX_IDENTIFIER_LENGTH)
+        if(!detail::IsValidIdentifier(newIdentifier))
             return false;
         SetIdentifierSize(static_cast<uint8_t>(newIdentifier.size()));
         detail::constexpr_memcpy(identifier, newIdentifier.data(), GetIdentifierSize());
@@ -1497,7 +1561,6 @@ namespace fdf
         }
         
         data = nullptr;
-        type = Type::Null;
     }
 
     constexpr void Entry::ReleaseComment() noexcept
@@ -1527,15 +1590,26 @@ namespace fdf
 
 
     
-    constexpr Entry* Entry::Emplace() noexcept
+    constexpr Entry* Entry::Emplace(std::string_view _identifier) noexcept
     {
-        auto e = detail::Utils<>::Create();
+        assert(IsContainer() && "Sanity check!");
+        assert(depth + 1 != static_cast<uint8_t>(-1) && "Too much nesting check!");
+        
+        if(type == Type::Map && !detail::IsValidIdentifier(_identifier))
+            return nullptr;
+        
+        UniqueEntryPtr e = detail::Utils<>::Create();
+        if(!e)
+            return nullptr;
+        if(type == Type::Map)
+            e->SetIdentifier_INTERNAL(_identifier);
+        
         return AddChild(e);
     }
     
     constexpr Entry* Entry::AddChild(UniqueEntryPtr& e) noexcept
     {
-        if(!IsContainer() || e->parent || e->depth == static_cast<uint8_t>(-1))
+        if(!e || !IsContainer() || depth + 1 == static_cast<uint8_t>(-1) || e->parent || e->depth == static_cast<uint8_t>(-1))
             return nullptr;
         
         e->parent = this;
@@ -2513,6 +2587,332 @@ namespace fdf
     [[nodiscard]] constexpr auto Entry::GetValue<char*>() const noexcept  { return GetValue<char>(); }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<const char*>() const noexcept  { return GetValue<char>(); }
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    constexpr void Entry::SetType(Type _type) noexcept
+    {
+        assert(_type != Type::Invalid && "You shouldn NEVER set type to Type::Invalid!");
+        if(_type == type)
+            return;
+        ReleaseData();
+        type = _type;
+    }
+    
+    //TODO Implement
+    /*constexpr void Entry::Resize(const uint32_t _size) noexcept
+    {
+        if(size == _size)
+            return;
+        
+        if(type == Type::Bool)
+        {
+            if consteval
+            {
+                bool* _data = new (std::nothrow) bool[_size];
+                assert(_data && "Allocation shouldn't fail");
+                uint32_t i = 0;
+                for(; i < std::min(size, _size); i++)
+                    _data[i] = GetDataAs<bool>()[i];
+                for(; i < _size; i++)
+                    _data[i] = false;
+                
+                delete[] GetDataAs<bool>();
+                data = _data;
+                size = _size;
+            }
+            else
+            {
+                void* _data = detail::GlobalAllocator::Allocate(_size * sizeof(bool));
+                uint32_t i = 0;
+                for(; i < std::min(size, _size); i++)
+                    static_cast<bool*>(_data)[i] = static_cast<bool*>(data)[i];
+                for(; i < _size; i++)
+                    static_cast<bool*>(_data)[i] = false;
+                
+                detail::GlobalAllocator::Deallocate(data, size);
+                data = _data;
+                size = _size;
+            }
+        }
+        else if(type == Type::Int)
+        {
+            
+        }
+        else if(type == Type::UInt)
+        {
+            
+        }
+        else if(type == Type::Float)
+        {
+            
+        }
+        else if(type == Type::Version)
+        {
+            size = _size;
+        }
+    }*/
+    
+    
+    
+    
+    
+    constexpr void Entry::SetValue(NullType) noexcept
+    {
+        ReleaseData();
+        type = Type::Null;
+    }
+    constexpr void Entry::SetValue(NilType) noexcept
+    {
+        ReleaseData();
+        type = Type::Null;
+    }
+    
+    constexpr void Entry::SetValue(ArrayType) noexcept
+    {
+        ReleaseData();
+        type = Type::Array;
+    }
+    constexpr void Entry::SetValue(MapType) noexcept
+    {
+        ReleaseData();
+        type = Type::Map;
+    }
+    
+    constexpr void Entry::SetValue(const bool value) noexcept
+    {
+        ReleaseData();
+        type = Type::Bool;
+        size = 1;
+        if consteval
+        {
+            data = new (std::nothrow) bool[1];
+            assert(data && "Allocation shouldn't fail");
+            *GetDataAs<bool>() = value;
+        }
+        else
+        {
+            data = detail::GlobalAllocator::Allocate(sizeof(bool));
+            static_cast<bool*>(data)[0] = value;
+        }
+    }
+    
+    constexpr void Entry::SetValue(const std::signed_integral auto value) noexcept
+    {
+        ReleaseData();
+        type = Type::Int;
+        size = 1;
+        if consteval
+        {
+            data = new (std::nothrow) std::vector<int64_t>();
+            assert(data && "Allocation shouldn't fail");
+            GetDataVector<int64_t>()->resize(size);
+            (*GetDataVector<int64_t>())[0] = static_cast<int64_t>(value);
+        }
+        else
+        {
+            data = detail::GlobalAllocator::Allocate(size * sizeof(int64_t));
+            static_cast<int64_t*>(data)[0] = static_cast<int64_t>(value);
+        }
+    }
+    
+    constexpr void Entry::SetValue(const std::unsigned_integral auto value) noexcept
+    {
+        ReleaseData();
+        type = Type::UInt;
+        size = 1;
+        if consteval
+        {
+            data = new (std::nothrow) std::vector<uint64_t>();
+            assert(data && "Allocation shouldn't fail");
+            GetDataVector<uint64_t>()->resize(size);
+            (*GetDataVector<uint64_t>())[0] = static_cast<uint64_t>(value);
+        }
+        else
+        {
+            data = detail::GlobalAllocator::Allocate(size * sizeof(uint64_t));
+            static_cast<uint64_t*>(data)[0] = static_cast<uint64_t>(value);
+        }
+    }
+    
+    constexpr void Entry::SetValue(const std::floating_point auto value) noexcept
+    {
+        ReleaseData();
+        type = Type::Float;
+        size = 1;
+        if consteval
+        {
+            data = new (std::nothrow) std::vector<double>();
+            assert(data && "Allocation shouldn't fail");
+            GetDataVector<double>()->resize(size);
+            (*GetDataVector<double>())[0] = static_cast<double>(value);
+        }
+        else
+        {
+            data = detail::GlobalAllocator::Allocate(size * sizeof(double));
+            static_cast<double*>(data)[0] = static_cast<double>(value);
+        }
+    }
+    
+    constexpr void Entry::SetValue(const std::string_view value) noexcept
+    {
+        ReleaseData();
+        size = static_cast<uint32_t>(value.size());
+        type = Type::String;
+        if consteval
+        {
+            data = new (std::nothrow) std::string();
+            assert(data && "Allocation shouldn't fail");
+            (*GetDataAs<std::string>()) = value;
+        }
+        else
+        {
+            data = detail::GlobalAllocator::Allocate(size + 1 + sizeof(uint32_t));
+            *static_cast<uint32_t*>(data) = size;
+            detail::constexpr_memcpy((static_cast<char*>(data) + sizeof(uint32_t)), value.data(), value.size() + 1);
+            (static_cast<char*>(data) + sizeof(uint32_t))[value.size()] = '\0';
+        }
+    }
+    
+    constexpr void Entry::SetValue(const char value) noexcept
+    {
+        SetValue(std::string_view(&value, 1));
+    }
+    
+    constexpr void Entry::SetValue(const char* value) noexcept
+    {
+        SetValue(std::string_view(value));
+    }
+    
+    
+    
+    
+    
+    constexpr void Entry::SetValue(std::span<bool> value) noexcept
+    {
+        ReleaseData();
+        type = Type::Bool;
+        size = static_cast<uint32_t>(std::max(0ull, value.size()));
+        if consteval
+        {
+            data = new (std::nothrow) bool[size];
+            assert(data && "Allocation shouldn't fail");
+            for(size_t i = 0; i < size; i++)
+                *(GetDataAs<bool>() + 1) = value[i];
+        }
+        else
+        {
+            data = detail::GlobalAllocator::Allocate(size * sizeof(bool));
+            for(size_t i = 0; i < size; i++)
+                static_cast<bool*>(data)[i] = value[i];
+        }
+    }
+    
+    template <std::signed_integral T>
+    constexpr void Entry::SetValue(std::span<T> value) noexcept
+    {
+        ReleaseData();
+        type = Type::Int;
+        size = static_cast<uint32_t>(std::max(0ull, value.size()));
+        if(size <= 0u)
+            return;
+        if consteval
+        {
+            data = new (std::nothrow) std::vector<int64_t>();
+            assert(data && "Allocation shouldn't fail");
+            GetDataVector<int64_t>()->resize(size);
+            for(size_t i = 0; i < size; i++)
+                (*GetDataVector<int64_t>())[i] = static_cast<int64_t>(value[i]);
+        }
+        else
+        {
+            data = detail::GlobalAllocator::Allocate(size * sizeof(int64_t));
+            for(size_t i = 0; i < size; i++)
+                static_cast<int64_t*>(data)[i] = static_cast<int64_t>(value[i]);
+        }
+    }
+    
+    template <std::unsigned_integral T>
+    constexpr void Entry::SetValue(std::span<T> value) noexcept
+    {
+        ReleaseData();
+        type = Type::UInt;
+        size = static_cast<uint32_t>(std::max(0ull, value.size()));
+        if(size <= 0u)
+            return;
+        if consteval
+        {
+            data = new (std::nothrow) std::vector<uint64_t>();
+            assert(data && "Allocation shouldn't fail");
+            GetDataVector<uint64_t>()->resize(size);
+            for(size_t i = 0; i < size; i++)
+                (*GetDataVector<uint64_t>())[i] = static_cast<uint64_t>(value[i]);
+        }
+        else
+        {
+            data = detail::GlobalAllocator::Allocate(size * sizeof(uint64_t));
+            for(size_t i = 0; i < size; i++)
+                static_cast<uint64_t*>(data)[i] = static_cast<uint64_t>(value[i]);
+        }
+    }
+    
+    template <std::unsigned_integral T>
+    constexpr void Entry::SetValue(std::span<T> value, VersionType) noexcept
+    {
+        assert((value.size() == 3 || value.size() == 4) && "Version must include 3 or 4 elements!");
+        ReleaseData();
+        type = Type::UInt;
+        size = static_cast<uint32_t>(std::max(0ull, value.size()));
+        if consteval
+        {
+            data = new (std::nothrow) std::vector<uint64_t>();
+            assert(data && "Allocation shouldn't fail");
+            GetDataVector<uint64_t>()->resize(4, 0ull);
+            for(size_t i = 0; i < size; i++)
+                (*GetDataVector<uint64_t>())[i] = static_cast<uint64_t>(value[i]);
+        }
+        else
+        {
+            data = detail::GlobalAllocator::Allocate(4 * sizeof(uint64_t));
+            static_cast<uint64_t*>(data)[0] = 0ull;
+            static_cast<uint64_t*>(data)[1] = 0ull;
+            static_cast<uint64_t*>(data)[2] = 0ull;
+            static_cast<uint64_t*>(data)[3] = 0ull;
+            for(size_t i = 0; i < size; i++)
+                static_cast<uint64_t*>(data)[i] = static_cast<uint64_t>(value[i]);
+        }
+    }
+    
+    template <std::floating_point T>
+    constexpr void Entry::SetValue(std::span<T> value) noexcept
+    {
+        ReleaseData();
+        type = Type::Float;
+        size = static_cast<uint32_t>(std::max(0ull, value.size()));
+        if(size <= 0u)
+            return;
+        if consteval
+        {
+            data = new (std::nothrow) std::vector<double>();
+            assert(data && "Allocation shouldn't fail");
+            GetDataVector<double>()->resize(size);
+            for(size_t i = 0; i < size; i++)
+                (*GetDataVector<double>())[i] = static_cast<double>(value[i]);
+        }
+        else
+        {
+            data = detail::GlobalAllocator::Allocate(size * sizeof(double));
+            for(size_t i = 0; i < size; i++)
+                static_cast<double*>(data)[i] = static_cast<double>(value[i]);
+        }
+    }
 
 
 
@@ -2539,31 +2939,25 @@ namespace fdf
 
             case Type::String:
             case Type::Timestamp:
-            {
-                const std::string_view view = GetValue<char>();
-                assert(!view.empty() && "This being empty either means type was wrong or it was really empty which shouldn't happen! (If it was really empty, it would be Type::Null)");
-                return view;
-            }
+                return GetValue<char>();
             
             case Type::Hex:
             {
                 const std::string_view view = GetValue<char>();
-                assert(!view.empty() && "This being empty either means type was wrong or it was really empty which shouldn't happen! (If it was really empty, it would be Type::Null)");
-
                 if constexpr(STYLE.bUppercaseHex)
                 {
                     temp = view;
                     std::ranges::transform(temp, temp.begin(), [](char c)  { return static_cast<char>(std::toupper(c)); });
                     return temp;
                 }
-
                 return view;
             }
 
             case Type::Version:
             {
                 const auto span = GetValue<uint64_t>();
-                assert((span.size() == 3 || span.size() == 4) && "This being empty either means type was wrong or it was really empty which shouldn't happen! (If it was really empty, it would be Type::Null)");
+                if(span.empty())
+                    return {};
                 if(size == 3)
                     temp = std::format("{}.{}.{}", span[0], span[1], span[2]);
                 else
@@ -2574,7 +2968,8 @@ namespace fdf
             case Type::Bool:
             {
                 const auto span = GetValue<bool>();
-                assert(!span.empty() && "This being empty either means type was wrong or it was really empty which shouldn't happen! (If it was really empty, it would be Type::Null)");
+                if(span.empty())
+                    return {};
                 temp = std::format("{}", (span[0]? detail::KEYWORDS[2] : detail::KEYWORDS[3]));
                 for(size_t i = 1; i < span.size(); i++)
                     temp = std::format("{}x{}", temp, (span[i]? detail::KEYWORDS[2] : detail::KEYWORDS[3]));
@@ -2584,7 +2979,8 @@ namespace fdf
             case Type::Int:
             {
                 const auto span = GetValue<int64_t>();
-                assert(!span.empty() && "This being empty either means type was wrong or it was really empty which shouldn't happen! (If it was really empty, it would be Type::Null)");
+                if(span.empty())
+                    return {};
                 temp = std::format("{}", span[0]);
                 for(size_t i = 1; i < span.size(); i++)
                     temp = std::format("{}x{}", temp, span[i]);
@@ -2594,7 +2990,8 @@ namespace fdf
             case Type::UInt:
             {
                 const auto span = GetValue<uint64_t>();
-                assert(!span.empty() && "This being empty either means type was wrong or it was really empty which shouldn't happen! (If it was really empty, it would be Type::Null)");
+                if(span.empty())
+                    return {};
                 temp = std::format("{}", span[0]);
                 for(size_t i = 1; i < span.size(); i++)
                     temp = std::format("{}x{}", temp, span[i]);
@@ -2603,11 +3000,18 @@ namespace fdf
 
             case Type::Float:
             {
+                auto formatFn = [](double value) -> std::string
+                {
+                    if(static_cast<int>(value) == value)
+                        return std::format("{:.1f}", value);
+                    return std::format("{}", value);
+                };
                 const auto span = GetValue<float>();
-                assert(!span.empty() && "This being empty either means type was wrong or it was really empty which shouldn't happen! (If it was really empty, it would be Type::Null)");
-                temp = std::format("{}", span[0]);
+                if(span.empty())
+                    return {};
+                temp = formatFn(span[0]);
                 for(size_t i = 1; i < span.size(); i++)
-                    temp = std::format("{}x{}", temp, span[i]);
+                    temp = std::format("{}x{}", temp, formatFn(span[i]));
                 return temp;
             }
 
@@ -2690,7 +3094,7 @@ namespace fdf
     
     
     template<auto DIAGNOSTIC_CALLBACK>
-    UniqueEntryPtr Entry::ParseFile(const std::filesystem::path& filepath) noexcept
+    UniqueEntryPtr ParseFile(const std::filesystem::path& filepath) noexcept
     {
         std::error_code ec;
         if(!std::filesystem::exists(filepath, ec) || ec || !std::filesystem::is_regular_file(filepath, ec) || ec)
@@ -2705,24 +3109,20 @@ namespace fdf
     }
 
     template<auto DIAGNOSTIC_CALLBACK>
-    constexpr UniqueEntryPtr Entry::ParseBuffer(std::string_view content) noexcept
+    constexpr UniqueEntryPtr ParseBuffer(std::string_view content) noexcept
     {
         return detail::Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(content);
     }
 
     template<Style STYLE>
-    bool Entry::WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists) noexcept
+    bool WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists) noexcept
     {
         auto parentDir = filepath.parent_path();
         std::error_code ec;
         if(!std::filesystem::exists(parentDir, ec) && (ec || !bCreateIfNotExists || !std::filesystem::create_directories(parentDir, ec) || ec))
-        {
             return false;
-        }
-        if(!std::filesystem::is_regular_file(filepath, ec) || ec)
-        {
+        if(std::filesystem::exists(filepath, ec) && (ec || !std::filesystem::is_regular_file(filepath, ec) || ec))
             return false;
-        }
 
         std::ofstream file(filepath);
         if(!file)
@@ -2735,9 +3135,21 @@ namespace fdf
         return static_cast<bool>(file);
     }
     template<Style STYLE>
-    constexpr void Entry::WriteBuffer(const Entry& root, std::string& buffer) noexcept
+    constexpr void WriteBuffer(const Entry& root, std::string& buffer) noexcept
     {
         detail::Utils<>::WriteBuffer<STYLE>(root, buffer);
+    }
+    
+    
+    constexpr UniqueEntryPtr NewEntry() noexcept
+    {
+        UniqueEntryPtr e = detail::Utils<>::Create();
+        if(!e)
+            return nullptr;
+        
+        e->type = Type::Map;
+        e->depth = static_cast<uint8_t>(-1);
+        return e;
     }
 }
 
@@ -2791,9 +3203,7 @@ namespace fdf::detail
 
         UniqueEntryPtr root = Create();
         if(!root)
-        {
-            std::unreachable();
-        }
+            return nullptr;
         root->type = Type::Map;
         root->depth = static_cast<uint8_t>(-1);
         
@@ -2932,18 +3342,13 @@ namespace fdf::detail
     template<auto DIAGNOSTIC_CALLBACK>
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseVariable   (Tokenizer& tokenizer, Entry& parent   FDF_COMMENT_SWITCH(, Token comment)) noexcept
     {
-        assert(parent.IsContainer() && "Sanity check!");
-        assert(parent.depth + 1 != static_cast<uint8_t>(-1) && "Too much nesting check!");
-        
         Token currentToken = tokenizer.Current();
-        Entry* entry = parent.Emplace();
+        UniqueEntryPtr _temp = Utils<>::Create();
+        Entry* entry = parent.AddChild(_temp);
         if(!entry)
-        {
-            std::unreachable();
-        }
-        entry->depth = parent.depth + 1;
+            return false;
 
-        if(parent.type != Type::Array)
+        if(parent.type == Type::Map)
         {
             assert(tokenizer.Current().type == TokenType::Identifier && "Sanity check!");
             if(!entry->SetIdentifier(tokenizer.ToView(currentToken)))

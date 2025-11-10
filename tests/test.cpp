@@ -174,7 +174,7 @@ namespace fdf::detail
         template<Style STYLE = {}>
         static bool PrintFile(const Entry* e, std::string_view outFile)
         {
-            return Entry::WriteFile<STYLE>(*e, outFile);
+            return WriteFile<STYLE>(*e, outFile);
         }
 
         
@@ -189,7 +189,7 @@ namespace fdf::detail
                 std::print("[{:02}/{:02}] {:<{}}", i + 1, filesToTest.size(), directories.inputFile, longestFilename);
 
                 auto startTime = std::chrono::high_resolution_clock::now();
-                UniqueEntryPtr e = Entry::ParseFile(std::filesystem::path(directories.inputFile));
+                UniqueEntryPtr e = ParseFile(std::filesystem::path(directories.inputFile));
                 auto endTime = std::chrono::high_resolution_clock::now();
                 auto duration = duration_cast<std::chrono::nanoseconds>(endTime - startTime);
 
@@ -220,7 +220,7 @@ namespace fdf::detail
         // TODO: Maybe automate ReadTest so we don't need to implement each Entry by hand? (and manually adjust formatting (currently 24))
         static bool ReadTest()
         {
-            UniqueEntryPtr e = Entry::ParseFile(std::filesystem::path(filesToTest[0].inputFile));
+            UniqueEntryPtr e = ParseFile(std::filesystem::path(filesToTest[0].inputFile));
             if(!e)
             {
                 std::puts("[ERROR]: Failed to parse the design file... Should never happen unless initial parse failed too!");
@@ -494,12 +494,40 @@ namespace fdf::detail
 
         static bool WriteTest()
         {
-            /*IO io;
+            UniqueEntryPtr root = NewEntry();
+            if(!root)
+                return false;
+            bool bResult = true;
 
-            std::puts("<Placeholder>");
+            {
+                Entry* e = root->Emplace("name");
+                if(e)
+                    e->SetValue("Test");
+                else
+                    bResult = false;
+            }
 
-            return io.WriteToFile<Style{.bCommasOnLastElement = false}>(FDF_TEST_DIRECTORY "/output/WriteTest.txt");;*/
-            return true;
+            {
+                Entry* e = root->Emplace("pi");
+                if(e)
+                    e->SetValue(3.14);
+                else
+                    bResult = false;
+            }
+
+            {
+                Entry* e = root->Emplace("position");
+                if(e)
+                {
+                    double position[3] = {0.0, 0.0, 100.0};
+                    e->SetValue(std::span(position, 3));
+                }
+                else
+                    bResult = false;
+            }
+
+            bResult = PrintFile<Style{.bCommasOnLastElement = false}>(root.get(), FDF_TEST_DIRECTORY "/output/WriteTest.txt") && bResult;
+            return bResult;
         }
     };
 }
@@ -539,7 +567,7 @@ int main()
     bResult = Test::ParseTest() && bResult;
     std::print("\n{1}{1}\nRead test -- file: {0}\n{1}", filesToTest[0].inputFile, separator);
     bResult = Test::ReadTest()  && bResult;
-    std::print("\n{1}{1}\nWrite test -- file: {0}\n{1}", "<Placeholder>", separator);
+    std::print("\n{1}{1}\nWrite test -- file: {0}\n{1}", FDF_TEST_DIRECTORY "/output/WriteTest.txt", separator);
     bResult = Test::WriteTest() && bResult;
 
     return bResult? 0 : -1;
@@ -551,26 +579,22 @@ constexpr T ExtractValue(std::string_view buffer)
 {
     T value = 0;
     
-    fdf::UniqueEntryPtr eRoot = fdf::Entry::ParseBuffer(buffer);
-    auto* eValue = eRoot->GetDirectChild("value");
-
-    if(eValue)
+    fdf::UniqueEntryPtr eRoot = fdf::ParseBuffer(buffer);
+    if(auto* eValue = eRoot->GetDirectChild("value"))
     {
         auto span = eValue->GetValue<T>();
         if(!span.empty())
             value = span[0];
     }
-    
     return value;
 }
 
 consteval size_t ExtractCommentSize(auto buffer)
 {
-    fdf::UniqueEntryPtr eRoot = fdf::Entry::ParseBuffer(buffer);
+    fdf::UniqueEntryPtr eRoot = fdf::ParseBuffer(buffer);
     if(!eRoot)
         return 0;
-    auto* eValue = eRoot->GetDirectChild("value");
-    if(eValue)
+    if(auto* eValue = eRoot->GetDirectChild("value"))
     {
         return eValue->GetComment().size();
     }
@@ -581,11 +605,10 @@ template<size_t SIZE>
 consteval auto ExtractCommentArray(auto buffer)
 {
     std::array<char, SIZE + 1> result = {};
-    fdf::UniqueEntryPtr eRoot = fdf::Entry::ParseBuffer(buffer);
+    fdf::UniqueEntryPtr eRoot = fdf::ParseBuffer(buffer);
     if(!eRoot)
         return result;
-    auto* eValue = eRoot->GetDirectChild("value");
-    if(eValue)
+    if(auto* eValue = eRoot->GetDirectChild("value"))
         fdf::detail::constexpr_memcpy(result.data(), eValue->GetComment().data(), SIZE);
     return result;
 }
@@ -610,7 +633,7 @@ constexpr auto ExtractComment()
     std::string temp;
     temp.reserve(1024);
     
-    if(fdf::UniqueEntryPtr e = fdf::Entry::ParseBuffer("category{ name = 'test' }"))
+    if(fdf::UniqueEntryPtr e = fdf::ParseBuffer("category{ name = 'test' }"))
     {
         (void)e->ParseCombineBuffer("pi = 3.14");
         (void)e->ParseCombineBuffer("pi = 3.2");
@@ -620,7 +643,7 @@ constexpr auto ExtractComment()
         });
         std::puts("\n\n");
         
-        if(fdf::UniqueEntryPtr ee = fdf::Entry::ParseBuffer("pi = 3.3"))
+        if(fdf::UniqueEntryPtr ee = fdf::ParseBuffer("pi = 3.3"))
         {
             if(e->Combine(ee))
             {
@@ -633,11 +656,10 @@ constexpr auto ExtractComment()
         }
     }
     
-    //TODO implement SetValue() functions
-    //TODO implement creating new entries
     //TODO try to recover as much as possible when it comes to failures, but emit a warning for each failure
+    //TODO maybe change strategy, so we use "unnamed, depth=0, type=Map" as root, instead of "unnamed, depth=-1, type=Map"? It could create confusion on user otherwise
     
-    if(fdf::UniqueEntryPtr e = fdf::Entry::ParseFile(FDF_ROOT_DIRECTORY "/designs/Design_5.txt"))
+    if(fdf::UniqueEntryPtr e = fdf::ParseFile(FDF_ROOT_DIRECTORY "/designs/Design_5.txt"))
     {
         e->ForEach<fdf::ForEachFlags::Recursive | fdf::ForEachFlags::IncludeSelf | fdf::ForEachFlags::Group>([&temp](fdf::Entry& myEntry)
         {
@@ -648,7 +670,7 @@ constexpr auto ExtractComment()
         std::cout << "comment: " << e->GetComment() << '\n';
         temp.clear();
         e->SetIdentifier("TestTest");
-        fdf::Entry::WriteBuffer(*e, temp);
+        fdf::WriteBuffer(*e, temp);
     }
     std::puts("\n\n");
 }*/
