@@ -10,7 +10,7 @@ projects
         languageVersion=23
         dependencies=null
 
-        files[ "include/fdf.h", "src/fdf.cpp" ]
+        files[ "include/fdf.h", "src/fdf.cpp" ],
 
         definitions
         {

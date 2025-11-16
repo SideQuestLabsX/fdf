@@ -160,9 +160,9 @@ namespace fdf::detail
             e->ForEach<ForEachFlags::Recursive | ForEachFlags::Group>([&](const Entry& entry)
             {
             #if !FDF_NO_COMMENTS
-                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}--Comment={}", "", 4 * entry.depth, ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.GetFullIdentifier(), entry.DataToView(temp), entry.comment));
+                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}--Comment={}", "", 4 * entry.CalculateDepth(), ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.GetFullIdentifier(), entry.DataToView(temp), entry.comment));
             #else
-                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}", "", 4 * entry.depth, ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.GetFullIdentifier(), entry.DataToView(temp)));
+                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}", "", 4 * entry.CalculateDepth(), ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.type)], entry.size, entry.GetFullIdentifier(), entry.DataToView(temp)));
             #endif
                 buffer.push_back('\n');
             });
@@ -194,7 +194,7 @@ namespace fdf::detail
                 auto duration = duration_cast<std::chrono::nanoseconds>(endTime - startTime);
 
                 std::string durationString = std::format("{:.6f}ms", static_cast<double>(duration.count()) / 1'000'000.0);
-                std::println(" -- Result: {:<7} -- Took: {:<9}", e? "SUCCESS" : "FAIL", durationString);
+                std::print(" -- Result: {:<7} -- Took: {:<9}", e? "SUCCESS" : "FAIL", durationString);
 
                 if(!output.empty())
                 {
@@ -204,10 +204,14 @@ namespace fdf::detail
                 std::println();
                 
                 PrintAllTokens(directories.inputFile, directories.tokenizedFile);
-                PrintAllEntries(e.get(), directories.entriesFile);
-                PrintFile(e.get(), directories.outputFile);
-
-                bResult = bResult && e;
+                
+                if(e)
+                {
+                    PrintAllEntries(e.get(), directories.entriesFile);
+                    PrintFile<Style{.bVariableCommas = false}>(e.get(), directories.outputFile);
+                }
+                else
+                    bResult = false;
             }
 
             return bResult;
@@ -500,24 +504,21 @@ namespace fdf::detail
             bool bResult = true;
 
             {
-                Entry* e = root->Emplace("name");
-                if(e)
+                if(Entry* e = root->Emplace("name"))
                     e->SetValue("Test");
                 else
                     bResult = false;
             }
 
             {
-                Entry* e = root->Emplace("pi");
-                if(e)
+                if(Entry* e = root->Emplace("pi"))
                     e->SetValue(3.14);
                 else
                     bResult = false;
             }
 
             {
-                Entry* e = root->Emplace("position");
-                if(e)
+                if(Entry* e = root->Emplace("position"))
                 {
                     double position[3] = {0.0, 0.0, 100.0};
                     e->SetValue(std::span(position, 3));
@@ -525,8 +526,66 @@ namespace fdf::detail
                 else
                     bResult = false;
             }
+            
+            {
+                if(Entry* e = root->Emplace("results"))
+                {
+                    e->SetValue(ArrayType());
+                    
+                    if(Entry* ee = e->Emplace(""))
+                    {
+                        ee->SetValue(42);
+                    }
+                    else
+                        bResult = false;
+                    
+                    if(Entry* ee = e->Emplace(""))
+                    {
+                        ee->SetValue(0.75f);
+                    }
+                    else
+                        bResult = false;
+                    
+                    if(Entry* ee = e->Emplace(""))
+                    {
+                        ee->SetValue(false);
+                    }
+                    else
+                        bResult = false;
+                    
+                    if(Entry* ee = e->Emplace(""))
+                    {
+                        ee->SetValue("UNKNOWN!");
+                    }
+                    else
+                        bResult = false;
+                    
+                    if(Entry* ee = e->Emplace(""))
+                    {
+                        ee->SetValue(MapType());
+                        
+                        if(Entry* eee = ee->Emplace("found"))
+                        {
+                            eee->SetValue(true);
+                        }
+                        else
+                            bResult = false;
+                        
+                        if(Entry* eee = ee->Emplace("value"))
+                        {
+                            eee->SetValue(815);
+                        }
+                        else
+                            bResult = false;
+                    }
+                    else
+                        bResult = false;
+                }
+                else
+                    bResult = false;
+            }
 
-            bResult = PrintFile<Style{.bCommasOnLastElement = false}>(root.get(), FDF_TEST_DIRECTORY "/output/WriteTest.txt") && bResult;
+            bResult = PrintFile<Style{.singleLineContainerLimit = 80, .bTrailingCommas = false}>(root.get(), FDF_TEST_DIRECTORY "/output/WriteTest.txt") && bResult;
             return bResult;
         }
     };
@@ -538,6 +597,14 @@ namespace fdf::detail
 int main()
 {
     using namespace fdf::detail;
+    
+    std::string buffff;
+    fdf::UniqueEntryPtr root = fdf::NewEntry();
+    (void)root->SetIdentifier("test");
+    root->SetValue(15);
+    root->SetComment("Commm");
+    [[maybe_unused]] auto qqqq = root->GetComment();
+    WriteBuffer(*root, buffff);
 
     std::filesystem::path currentDesignFile = FDF_ROOT_DIRECTORY "/designs/Design_5.txt";
     std::filesystem::path testDir = FDF_TEST_DIRECTORY;
@@ -564,11 +631,15 @@ int main()
     bool bResult = true;
 
     std::print("Parse test -- Found {} files\n{}", filesToTest.size(), separator);
-    bResult = Test::ParseTest() && bResult;
-    std::print("\n{1}{1}\nRead test -- file: {0}\n{1}", filesToTest[0].inputFile, separator);
-    bResult = Test::ReadTest()  && bResult;
-    std::print("\n{1}{1}\nWrite test -- file: {0}\n{1}", FDF_TEST_DIRECTORY "/output/WriteTest.txt", separator);
-    bResult = Test::WriteTest() && bResult;
+    bool bTempResult = Test::ParseTest();
+    bResult = bTempResult && bResult;
+    std::print("{1}RESULT: {2}\n{1}\n\n\nRead test -- file: {0}\n{1}", filesToTest[0].inputFile, separator, bTempResult);
+    bTempResult = Test::ReadTest();
+    bResult = bTempResult && bResult;
+    std::print("{1}RESULT: {2}\n{1}\n\n\nWrite test -- file: {0}\n{1}", FDF_TEST_DIRECTORY "/output/WriteTest.txt", separator, bTempResult);
+    bTempResult = Test::WriteTest();
+    bResult = bTempResult && bResult;
+    std::print("RESULT: {}\n{}\n\n\n", bTempResult, separator);
 
     return bResult? 0 : -1;
 }
@@ -639,7 +710,7 @@ constexpr auto ExtractComment()
         (void)e->ParseCombineBuffer("pi = 3.2");
         e->ForEach<fdf::ForEachFlags::Recursive | fdf::ForEachFlags::IncludeSelf>([&temp](fdf::Entry& myEntry)
         {
-            std::print("name: {}   -   depth: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.GetDepth(), myEntry.DataToView(temp));
+            std::print("name: {}   -   depth: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.CalculateDepth(), myEntry.DataToView(temp));
         });
         std::puts("\n\n");
         
@@ -649,7 +720,7 @@ constexpr auto ExtractComment()
             {
                 e->ForEach<fdf::ForEachFlags::Recursive | fdf::ForEachFlags::IncludeSelf>([&temp](fdf::Entry& myEntry)
                 {
-                    std::print("name: {}   -   depth: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.GetDepth(), myEntry.DataToView(temp));
+                    std::print("name: {}   -   depth: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.CalculateDepth(), myEntry.DataToView(temp));
                 });
                 std::puts("\n\n");
             }
@@ -657,13 +728,12 @@ constexpr auto ExtractComment()
     }
     
     //TODO try to recover as much as possible when it comes to failures, but emit a warning for each failure
-    //TODO maybe change strategy, so we use "unnamed, depth=0, type=Map" as root, instead of "unnamed, depth=-1, type=Map"? It could create confusion on user otherwise
     
     if(fdf::UniqueEntryPtr e = fdf::ParseFile(FDF_ROOT_DIRECTORY "/designs/Design_5.txt"))
     {
         e->ForEach<fdf::ForEachFlags::Recursive | fdf::ForEachFlags::IncludeSelf | fdf::ForEachFlags::Group>([&temp](fdf::Entry& myEntry)
         {
-            std::print("name: {}   -   depth: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.GetDepth(), myEntry.DataToView(temp));
+            std::print("name: {}   -   depth: {}   -   data: {}\n", myEntry.GetIdentifier(), myEntry.CalculateDepth(), myEntry.DataToView(temp));
         });
         [[maybe_unused]] auto* id = e->GetDirectChild("id");
         [[maybe_unused]] size_t count = e->GetChildCountRecursive();

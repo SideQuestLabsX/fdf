@@ -40,7 +40,8 @@ FDF_EXPORT namespace fdf
 {
     enum class Type : uint8_t
     {
-        Invalid,
+        Map,
+        Array,
         Null,
         Nil = Null,
 
@@ -52,10 +53,7 @@ FDF_EXPORT namespace fdf
         String,
         Hex,
         Version,
-        Timestamp,
-
-        Array,
-        Map
+        Timestamp
     };
 
 
@@ -64,9 +62,9 @@ FDF_EXPORT namespace fdf
         // Spacing
         bool bUseSpacesOverTabs = true;
         uint8_t tabSize = 4;
-        bool bSpaceAfterComma = true;
-        bool bSpaceWithinParentheses = true;
-        bool bSpaceBeforeAndAfterEqualSign = false;
+        bool bSpaceAfterComma = true; // Think about removing this
+        bool bSpaceWithinParentheses = true; // And this
+        bool bSpaceBeforeAndAfterEqualSign = false; // Also this, so we make sure maximum readability
         bool bParenthesesOnNewLine = true;
         bool bEmptyLineAtEOF = true;
 
@@ -76,14 +74,14 @@ FDF_EXPORT namespace fdf
         bool bAlignCloseComments = true; // TODO: implement
 
         // Single-line limits
-        uint8_t singleLineCommentLimit = 80;  // Characters
-        uint8_t singleLineArrayLimit = 5;     // Entry
-        uint8_t singleLineMapLimit = 5;       // Entry
+        uint8_t singleLineCommentLimit  = 80U;  // Characters
+        uint8_t singleLineContainerLimit = 80U;  // Characters
 
-        // Array and Map
-        bool bCommasOnArrays = true;
-        bool bCommasOnMaps = true;
-        bool bCommasOnLastElement = true;
+        // Containers
+        bool bGlobalCommas = true;
+        bool bVariableCommas = true;
+        bool bContainersCommas = false;
+        bool bTrailingCommas = true;
         bool bUseEqualSignForSingleLineArraysAndMaps = false;
 
         // General
@@ -140,9 +138,18 @@ namespace fdf::detail
     template<typename Callable>
     constexpr bool IsValidDiagnosticCallback = std::is_invocable_v<Callable, DiagnosticSeverity, DiagnosticType, std::string_view>;
 
-    constexpr size_t MAX_IDENTIFIER_LENGTH = FDF_NO_COMMENTS && FDF_EXTENDED_NO_COMMENT_IDENTIFIERS? 40 : 32;
+    constexpr size_t MAX_IDENTIFIER_LENGTH = FDF_NO_COMMENTS && FDF_EXTENDED_NO_COMMENT_IDENTIFIERS? 38 : 30;
     
     struct EntryDeleter { static constexpr void operator()(Entry* e) noexcept; };
+
+    constexpr auto SIZE_T_MAX_VALUE = std::numeric_limits<  size_t>::max();
+    constexpr auto INT64_MAX_VALUE  = std::numeric_limits< int64_t>::max();
+    constexpr auto DOUBLE_MAX_VALUE = std::numeric_limits<  double>::max();
+
+    constexpr auto UINT8_MAX_VALUE  = std::numeric_limits< uint8_t>::max();
+    constexpr auto UINT16_MAX_VALUE = std::numeric_limits<uint16_t>::max();
+    constexpr auto UINT32_MAX_VALUE = std::numeric_limits<uint32_t>::max();
+    constexpr auto UINT64_MAX_VALUE = std::numeric_limits<uint64_t>::max();
 }
 
 
@@ -205,10 +212,9 @@ FDF_EXPORT namespace fdf
 
     private:
         char identifier[detail::MAX_IDENTIFIER_LENGTH + 1] = {};
-        Type type = Type::Invalid;
-        uint8_t depth = 0;
-        uint8_t unused = 0;
+        Type type = Type::Map;
         uint32_t size = 0;
+        uint32_t capacity = 0; //TODO convert everything to use this capacity
         Entry* parent = nullptr;
         void* data = nullptr;
     #if !FDF_NO_COMMENTS
@@ -240,30 +246,61 @@ FDF_EXPORT namespace fdf
 
     public:
         [[nodiscard]] constexpr uint32_t GetChildCount() const noexcept  { return IsContainer()? size : 0; }
-        [[nodiscard]] constexpr uint8_t  GetDepth()      const noexcept  { return depth; }
         [[nodiscard]] constexpr Type     GetType()       const noexcept  { return type; }
-        [[nodiscard]] constexpr bool     IsValid()       const noexcept  { return type != Type::Invalid; }
         [[nodiscard]] constexpr bool     IsNull()        const noexcept  { return type == Type::Null; }
         [[nodiscard]] constexpr bool     IsNil()         const noexcept  { return IsNull(); }
         [[nodiscard]] constexpr bool     IsContainer()   const noexcept  { return type == Type::Array || type == Type::Map; }
-        [[nodiscard]] constexpr bool     HasValue()      const noexcept  { return IsValid() && !IsNull() && !IsContainer(); }
+        [[nodiscard]] constexpr bool     HasValue()      const noexcept  { return !IsNull() && !IsContainer(); }
         [[nodiscard]] constexpr Entry*   GetParent()           noexcept  { return parent; }
         [[nodiscard]] constexpr Entry*   GetParent()     const noexcept  { return parent; }
+        [[nodiscard]] constexpr uint32_t CalculateDepth() const noexcept
+        {
+            const Entry* e = parent;
+            uint32_t depth = 0;
+            while(e)
+            {
+                e = e->parent;
+                depth++;
+            }
+            return depth;
+        }
 
         [[nodiscard]] constexpr std::string_view GetIdentifier() const noexcept  { return {identifier, GetIdentifierSize()}; }
         [[nodiscard]] constexpr std::string GetFullIdentifier() const noexcept
         {
+            const Entry* prev = this;
             const Entry* cur = parent;
             std::string temp = std::string(GetIdentifier());
             while(cur)
             {
-                if(cur->depth == static_cast<uint8_t>(-1))
+                if(cur->GetIdentifierSize() == 0)
                 {
-                    assert(cur->parent == nullptr && "If depth is '-1', it should be head!");
-                    return temp;
+                    if(cur->parent)
+                    {
+                        if(cur->parent->type == Type::Array)
+                        {
+                            const uint32_t index = cur->FindChildIndex(*prev);
+                            assert(index != detail::UINT32_MAX_VALUE && "Index must be valid!");
+                            temp = std::format("{}.{}", index, temp);
+                        }
+                        else
+                        {
+                            assert(false && "If it has a parent and no identifier, it must be a Type::Array element!");
+                            return temp;
+                        }
+                    }
+                    else
+                    {
+                        assert(cur->type == Type::Map && "If it has no identifier and no parent, it must be a Type::Map! (Specifically the root map)");
+                        return temp;
+                    }
+                }
+                else
+                {
+                    temp = std::format("{}.{}", cur->GetIdentifier(), temp);
                 }
                 
-                temp = std::format("{}.{}", cur->GetIdentifier(), temp);
+                prev = cur;
                 cur = cur->parent;
             }
             return temp;
@@ -297,6 +334,8 @@ FDF_EXPORT namespace fdf
         constexpr void ReleaseEverything() noexcept;
 
     public:
+        [[nodiscard]] constexpr uint32_t FindChildIndex(const Entry& e) const noexcept;
+        [[nodiscard]] constexpr uint32_t FindChildIndex(std::string_view _identifier) const noexcept;
         [[nodiscard]] constexpr Entry* Emplace(std::string_view _identifier) noexcept;
         [[nodiscard]] constexpr Entry* AddChild(UniqueEntryPtr& e) noexcept;
         [[nodiscard]] constexpr bool   RemoveChild(Entry& e) noexcept;
@@ -409,14 +448,9 @@ FDF_EXPORT namespace fdf
 namespace fdf::detail
 {
     constexpr std::string_view EVALUATE_LITERAL_TEXT = "Evaluate Literal";
-    constexpr std::string_view INVALID_TEXT = "<INVALID>";
     constexpr std::string_view UNEXPECTED_TEXT = "<UNEXPECTED-ERROR>";
     constexpr std::string_view ARRAY_TEXT   = "<ARRAY>";
     constexpr std::string_view MAP_TEXT     = "<MAP>";
-
-    constexpr auto INT64_MAX_VALUE  = std::numeric_limits< int64_t>::max();
-    constexpr auto UINT64_MAX_VALUE = std::numeric_limits<uint64_t>::max();
-    constexpr auto DOUBLE_MAX_VALUE = std::numeric_limits<  double>::max();
 
     #if FDF_NO_COMMENTS
         constexpr size_t DATA_OVERHEAD_SIZE = sizeof(size_t);
@@ -427,12 +461,11 @@ namespace fdf::detail
     constexpr size_t INITIAL_PARENT_DATA_SIZE = DATA_OVERHEAD_SIZE + (4 * sizeof(void*));
 
 
-    constexpr std::string_view KEYWORDS[] =
+    constexpr auto KEYWORDS = std::to_array<std::string_view>(
     {
         "null", "nil",
         "true", "false", " MD_BOOL_PLACEHOLDER "
-    };
-    constexpr size_t KEYWORD_COUNT = std::size(KEYWORDS);
+    });
 
     enum class TokenType : uint8_t
     {
@@ -492,7 +525,7 @@ namespace fdf::detail
     private:
         [[nodiscard]] constexpr Token GetNextToken() noexcept;
 
-    private:
+    public:
         std::string_view content;
         uint32_t index;
         uint32_t line;
@@ -535,9 +568,9 @@ namespace fdf::detail
     
     [[nodiscard]] constexpr bool IsKeyword(std::string_view view) noexcept
     {
-        for(size_t i = 0; i < KEYWORD_COUNT; i++)
+        for(const auto keyword : KEYWORDS)
         {
-            if(view == KEYWORDS[i])
+            if(view == keyword)
                 return true;
         }
         return false;
@@ -554,6 +587,12 @@ namespace fdf::detail
         
         return firstNonID >= identifier.size()? !IsKeyword(identifier) : false;
     }
+    
+    [[nodiscard]] constexpr bool IsOpenBrace(const char c)   noexcept  { return c == '{' || c == '['; }
+    [[nodiscard]] constexpr bool IsCloseBrace(const char c)  noexcept  { return c == '}' || c == ']'; }
+    [[nodiscard]] constexpr bool IsCurlyBrace(const char c)  noexcept  { return c == '{' || c == '}'; }
+    [[nodiscard]] constexpr bool IsSquareBrace(const char c) noexcept  { return c == '[' || c == ']'; }
+    [[nodiscard]] constexpr bool IsBrace(const char c)       noexcept  { return c == '{' || c == '}' || c == '[' || c == ']'; }
 }
 
 
@@ -567,7 +606,7 @@ namespace fdf::detail
 
 namespace fdf::detail
 {
-    template<size_t BLOCK_SIZE, size_t BLOCK_ALIGNMENT = BLOCK_SIZE, size_t CHUNK_SIZE = 4096, size_t LAZILY_DEALLOCATED_CHUNK_COUNT = 1>
+    template<size_t BLOCK_SIZE, size_t BLOCK_ALIGNMENT = BLOCK_SIZE, size_t CHUNK_SIZE = 4096U, size_t LAZILY_DEALLOCATED_CHUNK_COUNT = 1>
     class SlabAllocator
     {
         static_assert(BLOCK_SIZE >= sizeof(void*), "BLOCK_SIZE can't be smaller than size of a pointer");
@@ -734,11 +773,11 @@ namespace fdf::detail
         template<auto DIAGNOSTIC_CALLBACK>
         friend struct detail::Utils;
         
-        inline static constinit SlabAllocator<8, 8, 4096>  B8;
-        inline static constinit SlabAllocator<16, 8, 4096> B16;
-        inline static constinit SlabAllocator<32, 8, 4096> B32;
-        inline static constinit SlabAllocator<64, 8, 4096> B64;
-        inline static constinit SlabAllocator<sizeof(Entry), alignof(Entry), 4096>  ENTRY_ALLOCATOR;
+        inline static constinit SlabAllocator<8U>  B8;
+        inline static constinit SlabAllocator<16U> B16;
+        inline static constinit SlabAllocator<32U> B32;
+        inline static constinit SlabAllocator<64U> B64;
+        inline static constinit SlabAllocator<sizeof(Entry), alignof(Entry)>  ENTRY_ALLOCATOR;
 
     public:
         static void* Allocate(size_t size) noexcept
@@ -759,13 +798,13 @@ namespace fdf::detail
 
         static bool Deallocate(void* p, size_t size) noexcept
         {
-            if(size <= 8)
+            if(size <= 8U)
                 return B8.Deallocate(p);
-            if(size <= 16)
+            if(size <= 16U)
                 return B16.Deallocate(p);
-            if(size <= 32)
+            if(size <= 32U)
                 return B32.Deallocate(p);
-            if(size <= 64)
+            if(size <= 64U)
                 return B64.Deallocate(p);
             
             ::operator delete(p);
@@ -778,13 +817,13 @@ namespace fdf::detail
         template<size_t size>
         static void* Allocate() noexcept
         {
-            if constexpr(size <= 8)
+            if constexpr(size <= 8U)
                 return B8.Allocate();
-            else if constexpr(size <= 16)
+            else if constexpr(size <= 16U)
                 return B16.Allocate();
-            else if constexpr(size <= 32)
+            else if constexpr(size <= 32U)
                 return B32.Allocate();
-            else if constexpr(size <= 64)
+            else if constexpr(size <= 64U)
                 return B64.Allocate();
             else
             {
@@ -797,13 +836,13 @@ namespace fdf::detail
         template<size_t size>
         static bool Deallocate(void* p) noexcept
         {
-            if constexpr(size <= 8)
+            if constexpr(size <= 8U)
                 return B8.Deallocate(p);
-            else if constexpr(size <= 16)
+            else if constexpr(size <= 16U)
                 return B16.Deallocate(p);
-            else if constexpr(size <= 32)
+            else if constexpr(size <= 32U)
                 return B32.Deallocate(p);
-            else if constexpr(size <= 64)
+            else if constexpr(size <= 64U)
                 return B64.Deallocate(p);
             else
             {
@@ -818,13 +857,13 @@ namespace fdf::detail
         template<typename T, typename... Args>
         [[nodiscard]] static T* Create(Args&&... args) noexcept(std::is_nothrow_constructible_v<T, Args...>)
         {
-            if constexpr(sizeof(T) <= 8)
+            if constexpr(sizeof(T) <= 8U)
                 return B8.Create<T>(std::forward<Args>(args)...);
-            else if constexpr(sizeof(T) <= 16)
+            else if constexpr(sizeof(T) <= 16U)
                 return B16.Create<T>(std::forward<Args>(args)...);
-            else if constexpr(sizeof(T) <= 32)
+            else if constexpr(sizeof(T) <= 32U)
                 return B32.Create<T>(std::forward<Args>(args)...);
-            else if constexpr(sizeof(T) <= 64)
+            else if constexpr(sizeof(T) <= 64U)
                 return B64.Create<T>(std::forward<Args>(args)...);
             else
             {
@@ -837,13 +876,13 @@ namespace fdf::detail
         template<typename T>
         [[nodiscard]] static bool Destroy(T* obj) noexcept(std::is_nothrow_destructible_v<T>)
         {
-            if constexpr(sizeof(T) <= 8)
+            if constexpr(sizeof(T) <= 8U)
                 return B8.Destroy(obj);
-            else if constexpr(sizeof(T) <= 16)
+            else if constexpr(sizeof(T) <= 16U)
                 return B16.Destroy(obj);
-            else if constexpr(sizeof(T) <= 32)
+            else if constexpr(sizeof(T) <= 32U)
                 return B32.Destroy(obj);
-            else if constexpr(sizeof(T) <= 64)
+            else if constexpr(sizeof(T) <= 64U)
                 return B64.Destroy(obj);
             else
             {
@@ -946,7 +985,7 @@ namespace fdf::detail
 
                 // There is no new lines left (comment is at the end of the file)
                 token.count = static_cast<uint32_t>(content.size() - token.startPosition);
-                index = static_cast<uint32_t>(-1);
+                index = detail::UINT32_MAX_VALUE;
                 return token;
             }
 
@@ -980,7 +1019,7 @@ namespace fdf::detail
                             index++;
                         }
 
-                        if(token.count == static_cast<uint32_t>(-1))
+                        if(token.count == detail::UINT32_MAX_VALUE)
                             token.count = 0;
                         return token;
                     }
@@ -1037,7 +1076,7 @@ namespace fdf::detail
             token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
             auto checkKeywords = [&](std::string_view view) -> void
             {
-                for(size_t i = 0; i < KEYWORD_COUNT; i++)
+                for(size_t i = 0; i < KEYWORDS.size(); i++)
                 {
                     if(view == KEYWORDS[i])
                     {
@@ -1060,7 +1099,7 @@ namespace fdf::detail
 
             token.count = static_cast<uint32_t>(firstNonAlpha) - token.startPosition;
             checkKeywords(ToView(token));
-            index = firstNonAlpha >= content.size()? static_cast<uint32_t>(-1) : static_cast<uint32_t>(firstNonAlpha);
+            index = firstNonAlpha >= content.size()? detail::UINT32_MAX_VALUE : static_cast<uint32_t>(firstNonAlpha);
             return token;
         }
 
@@ -1101,7 +1140,7 @@ namespace fdf::detail
                 token.line = line;
                 token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
                 token.extra8 = 1;  // Used as dimension (2d, 3d, 4d, 5d, etc.)
-                index = static_cast<uint32_t>(-1);
+                index = detail::UINT32_MAX_VALUE;
                 return token;
             }
 
@@ -1194,7 +1233,7 @@ namespace fdf::detail
                 }
 
                 calculateResult();
-                index = static_cast<uint32_t>(-1);
+                index = detail::UINT32_MAX_VALUE;
                 return token;
             }
 
@@ -1214,7 +1253,7 @@ namespace fdf::detail
                     if(firstNonDigit == std::string_view::npos) // we reached eof before any space or any other token
                     {
                         token.count = static_cast<uint32_t>(content.size()) - token.startPosition;
-                        index = static_cast<uint32_t>(-1);
+                        index = detail::UINT32_MAX_VALUE;
                         return token;
                     }
 
@@ -1290,7 +1329,7 @@ namespace fdf::detail
                 {
                     token.count = static_cast<uint32_t>(content.size()) - token.startPosition;
                     token.extra8 = static_cast<uint8_t>(token.count);
-                    index = static_cast<uint32_t>(-1);
+                    index = detail::UINT32_MAX_VALUE;
                     return token;
                 }
 
@@ -1314,7 +1353,7 @@ namespace fdf::detail
                 if(firstNonDate == std::string_view::npos)
                 {
                     token.count = static_cast<uint32_t>(content.size()) - token.startPosition;
-                    index = static_cast<uint32_t>(-1);
+                    index = detail::UINT32_MAX_VALUE;
                     token.extra8 = static_cast<uint8_t>(token.count);
                     return token;
                 }
@@ -1379,21 +1418,16 @@ namespace fdf::detail
 namespace fdf
 {
     constexpr Entry::Entry(Entry&& other) noexcept
+        : type(other.type), size(other.size), parent(other.parent), data(other.data)   FDF_COMMENT_SWITCH(, comment(other.comment))
     {
-        type = other.type;
-        depth = other.depth;
-        size = other.size;
-        parent = other.parent;
-        data = other.data;
-            
-        other.type = Type::Invalid;
+        other.type = Type::Map;
         other.parent = nullptr;
         other.data = nullptr;
         
         detail::constexpr_memcpy(identifier, other.identifier, detail::MAX_IDENTIFIER_LENGTH + 1);
+        other.SetIdentifierSize(0U);
             
 #if !FDF_NO_COMMENTS
-        comment = other.comment;
         other.comment = nullptr;
 #endif
     }
@@ -1405,16 +1439,16 @@ namespace fdf
         ReleaseEverything();
         
         type = other.type;
-        depth = other.depth;
         size = other.size;
         parent = other.parent;
         data = other.data;
             
-        other.type = Type::Invalid;
+        other.type = Type::Map;
         other.parent = nullptr;
         other.data = nullptr;
             
         detail::constexpr_memcpy(identifier, other.identifier, detail::MAX_IDENTIFIER_LENGTH + 1);
+        other.SetIdentifierSize(0U);
             
 #if !FDF_NO_COMMENTS
         comment = other.comment;
@@ -1474,28 +1508,45 @@ namespace fdf
                 {
                     detail::GlobalAllocator::Deallocate(comment, GetCommentControlBlock()->capacity + sizeof(Entry::CommentControlBlock) + 1);
                     comment = static_cast<CommentControlBlock*>(detail::GlobalAllocator::Allocate(newComment.size() + sizeof(Entry::CommentControlBlock) + 1));
-                    GetCommentControlBlock()->capacity = 0;
-                    GetCommentControlBlock()->size = 0;
+                    GetCommentControlBlock()->capacity = static_cast<uint32_t>(newComment.size());
+                    GetCommentControlBlock()->size = GetCommentControlBlock()->capacity;
                 }
                 else
                 {
-                    GetCommentControlBlock()->size = 0;
+                    GetCommentControlBlock()->size = static_cast<uint32_t>(newComment.size());
                 }
             }
             else
             {
                 comment = static_cast<CommentControlBlock*>(detail::GlobalAllocator::Allocate(newComment.size() + sizeof(Entry::CommentControlBlock) + 1));
                 GetCommentControlBlock()->capacity = static_cast<uint32_t>(newComment.size());
-                GetCommentControlBlock()->size = 0;
+                GetCommentControlBlock()->size = GetCommentControlBlock()->capacity;
             }
-
-            detail::constexpr_memcpy(GetCommentData(), newComment.data(), newComment.size());
-            GetCommentData()[newComment.size()] = '\0';
+            
+            size_t i = 0, j = 0;
+            while(i < newComment.size() && detail::constexpr_isspace(newComment[i]))
+                i++;
+            for(; i < newComment.size(); i++)
+            {
+                if(newComment[i] != '\n')
+                    GetCommentData()[j++] = newComment[i];
+                else
+                {
+                    GetCommentData()[j++] = ' ';
+                    while(i + 1 < newComment.size() && detail::constexpr_isspace(newComment[i + 1]))
+                        i++;
+                }
+            }
+            GetCommentControlBlock()->size = static_cast<uint32_t>(j);
+            GetCommentData()[GetCommentControlBlock()->size] = '\0';
         }
     }
 
     constexpr void Entry::ReleaseData() noexcept
     {
+        if(!data)
+            return;
+        
         switch(type)
         {
         case Type::Bool:
@@ -1532,7 +1583,7 @@ namespace fdf
             if consteval
                 { delete GetDataAs<std::string>(); }
             else
-                { detail::GlobalAllocator::Deallocate(data, size * sizeof(char) / 8); }
+                { detail::GlobalAllocator::Deallocate(data, size * sizeof(char) / 8); } //TODO: Think why we do "/ 8"
             break;
         case Type::Version:
             if consteval
@@ -1554,7 +1605,6 @@ namespace fdf
             else
                 { (void)detail::GlobalAllocator::Deallocate(data, (*static_cast<size_t*>(data) * sizeof(void*)) + sizeof(size_t)); }
             return;
-        case Type::Invalid:
         case Type::Null:
         default:
             return;
@@ -1590,10 +1640,47 @@ namespace fdf
 
 
     
+    constexpr uint32_t Entry::FindChildIndex(const Entry& e) const noexcept
+    {
+        assert(IsContainer() && "You can only find index, if it's a container!");
+        for(uint32_t i = 0; i < size; i++)
+        {
+            if consteval
+            {
+                if((*GetDataVector<Entry*>())[i] == &e)
+                    return i;
+            }
+            else
+            {
+                if((static_cast<Entry**>(data) + 1)[i] == &e)
+                    return i;
+            }
+        }
+        return detail::UINT32_MAX_VALUE;
+    }
+    
+    constexpr uint32_t Entry::FindChildIndex(const std::string_view _identifier) const noexcept
+    {
+        assert(IsContainer() && "You can only find index, if it's a container!");
+        for(uint32_t i = 0; i < size; i++)
+        {
+            if consteval
+            {
+                if((*GetDataVector<Entry*>())[i]->GetIdentifier() == _identifier)
+                    return i;
+            }
+            else
+            {
+                if((static_cast<Entry**>(data) + 1)[i]->GetIdentifier() == _identifier)
+                    return i;
+            }
+        }
+        return detail::UINT32_MAX_VALUE;
+    }
+    
     constexpr Entry* Entry::Emplace(std::string_view _identifier) noexcept
     {
         assert(IsContainer() && "Sanity check!");
-        assert(depth + 1 != static_cast<uint8_t>(-1) && "Too much nesting check!");
         
         if(type == Type::Map && !detail::IsValidIdentifier(_identifier))
             return nullptr;
@@ -1609,7 +1696,7 @@ namespace fdf
     
     constexpr Entry* Entry::AddChild(UniqueEntryPtr& e) noexcept
     {
-        if(!e || !IsContainer() || depth + 1 == static_cast<uint8_t>(-1) || e->parent || e->depth == static_cast<uint8_t>(-1))
+        if(!e || !IsContainer() || e->parent)
             return nullptr;
         
         e->parent = this;
@@ -1629,18 +1716,6 @@ namespace fdf
                 return found;
             }
         }
-        
-        if(e->depth != depth + 1)
-        {
-            if(e->IsContainer())
-            {
-                e->ForEach<ForEachFlags::Recursive>([diff = e->depth - (depth + 1)](Entry& entry)
-                {
-                    entry.depth = static_cast<uint8_t>(entry.depth + diff);
-                });
-            }
-            e->depth = depth + 1;
-        }
 
         if consteval
         {
@@ -1655,17 +1730,17 @@ namespace fdf
         {
             if(data)
             {
-                const size_t capacity = *static_cast<size_t*>(data);
+                const size_t _capacity = *static_cast<size_t*>(data);
             
-                if(static_cast<size_t>(size) >= capacity) //TODO: convert >= to == and add an assert as a sanity check
+                if(static_cast<size_t>(size) >= _capacity) //TODO: convert >= to == and add an assert as a sanity check
                 {
-                    void* newBuffer = detail::GlobalAllocator::Allocate((2 * capacity * sizeof(void*)) + sizeof(size_t));
-                    *static_cast<size_t*>(newBuffer) = 2 * capacity;
+                    void* newBuffer = detail::GlobalAllocator::Allocate((2 * _capacity * sizeof(void*)) + sizeof(size_t));
+                    *static_cast<size_t*>(newBuffer) = 2 * _capacity;
 
                     for(size_t i = 0; i < size; i++)
                         (static_cast<Entry**>(newBuffer) + 1)[i] = (static_cast<Entry**>(data) + 1)[i];
 
-                    (void)detail::GlobalAllocator::Deallocate(data, (capacity * sizeof(void*)) + sizeof(size_t));
+                    (void)detail::GlobalAllocator::Deallocate(data, (_capacity * sizeof(void*)) + sizeof(size_t));
                     data = newBuffer;
                 }
             }
@@ -1686,21 +1761,9 @@ namespace fdf
     {
         if(size == 0 || !IsContainer())
             return false;
-
-        for(uint32_t i = 0; i < size; i++)
-        {
-            if consteval
-            {
-                if((*GetDataVector<Entry*>())[i] == &e)
-                    return RemoveChild(i);
-            }
-            else
-            {
-                if((static_cast<Entry**>(data) + 1)[i] == &e)
-                    return RemoveChild(i);
-            }
-        }
-        return false;
+        
+        const uint32_t index = FindChildIndex(e);
+        return index != detail::UINT32_MAX_VALUE? RemoveChild(index) : false;
     }
 
     constexpr bool Entry::RemoveChild(std::string_view _identifier) noexcept
@@ -1708,20 +1771,8 @@ namespace fdf
         if(size == 0 || type != Type::Map)
             return false;
 
-        for(uint32_t i = 0; i < size; i++)
-        {
-            if consteval
-            {
-                if((*GetDataVector<Entry*>())[i]->GetIdentifier() == _identifier)
-                    return RemoveChild(i);
-            }
-            else
-            {
-                if((static_cast<Entry**>(data) + 1)[i]->GetIdentifier() == _identifier)
-                    return RemoveChild(i);
-            }
-        }
-        return false;
+        const uint32_t index = FindChildIndex(_identifier);
+        return index != detail::UINT32_MAX_VALUE? RemoveChild(index) : false;
     }
 
     constexpr bool Entry::RemoveChild(uint32_t index) noexcept
@@ -1809,42 +1860,18 @@ namespace fdf
     {
         if(size == 0 || !IsContainer())
             return nullptr;
-
-        for(uint32_t i = 0; i < size; i++)
-        {
-            if consteval
-            {
-                if((*GetDataVector<Entry*>())[i] == &e)
-                    return OrphanChild_INTERNAL(i);
-            }
-            else
-            {
-                if((static_cast<Entry**>(data) + 1)[i] == &e)
-                    return OrphanChild_INTERNAL(i);
-            }
-        }
-        return nullptr;
+        
+        const uint32_t index = FindChildIndex(e);
+        return index != detail::UINT32_MAX_VALUE? OrphanChild_INTERNAL(index) : nullptr;
     }
     
     constexpr Entry* Entry::OrphanChild_INTERNAL(std::string_view _identifier) noexcept
     {
-        if(size == 0 || type != Type::Map)
+        if(size == 0 || !IsContainer())
             return nullptr;
-
-        for(uint32_t i = 0; i < size; i++)
-        {
-            if consteval
-            {
-                if((*GetDataVector<Entry*>())[i]->GetIdentifier() == _identifier)
-                    return OrphanChild_INTERNAL(i);
-            }
-            else
-            {
-                if((static_cast<Entry**>(data) + 1)[i]->GetIdentifier() == _identifier)
-                    return OrphanChild_INTERNAL(i);
-            }
-        }
-        return nullptr;
+        
+        const uint32_t index = FindChildIndex(_identifier);
+        return index != detail::UINT32_MAX_VALUE? OrphanChild_INTERNAL(index) : nullptr;
     }
     
     constexpr Entry* Entry::OrphanChild_INTERNAL(uint32_t index) noexcept
@@ -1941,33 +1968,25 @@ namespace fdf
     
     constexpr Entry* Entry::GetDirectChild(std::string_view _identifier) noexcept
     {
-        return const_cast<Entry*>(static_cast<const Entry*>(this)->GetDirectChild(_identifier));
+        if(size == 0 || type != Type::Map)
+            return nullptr;
+        return GetDirectChild(FindChildIndex(_identifier));
     }
     constexpr const Entry* Entry::GetDirectChild(std::string_view _identifier) const noexcept
     {
         if(size == 0 || type != Type::Map)
             return nullptr;
-        
-        for(uint32_t i = 0; i < size; i++)
-        {
-            if consteval
-            {
-                if((*GetDataVector<Entry*>())[i]->GetIdentifier() == _identifier)
-                    return GetDirectChild(i);
-            }
-            else
-            {
-                if((static_cast<Entry**>(data) + 1)[i]->GetIdentifier() == _identifier)
-                    return GetDirectChild(i);
-            }
-        }
-        
-        return nullptr;
+        return GetDirectChild(FindChildIndex(_identifier));
     }
     
     constexpr Entry* Entry::GetDirectChild(uint32_t index) noexcept
     {
-        return const_cast<Entry*>(static_cast<const Entry*>(this)->GetDirectChild(index));
+        if(index >= size || !IsContainer())
+            return nullptr;
+        
+        if consteval
+            { return (*GetDataVector<Entry*>())[index]; }
+        return (static_cast<Entry**>(data) + 1)[index];
     }
     constexpr const Entry* Entry::GetDirectChild(uint32_t index) const noexcept
     {
@@ -1975,13 +1994,8 @@ namespace fdf
             return nullptr;
         
         if consteval
-        {
-            return (*GetDataVector<Entry*>())[index];
-        }
-        else
-        {
-            return (static_cast<Entry**>(data) + 1)[index];
-        }
+            { return (*GetDataVector<Entry*>())[index]; }
+        return (static_cast<Entry**>(data) + 1)[index];
     }
 
     
@@ -2599,7 +2613,6 @@ namespace fdf
     
     constexpr void Entry::SetType(Type _type) noexcept
     {
-        assert(_type != Type::Invalid && "You shouldn NEVER set type to Type::Invalid!");
         if(_type == type)
             return;
         ReleaseData();
@@ -2799,7 +2812,7 @@ namespace fdf
     {
         ReleaseData();
         type = Type::Bool;
-        size = static_cast<uint32_t>(std::max(0ull, value.size()));
+        size = static_cast<uint32_t>(std::max(0ULL, value.size()));
         if consteval
         {
             data = new (std::nothrow) bool[size];
@@ -2820,8 +2833,8 @@ namespace fdf
     {
         ReleaseData();
         type = Type::Int;
-        size = static_cast<uint32_t>(std::max(0ull, value.size()));
-        if(size <= 0u)
+        size = static_cast<uint32_t>(std::max(0ULL, value.size()));
+        if(size <= 0U)
             return;
         if consteval
         {
@@ -2844,8 +2857,8 @@ namespace fdf
     {
         ReleaseData();
         type = Type::UInt;
-        size = static_cast<uint32_t>(std::max(0ull, value.size()));
-        if(size <= 0u)
+        size = static_cast<uint32_t>(std::max(0ULL, value.size()));
+        if(size <= 0U)
             return;
         if consteval
         {
@@ -2869,22 +2882,22 @@ namespace fdf
         assert((value.size() == 3 || value.size() == 4) && "Version must include 3 or 4 elements!");
         ReleaseData();
         type = Type::UInt;
-        size = static_cast<uint32_t>(std::max(0ull, value.size()));
+        size = static_cast<uint32_t>(std::max(0ULL, value.size()));
         if consteval
         {
             data = new (std::nothrow) std::vector<uint64_t>();
             assert(data && "Allocation shouldn't fail");
-            GetDataVector<uint64_t>()->resize(4, 0ull);
+            GetDataVector<uint64_t>()->resize(4, 0ULL);
             for(size_t i = 0; i < size; i++)
                 (*GetDataVector<uint64_t>())[i] = static_cast<uint64_t>(value[i]);
         }
         else
         {
             data = detail::GlobalAllocator::Allocate(4 * sizeof(uint64_t));
-            static_cast<uint64_t*>(data)[0] = 0ull;
-            static_cast<uint64_t*>(data)[1] = 0ull;
-            static_cast<uint64_t*>(data)[2] = 0ull;
-            static_cast<uint64_t*>(data)[3] = 0ull;
+            static_cast<uint64_t*>(data)[0] = 0ULL;
+            static_cast<uint64_t*>(data)[1] = 0ULL;
+            static_cast<uint64_t*>(data)[2] = 0ULL;
+            static_cast<uint64_t*>(data)[3] = 0ULL;
             for(size_t i = 0; i < size; i++)
                 static_cast<uint64_t*>(data)[i] = static_cast<uint64_t>(value[i]);
         }
@@ -2932,7 +2945,6 @@ namespace fdf
     {
         switch(type)
         {
-            case Type::Invalid: return detail::INVALID_TEXT;
             case Type::Null:    if constexpr(STYLE.bUseNilInsteadOfNull) return detail::KEYWORDS[1]; return detail::KEYWORDS[0];
             case Type::Array:   return detail::ARRAY_TEXT;
             case Type::Map:     return detail::MAP_TEXT;
@@ -3148,7 +3160,6 @@ namespace fdf
             return nullptr;
         
         e->type = Type::Map;
-        e->depth = static_cast<uint8_t>(-1);
         return e;
     }
 }
@@ -3205,7 +3216,6 @@ namespace fdf::detail
         if(!root)
             return nullptr;
         root->type = Type::Map;
-        root->depth = static_cast<uint8_t>(-1);
         
         while(true)
         {
@@ -3406,6 +3416,13 @@ namespace fdf::detail
         auto postProcess = [&]()
         {
             currentToken = tokenizer.Advance();
+            if(currentToken.type == TokenType::Comma)
+            {
+                currentToken = tokenizer.Advance();
+                FDF_CHECK_TOKEN(currentToken);
+                FDF_CHECK_TOKEN_FOR_EOF(currentToken);
+            }
+            
             if(currentToken.type == TokenType::Comment)
             {
             #if !FDF_NO_COMMENTS
@@ -3893,7 +3910,7 @@ namespace fdf::detail
 
             auto isEscapableChar     = [](char c) -> bool  { return c == '\"' || c == '\'' || c == '\\'; };
             auto isMergeEscapeChar   = [](char c) -> bool  { return c == 'n'  || c == 'r'  || c == 't' || c == 'v' || c == 'b' || c == 'f' || c == 'a'; };
-            [[maybe_unused]] auto isUnicodeEscapeChar = [](char c) -> bool  { return c == 'u'  || c == 'U'; };  // TODO: Maybe handle unicode?
+            //auto isUnicodeEscapeChar = [](char c) -> bool  { return c == 'u'  || c == 'U'; };  // TODO: Maybe handle unicode?
 
             auto convertMergedEscapeChar = [](char c) -> char
             {
@@ -4002,19 +4019,19 @@ namespace fdf::detail
             {
                 if(!ParseVariable(tokenizer, array   FDF_COMMENT_SWITCH(,childComment)))
                     return false;
-
                 currentToken = tokenizer.Current();
+            }
+            else if(currentToken.type == TokenType::SquareBraceClose)
+            {
+                currentToken = tokenizer.Advance();
+                FDF_CHECK_TOKEN(currentToken);
+                
                 if(currentToken.type == TokenType::Comma)
                 {
                     currentToken = tokenizer.Advance();
                     FDF_CHECK_TOKEN(currentToken);
                     FDF_CHECK_TOKEN_FOR_EOF(currentToken);
                 }
-            }
-            else if(currentToken.type == TokenType::SquareBraceClose)
-            {
-                currentToken = tokenizer.Advance();
-                FDF_CHECK_TOKEN(currentToken);
 
                 if(currentToken.type == TokenType::Comment)
                 {
@@ -4084,19 +4101,19 @@ namespace fdf::detail
             {
                 if(!ParseVariable(tokenizer, map   FDF_COMMENT_SWITCH(,childComment)))
                     return false;
-
                 currentToken = tokenizer.Current();
+            }
+            else if(currentToken.type == TokenType::CurlyBraceClose)
+            {
+                currentToken = tokenizer.Advance();
+                FDF_CHECK_TOKEN(currentToken);
+                
                 if(currentToken.type == TokenType::Comma)
                 {
                     currentToken = tokenizer.Advance();
                     FDF_CHECK_TOKEN(currentToken);
                     FDF_CHECK_TOKEN_FOR_EOF(currentToken);
                 }
-            }
-            else if(currentToken.type == TokenType::CurlyBraceClose)
-            {
-                currentToken = tokenizer.Advance();
-                FDF_CHECK_TOKEN(currentToken);
 
                 if(currentToken.type == TokenType::Comment)
                 {
@@ -4138,15 +4155,36 @@ namespace fdf::detail
 
 
 
+    template<bool CHECK_SINGLE_LINE>
+    struct ScopePositions;
+    template<>
+    struct ScopePositions<true> { size_t begin = 0, end = 0, textBegin = 0, spaces = 0; };
+    template<>
+    struct ScopePositions<false>{ size_t begin = 0; };
+    
+    
     template<auto DIAGNOSTIC_CALLBACK>
     template<Style STYLE>
     constexpr void Utils<DIAGNOSTIC_CALLBACK>::WriteBuffer(const Entry& root, std::string& buffer, const bool bOverwrite) noexcept
     {
-        [[maybe_unused]] auto isShortArrayFn   = [ ](const Entry& e) -> bool  { return e.GetChildCountRecursive() <= STYLE.singleLineArrayLimit; };
-        [[maybe_unused]] auto isShortMapFn     = [ ](const Entry& e) -> bool  { return e.GetChildCountRecursive() <= STYLE.singleLineMapLimit; };
-        auto writeEntryNameFn = [&](const Entry& e) -> void  { buffer.append(e.GetIdentifier()); };
+        assert((root.GetIdentifierSize() != 0 || (root.type == Type::Map && !root.parent)) && "Unless it's a map, it must have an identifier");
 
-        auto addTabFn = [&buffer](uint32_t count) -> void
+        static constexpr bool CHECK_SINGLE_LINE = STYLE.singleLineContainerLimit > 5;
+        std::vector<ScopePositions<CHECK_SINGLE_LINE>> scopes;
+        uint32_t lastDepth = 0u;
+        const bool bHasDedicatedRoot = !root.parent && root.type == Type::Map && root.GetIdentifierSize() == 0;
+
+        const size_t totalChildCount = root.GetChildCountRecursive();
+        if(bOverwrite)
+            buffer.clear();
+        buffer.reserve(buffer.size() + (totalChildCount * 50));
+
+
+
+
+
+        auto writeEntryNameFn = [&](const Entry& e) -> void  { buffer.append(e.GetIdentifier()); };
+        auto addTabFn = [&buffer](const size_t count) -> void
         {
             if constexpr(STYLE.bUseSpacesOverTabs)
                 buffer.append(count * STYLE.tabSize, ' ');
@@ -4167,53 +4205,6 @@ namespace fdf::detail
             else
                 buffer.push_back(',');
         };
-
-        std::array<bool, 254> scopes; // max amount of scopes is 254 (depth 0 has no scope, depth 1 has 1 scope, ... and 255 means root, so last possible depth is 254) NOLINT(*-pro-type-member-init)
-        uint8_t scopeCount = 0;
-        auto addScopeFn    = [&](const bool bIsMap)   -> void { scopes[scopeCount++] = bIsMap; };
-        auto removeScopeFn = [&]()                    -> void { scopeCount--; };
-        auto getScopeFn    = [&](const uint8_t index) -> bool { return scopes[index]; };
-
-        uint8_t lastDepth = root.depth;
-        [[maybe_unused]] Type lastType = root.type;
-
-        const size_t totalChildCount = root.GetChildCountRecursive();
-        [[maybe_unused]] size_t writtenCount = 0; //? might be unnecessary
-        if(bOverwrite)
-            buffer.clear();
-        buffer.reserve(buffer.size() + (totalChildCount * 50));
-
-
-        #if !FDF_NO_COMMENTS
-            if constexpr(STYLE.bFileComment)
-            {
-                if(root.depth == static_cast<uint8_t>(-1))
-                {
-                    const std::string_view fileComment = root.GetComment();
-                    if(!fileComment.empty())
-                    {
-                        buffer.append("/*#\n");
-                        size_t prevNewLinePos = static_cast<size_t>(-1);
-                        size_t newLinePos = fileComment.find_first_of('\n');
-                        while(newLinePos != std::string::npos)
-                        {
-                            addTabFn(1);
-                            buffer.append(fileComment, prevNewLinePos + 1, newLinePos - prevNewLinePos);
-                            prevNewLinePos = newLinePos;
-                            newLinePos = fileComment.find_first_of('\n', newLinePos + 1);
-                        }
-                        addTabFn(1);
-                        buffer.append(fileComment, prevNewLinePos + 1);
-                        buffer.append("\n*/\n\n\n");
-                    }
-                }
-            }
-        #endif
-
-
-
-
-
 
 
 
@@ -4286,45 +4277,176 @@ namespace fdf::detail
 
 
 
-
-
-
-
-
-        auto writeFn = [&](const Entry& e) -> void
+        auto preCloseScopes = [&]() -> void
         {
-            if(e.depth == static_cast<uint8_t>(-1))
+            if constexpr(!STYLE.bTrailingCommas)
             {
-                lastDepth = 0;
-                lastType = Type::Invalid;
-                return;
+                if(buffer.size() > 2 && buffer[buffer.size() - 2] == ',')
+                    buffer.erase(buffer.size() - 2, 1);
             }
-
-            for(int i = 0; i < lastDepth - e.depth; i++)
+        };
+        auto closeScopes = [&](const int64_t i, const bool bNested) -> void
+        {
+            if constexpr(CHECK_SINGLE_LINE)
             {
-                const bool bWasMap = getScopeFn(scopeCount - 1);
-                addTabFn(static_cast<uint32_t>(lastDepth - 1 - i));
+                for(size_t j = scopes.size() - 1; j != detail::SIZE_T_MAX_VALUE; j--)
+                {
+                    if(scopes[j].end == 0)
+                    {
+                        const bool bWasMap = buffer[scopes[j].begin] == '{';
+                        addTabFn(lastDepth - 1 - static_cast<size_t>(i));
+                        buffer.push_back(bWasMap? '}' : ']');
+                        scopes[j].end = buffer.size() - 1;
+                        
+                        if constexpr(STYLE.bContainersCommas)
+                        {
+                            if(bNested)
+                                buffer.push_back(',');
+                        }
+                        buffer.push_back('\n');
+                        
+                        for(size_t pos = scopes[j].end; pos - 2 > scopes[j].begin; pos--)
+                        {
+                            if(buffer[pos] == '/' && buffer[pos - 1] == '/')
+                            {
+                                scopes.erase(scopes.begin() + static_cast<int64_t>(j));
+                                return;
+                            }
+                            if(buffer[pos] == ' ' && (detail::constexpr_isspace(buffer[pos - 2]) || buffer[pos - 2] == '{' || buffer[pos - 2] == '[' || buffer[pos - 2] == '}' || buffer[pos - 2] == ']'))
+                                scopes[j].spaces++;
+                            else if(buffer[pos] == '\t')
+                                scopes[j].spaces += STYLE.tabSize;
+                        }
+                        if(scopes[j].end - scopes[j].textBegin + 1 - scopes[j].spaces > STYLE.singleLineContainerLimit)
+                            scopes.erase(scopes.begin() + static_cast<int64_t>(j));
+                        return;
+                    }
+                }
+            }
+            else
+            {
+                const bool bWasMap = buffer[scopes.back().begin] == '{';
+                addTabFn(static_cast<size_t>(lastDepth - 1 - i));
                 buffer.push_back(bWasMap? '}' : ']');
                 buffer.push_back('\n');
-                removeScopeFn();
+                scopes.pop_back();
             }
+        };
+
+
+
+
+
+        //TODO LOOK AT DIFF BETWEEN DEPTH AND LAST DEPTH TO FIGURE OUT COMMAS
+        auto writeFn = [&](const Entry& e) -> void
+        {
+            const uint32_t depth = bHasDedicatedRoot? e.CalculateDepth() - 1 : e.CalculateDepth();
+            if(static_cast<int64_t>(lastDepth) - static_cast<int64_t>(depth) > 0)
+                preCloseScopes();
+            for(int64_t i = 0; i < static_cast<int64_t>(lastDepth) - static_cast<int64_t>(depth); i++)
+                closeScopes(i, depth > 0 || (STYLE.bTrailingCommas && i + 1 < static_cast<int64_t>(lastDepth) - static_cast<int64_t>(depth)));
+
+
+
+
+
+            if(e.IsContainer())
+            {
+                // Make sure we don't do empty line on first element of a nested container (when first element is also a container)
+                const size_t found = buffer.find_last_not_of("\n\t ");
+                if(found == std::string::npos || (buffer[found] != '{' && buffer[found] != '['))
+                    buffer.push_back('\n');   
+            }
+
+
+
+
+
+        #if !FDF_NO_COMMENTS
+            if(!e.GetComment().empty())
+            {
+                std::string_view sv = e.GetComment();
+                const size_t start = buffer.size();
+                if constexpr(STYLE.singleLineCommentLimit < 5)
+                {
+                    addTabFn(depth);
+                    buffer.append("// ");
+                    buffer.append(sv);
+                    buffer.append("\n");
+                }
+                else
+                {
+                    const uint32_t overhead = (depth * STYLE.tabSize) + 3;
+                    if(overhead + 5 > STYLE.singleLineCommentLimit)
+                    {
+                        addTabFn(depth);
+                        buffer.append("// ");
+                        buffer.append(sv);
+                        buffer.append("\n");
+                    }
+                    else
+                    {
+                        bool bMultiLine = false;
+                        while(!sv.empty())
+                        {
+                            addTabFn(depth);
+                            buffer.append("// ");
+                            if(sv.size() > STYLE.singleLineCommentLimit - overhead)
+                            {
+                                bMultiLine = true;
+                                uint32_t pos = STYLE.singleLineCommentLimit - overhead;
+                                if(!detail::constexpr_isspace(buffer[pos]))
+                                {
+                                    const size_t found = sv.find_last_of(' ', pos);
+                                    if(found != std::string::npos)
+                                        pos = static_cast<uint32_t>(found);
+                                }
+                                buffer.append(sv.substr(0, pos));
+                                sv = sv.substr(pos + 1);
+                            }
+                            else
+                            {
+                                buffer.append(sv);
+                                sv = {};
+                            }
+                            buffer.append("\n");
+                        }
+                        
+                        if(bMultiLine)
+                            buffer.insert(start, 1, '\n');
+                    }
+                }
+            }
+        #endif
+
+
+
+
 
             if(!e.IsContainer())
             {
-                addTabFn(e.depth);
+                addTabFn(depth);
                 if(!e.parent || e.parent->type != Type::Array)
                 {
                     writeEntryNameFn(e);
                     addEqualSignFn();
                 }
                 writeSimpleEntryValueFn(e);
+                
+                if constexpr(STYLE.bVariableCommas)
+                {
+                    if(!bHasDedicatedRoot || e.parent != &root)
+                        buffer.push_back(',');
+                }
                 buffer.push_back('\n');
             }
             else
             {
-                buffer.push_back('\n');
                 const bool bIsMap = e.type == Type::Map;
-                addTabFn(e.depth);
+                addTabFn(depth);
+                auto& scope = scopes.emplace_back();
+                if constexpr(CHECK_SINGLE_LINE)
+                    { scope.textBegin = buffer.size(); }
                 
                 if(!e.parent || e.parent->type != Type::Array)
                 {
@@ -4332,39 +4454,185 @@ namespace fdf::detail
                     if constexpr(STYLE.bParenthesesOnNewLine)
                     {
                         buffer.push_back('\n');
-                        addTabFn(e.depth);
+                        addTabFn(depth);
                     }
                 }
                 
                 buffer.push_back(bIsMap? '{' : '[');
+                scope.begin = buffer.size() - 1;
                 buffer.push_back('\n');
-                addScopeFn(bIsMap);
             }
             //TODO: implement
             
-            lastDepth = e.depth;
-            lastType = e.type;
-            writtenCount++;
+            lastDepth = depth;
         };
+
+
+
+
+
+        #if !FDF_NO_COMMENTS
+            if constexpr(STYLE.bFileComment)
+            {
+                if(bHasDedicatedRoot)
+                {
+                    const std::string_view fileComment = root.GetComment();
+                    if(!fileComment.empty())
+                    {
+                        buffer.append("/*#\n");
+                        size_t prevNewLinePos = detail::SIZE_T_MAX_VALUE;
+                        size_t newLinePos = fileComment.find_first_of('\n');
+                        while(newLinePos != std::string::npos)
+                        {
+                            addTabFn(1);
+                            buffer.append(fileComment, prevNewLinePos + 1, newLinePos - prevNewLinePos);
+                            prevNewLinePos = newLinePos;
+                            newLinePos = fileComment.find_first_of('\n', newLinePos + 1);
+                        }
+                        addTabFn(1);
+                        buffer.append(fileComment, prevNewLinePos + 1);
+                        buffer.append("\n*/\n\n\n");
+                    }
+                }
+            }
+        #endif
+
+
+
 
 
         if constexpr(STYLE.bGroupSimilarTypes)
         {
-            root.ForEach<ForEachFlags::Recursive | ForEachFlags::Group | ForEachFlags::IncludeSelf>(writeFn);
+            if(bHasDedicatedRoot)
+                root.ForEach<ForEachFlags::Recursive | ForEachFlags::Group>(writeFn);
+            else
+                root.ForEach<ForEachFlags::Recursive | ForEachFlags::Group | ForEachFlags::IncludeSelf>(writeFn);
         }
         else
         {
-            root.ForEach<ForEachFlags::Recursive | ForEachFlags::IncludeSelf>(writeFn);
+            if(bHasDedicatedRoot)
+                root.ForEach<ForEachFlags::Recursive>(writeFn);
+            else
+                root.ForEach<ForEachFlags::Recursive | ForEachFlags::IncludeSelf>(writeFn);
         }
 
 
-        for(int i = 0; i < lastDepth; i++)
+        preCloseScopes();
+        for(int64_t i = 0; i < static_cast<int64_t>(lastDepth); i++)
+            closeScopes(i, STYLE.bTrailingCommas && i + 1 < static_cast<int64_t>(lastDepth));
+
+
+
+
+
+        if constexpr(CHECK_SINGLE_LINE)
         {
-            const bool bWasMap = getScopeFn(scopeCount - 1);
-            addTabFn(static_cast<uint32_t>(lastDepth - 1 - i));
-            buffer.push_back(bWasMap? '}' : ']');
-            buffer.push_back('\n');
-            removeScopeFn();
+            for(size_t i = scopes.size() - 1; i != detail::SIZE_T_MAX_VALUE; i--)
+            {
+                size_t found = detail::SIZE_T_MAX_VALUE;
+                for(size_t j = i - 1; j != detail::SIZE_T_MAX_VALUE; j--)
+                {
+                    if(scopes[j].begin < scopes[i].begin && scopes[j].end > scopes[i].end)
+                    {
+                        if(std::max(scopes[i].end, scopes[j].end) - std::min(scopes[j].begin, scopes[j].begin) + 1 - scopes[j].spaces > STYLE.singleLineContainerLimit)
+                            break;
+                        found = j;
+                    }
+                }
+
+                if(found != detail::SIZE_T_MAX_VALUE)
+                    i = found;
+                
+                
+                // Delete blank lines between multiple new lines
+                size_t newLinePos = detail::SIZE_T_MAX_VALUE;
+                for(found = scopes[i].end + 1; found < buffer.size(); found++)
+                {
+                    if(buffer[found] == '\n')
+                    {
+                        newLinePos = found;
+                        continue;
+                    }
+                    if(buffer[found] == '{')
+                    {
+                        const size_t found2 = buffer.find_first_of("}\n", found);
+                        if(found2 != std::string::npos && buffer[found2] != '\n')
+                            buffer.erase(newLinePos, 1);
+                        break;
+                    }
+                    if(buffer[found] == '[')
+                    {
+                        const size_t found2 = buffer.find_first_of("]\n", found);
+                        if(found2 != std::string::npos && buffer[found2] != '\n')
+                            buffer.erase(newLinePos, 1);
+                        break;
+                    }
+                    if(detail::constexpr_isalpha(buffer[found]))
+                    {
+                        while(found < buffer.size() && (detail::constexpr_isalpha(buffer[found]) || detail::constexpr_isdigit(buffer[found]) || buffer[found] == '_' || buffer[found] == ' '))
+                            found++;
+                        if(buffer[found] != '{' && buffer[found] != '[')
+                            break;
+                        found--;
+                        continue;
+                    }
+                    if(!detail::constexpr_isspace(buffer[found]))
+                        break;
+                }
+                
+                
+                for(size_t pos = scopes[i].end; pos > scopes[i].begin; pos--)
+                {
+                    if(buffer[pos] == '\n')
+                    {
+                        buffer[pos] = ' ';
+                        bool bIncremented = false;
+                        if constexpr(!STYLE.bVariableCommas)
+                        {
+                            if(buffer[pos - 1] != '{' && buffer[pos - 1] != '[')
+                            {
+                                found = buffer.find_first_not_of(' ', pos);
+                                if(found != std::string::npos && buffer[found] != '}' && buffer[found] != ']')
+                                {
+                                    buffer[pos] = ',';
+                                    if constexpr(STYLE.bSpaceAfterComma)
+                                    {
+                                        buffer.insert(++pos, 1, ' ');
+                                        bIncremented = true;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        while(pos + 1 < scopes[i].end && (buffer[pos + 1] == ' ' || buffer[pos + 1] == '\t'))
+                            buffer.erase(pos + 1, 1);
+                        if constexpr(STYLE.bSpaceAfterComma)
+                        {
+                            if(bIncremented)
+                                --pos;
+                        }
+                        
+                        // Eliminate multiple new lines
+                        while(pos - 1 > scopes[i].begin && buffer[pos - 1] == '\n')
+                            buffer.erase(--pos, 1);
+                        
+                        // If it contains nested single line, add some spaces to make it more clear
+                        if(pos - 1 >= scopes[i].begin)
+                        {
+                            if((IsOpenBrace(buffer[pos - 1]) && IsOpenBrace(buffer[pos + 1])) || (IsCloseBrace(buffer[pos - 1]) && IsCloseBrace(buffer[pos + 1])))
+                                buffer.insert(pos, 2, ' ');
+                        }
+                    }
+                }
+                
+                for(size_t pos = scopes[i].begin; pos > scopes[i].textBegin; pos--)
+                {
+                    if(buffer[pos] == '\n')
+                        buffer[pos] = ' ';
+                    if(buffer[pos] == ' ' || buffer[pos] == '\t')
+                        buffer.erase(pos, 1);
+                }
+            }
         }
     }
 }
