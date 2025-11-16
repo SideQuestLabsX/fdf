@@ -4312,7 +4312,7 @@ namespace fdf::detail
                                 scopes.erase(scopes.begin() + static_cast<int64_t>(j));
                                 return;
                             }
-                            if(buffer[pos] == ' ' && (detail::constexpr_isspace(buffer[pos - 2]) || buffer[pos - 2] == '{' || buffer[pos - 2] == '[' || buffer[pos - 2] == '}' || buffer[pos - 2] == ']'))
+                            if(buffer[pos] == ' ' && (detail::constexpr_isspace(buffer[pos - 2]) || IsBrace(buffer[pos - 2])))
                                 scopes[j].spaces++;
                             else if(buffer[pos] == '\t')
                                 scopes[j].spaces += STYLE.tabSize;
@@ -4354,7 +4354,7 @@ namespace fdf::detail
             {
                 // Make sure we don't do empty line on first element of a nested container (when first element is also a container)
                 const size_t found = buffer.find_last_not_of("\n\t ");
-                if(found == std::string::npos || (buffer[found] != '{' && buffer[found] != '['))
+                if(found == std::string::npos || !IsOpenBrace(buffer[found]))
                     buffer.push_back('\n');   
             }
 
@@ -4571,7 +4571,7 @@ namespace fdf::detail
                     {
                         while(found < buffer.size() && (detail::constexpr_isalpha(buffer[found]) || detail::constexpr_isdigit(buffer[found]) || buffer[found] == '_' || buffer[found] == ' '))
                             found++;
-                        if(buffer[found] != '{' && buffer[found] != '[')
+                        if(!IsOpenBrace(buffer[found]))
                             break;
                         found--;
                         continue;
@@ -4592,7 +4592,7 @@ namespace fdf::detail
                             if(buffer[pos - 1] != '{' && buffer[pos - 1] != '[')
                             {
                                 found = buffer.find_first_not_of(' ', pos);
-                                if(found != std::string::npos && buffer[found] != '}' && buffer[found] != ']')
+                                if(found != std::string::npos && !IsCloseBrace(buffer[found]))
                                 {
                                     buffer[pos] = ',';
                                     if constexpr(STYLE.bSpaceAfterComma)

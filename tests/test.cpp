@@ -585,7 +585,7 @@ namespace fdf::detail
                     bResult = false;
             }
 
-            bResult = PrintFile<Style{.singleLineContainerLimit = 80, .bTrailingCommas = false}>(root.get(), FDF_TEST_DIRECTORY "/output/WriteTest.txt") && bResult;
+            bResult = PrintFile<Style{.singleLineContainerLimit = 40, .bTrailingCommas = false}>(root.get(), FDF_TEST_DIRECTORY "/output/WriteTest.txt") && bResult;
             return bResult;
         }
     };
