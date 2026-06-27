@@ -99,6 +99,8 @@ jobs:
   windows-msvc:
     name: windows-msvc (mod=${{ matrix.modules }} noCmt=${{ matrix.no_comments }} ext=${{ matrix.extended }})
     runs-on: windows-2025
+    # MSVC module builds currently ICE, so they are allowed to fail for now
+    continue-on-error: ${{ matrix.modules == 'ON' }}
     strategy:
       fail-fast: false
       matrix:
