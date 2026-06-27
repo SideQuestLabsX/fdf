@@ -965,6 +965,635 @@ namespace fdf::detail
     class SlabAllocator
     {
         static_assert(BLOCK_SIZE >= sizeof(void*), "BLOCK_SIZE can't be smaller than size of a pointer");
+    // Constexpr number -> string appenders, so the writer can run at compile time (std::format isn't
+    // constexpr). std::to_chars is constexpr for integers
+    constexpr void AppendInt(std::string& s, int64_t v) noexcept
+    {
+        char b[24];
+        const auto r = std::to_chars(b, b + sizeof(b), v);
+        s.append(b, r.ptr);
+    }
+    constexpr void AppendUInt(std::string& s, uint64_t v) noexcept
+    {
+        char b[24];
+        const auto r = std::to_chars(b, b + sizeof(b), v);
+        s.append(b, r.ptr);
+    }
+    // Shortest-decimal double <-> string, hand-rolled to run the same at compile time and runtime
+    // (to/from_chars aren't constexpr for floats). Print: Dragon4 / Burger-Dybvig. Parse: Clinger
+    // fast path + AlgorithmM slow path. Both reduce to add/sub/shift/compare on one BigUint
+    struct BigUint
+    {
+        static constexpr int CAP = 96;  // 3072 bits, ample for the full f64 range
+        uint32_t limb[CAP] = {};
+        int len = 0;
+
+        constexpr void Normalize() noexcept
+        {
+            while(len > 0 && limb[len - 1] == 0)
+                len--;
+        }
+        [[nodiscard]] constexpr bool IsZero() const noexcept  { return len == 0; }
+
+        constexpr void SetU64(uint64_t v) noexcept
+        {
+            for(int i = 0; i < CAP; i++)
+                limb[i] = 0;
+            limb[0] = static_cast<uint32_t>(v);
+            limb[1] = static_cast<uint32_t>(v >> 32);
+            len = 2;
+            Normalize();
+        }
+
+        [[nodiscard]] constexpr int BitLength() const noexcept
+        {
+            if(len == 0)
+                return 0;
+            return len * 32 - std::countl_zero(limb[len - 1]);
+        }
+
+        [[nodiscard]] static constexpr int Compare(const BigUint& a, const BigUint& b) noexcept
+        {
+            if(a.len != b.len)
+                return a.len < b.len? -1 : 1;
+            for(int i = a.len - 1; i >= 0; i--)
+            {
+                if(a.limb[i] != b.limb[i])
+                    return a.limb[i] < b.limb[i]? -1 : 1;
+            }
+            return 0;
+        }
+
+        constexpr void Add(const BigUint& o) noexcept
+        {
+            const int n = o.len > len? o.len : len;
+            uint64_t carry = 0;
+            for(int i = 0; i < n; i++)
+            {
+                const uint64_t sum = carry + (i < len? limb[i] : 0) + (i < o.len? o.limb[i] : 0);
+                limb[i] = static_cast<uint32_t>(sum);
+                carry = sum >> 32;
+            }
+            len = n;
+            if(carry)
+                limb[len++] = static_cast<uint32_t>(carry);
+        }
+
+        constexpr void Sub(const BigUint& o) noexcept  // requires *this >= o
+        {
+            int64_t borrow = 0;
+            for(int i = 0; i < len; i++)
+            {
+                int64_t d = static_cast<int64_t>(limb[i]) - borrow - (i < o.len? o.limb[i] : 0);
+                if(d < 0)
+                {
+                    d += (int64_t(1) << 32);
+                    borrow = 1;
+                }
+                else
+                    borrow = 0;
+                limb[i] = static_cast<uint32_t>(d);
+            }
+            Normalize();
+        }
+
+        constexpr void MulSmall(uint32_t m) noexcept
+        {
+            if(m == 0 || len == 0)
+            {
+                len = 0;
+                return;
+            }
+            uint64_t carry = 0;
+            for(int i = 0; i < len; i++)
+            {
+                const uint64_t p = static_cast<uint64_t>(limb[i]) * m + carry;
+                limb[i] = static_cast<uint32_t>(p);
+                carry = p >> 32;
+            }
+            if(carry)
+                limb[len++] = static_cast<uint32_t>(carry);
+        }
+        constexpr void Times10() noexcept  { MulSmall(10); }
+
+        constexpr void ShiftLeft(int bits) noexcept
+        {
+            if(bits <= 0 || len == 0)
+                return;
+            const int words = bits / 32;
+            const int sh = bits % 32;
+            if(sh == 0)
+            {
+                for(int i = len - 1; i >= 0; i--)
+                    limb[i + words] = limb[i];
+            }
+            else
+            {
+                limb[len + words] = 0;
+                for(int i = len - 1; i >= 0; i--)
+                {
+                    const uint32_t hi = limb[i] >> (32 - sh);
+                    const uint32_t lo = limb[i] << sh;
+                    limb[i + words + 1] |= hi;
+                    limb[i + words] = lo;
+                }
+            }
+            for(int i = 0; i < words; i++)
+                limb[i] = 0;
+            len += words + (sh? 1 : 0);
+            Normalize();
+        }
+
+        constexpr void ShiftRight1() noexcept
+        {
+            uint32_t carry = 0;
+            for(int i = len - 1; i >= 0; i--)
+            {
+                const uint32_t nc = limb[i] & 1u;
+                limb[i] = (limb[i] >> 1) | (carry << 31);
+                carry = nc;
+            }
+            Normalize();
+        }
+    };
+
+    // (a + b) <=> c
+    [[nodiscard]] constexpr int PlusCompare(const BigUint& a, const BigUint& b, const BigUint& c) noexcept
+    {
+        BigUint t = a;
+        t.Add(b);
+        return BigUint::Compare(t, c);
+    }
+
+    [[nodiscard]] constexpr BigUint Pow10Big(int n) noexcept
+    {
+        BigUint r;
+        r.SetU64(1);
+        while(n >= 9)
+        {
+            r.MulSmall(1000000000u);
+            n -= 9;
+        }
+        constexpr uint32_t POW10_SMALL[9] = { 1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000 };
+        if(n > 0)
+            r.MulSmall(POW10_SMALL[n]);
+        return r;
+    }
+
+    // Dragon4: shortest decimal digits of value = f * 2^e (f != 0). Writes `numDigits` digit chars
+    // into `out`, sets `point` so the value is 0.<digits> * 10^point. The last digit may carry to
+    // '0'+10, which the caller resolves
+    constexpr void DragonDigits(uint64_t f, int e, char* out, int& numDigits, int& point) noexcept
+    {
+        const bool bEven = (f & 1u) == 0;
+        const bool bLowerCloser = (f == (1ull << 52)) && (e != -1074);
+
+        BigUint num, den, dPlus, dMinus;
+        if(e >= 0)
+        {
+            num.SetU64(f);
+            num.ShiftLeft(e + 1);                   // f * 2^e * 2
+            den.SetU64(2);
+            dPlus.SetU64(1);  dPlus.ShiftLeft(e);
+            dMinus.SetU64(1); dMinus.ShiftLeft(e);
+        }
+        else
+        {
+            num.SetU64(f);
+            num.ShiftLeft(1);                       // f * 2
+            den.SetU64(1);  den.ShiftLeft(1 - e);   // 2 * 2^(-e)
+            dPlus.SetU64(1);
+            dMinus.SetU64(1);
+        }
+        if(bLowerCloser)
+        {
+            num.ShiftLeft(1);
+            den.ShiftLeft(1);
+            dPlus.ShiftLeft(1);
+        }
+
+        // Normalize ratio num/den into [0.1, 1), tracking the decimal exponent
+        point = 0;
+        while(true)
+        {
+            if(BigUint::Compare(num, den) >= 0)
+            {
+                den.Times10();
+                point++;
+            }
+            else
+            {
+                BigUint t = num;
+                t.Times10();
+                if(BigUint::Compare(t, den) < 0)
+                {
+                    num.Times10();
+                    dPlus.Times10();
+                    dMinus.Times10();
+                    point--;
+                }
+                else
+                    break;
+            }
+        }
+
+        numDigits = 0;
+        while(true)
+        {
+            num.Times10();
+            dPlus.Times10();
+            dMinus.Times10();
+
+            int digit = 0;
+            while(BigUint::Compare(num, den) >= 0)
+            {
+                num.Sub(den);
+                digit++;
+            }
+
+            const bool bLow  = bEven? BigUint::Compare(num, dMinus) <= 0
+                                    : BigUint::Compare(num, dMinus) <  0;
+            const bool bHigh = bEven? PlusCompare(num, dPlus, den) >= 0
+                                    : PlusCompare(num, dPlus, den) >  0;
+
+            if(!bLow && !bHigh)
+            {
+                out[numDigits++] = static_cast<char>('0' + digit);
+                continue;
+            }
+
+            bool bRoundUp;
+            if(bLow && !bHigh)
+                bRoundUp = false;
+            else if(bHigh && !bLow)
+                bRoundUp = true;
+            else
+                bRoundUp = PlusCompare(num, num, den) > 0;  // 2*num > den
+
+            out[numDigits++] = static_cast<char>('0' + digit + (bRoundUp? 1 : 0));
+            break;
+        }
+    }
+
+    // Shortest round-trip text for any finite double (and inf/nan sentinels). Always emits a '.' or
+    // 'e' so the tokenizer classifies the result as a FloatLiteral, never an int
+    constexpr void AppendDouble(std::string& s, double v) noexcept
+    {
+        const uint64_t bits = std::bit_cast<uint64_t>(v);
+        const bool bNeg = (bits >> 63) != 0;
+        const int rawExp = static_cast<int>((bits >> 52) & 0x7FF);
+        const uint64_t mantissa = bits & ((1ull << 52) - 1);
+
+        if(rawExp == 0x7FF)
+        {
+            s += mantissa? "nan" : (bNeg? "-inf" : "inf");
+            return;
+        }
+        if(bNeg)
+            s.push_back('-');
+        if(rawExp == 0 && mantissa == 0)
+        {
+            s += "0.0";
+            return;
+        }
+
+        uint64_t f;
+        int e;
+        if(rawExp == 0)
+        {
+            f = mantissa;
+            e = -1074;
+        }
+        else
+        {
+            f = mantissa | (1ull << 52);
+            e = rawExp - 1075;
+        }
+
+        char digits[40];
+        int n = 0;
+        int point = 0;
+        DragonDigits(f, e, digits, n, point);
+
+        if(n > 0 && digits[n - 1] == '0' + 10)  // last digit carried 9 -> 10
+        {
+            int i = n - 1;
+            digits[i] = '0';
+            while(i > 0 && digits[i - 1] == '9')
+            {
+                digits[i - 1] = '0';
+                i--;
+            }
+            if(i == 0)
+            {
+                for(int k = n; k > 0; k--)
+                    digits[k] = digits[k - 1];
+                digits[0] = '1';
+                n++;
+                point++;
+            }
+            else
+                digits[i - 1]++;
+        }
+        while(n > 1 && digits[n - 1] == '0')
+            n--;
+
+        const bool bFixed = (point > -4 && point <= 17);
+        if(bFixed)
+        {
+            if(point <= 0)
+            {
+                s += "0.";
+                for(int i = 0; i < -point; i++)
+                    s.push_back('0');
+                s.append(digits, digits + n);
+            }
+            else if(point >= n)
+            {
+                s.append(digits, digits + n);
+                for(int i = 0; i < point - n; i++)
+                    s.push_back('0');
+                s += ".0";
+            }
+            else
+            {
+                s.append(digits, digits + point);
+                s.push_back('.');
+                s.append(digits + point, digits + n);
+            }
+        }
+        else
+        {
+            s.push_back(digits[0]);
+            s.push_back('.');
+            if(n > 1)
+                s.append(digits + 1, digits + n);
+            else
+                s.push_back('0');
+            s.push_back('e');
+            int exp = point - 1;
+            if(exp < 0)
+            {
+                s.push_back('-');
+                exp = -exp;
+            }
+            char eb[8];
+            int en = 0;
+            do { eb[en++] = static_cast<char>('0' + exp % 10); exp /= 10; } while(exp);
+            while(en > 0)
+                s.push_back(eb[--en]);
+        }
+    }
+
+    inline constexpr double POW10_D[23] =
+    {
+        1e0,  1e1,  1e2,  1e3,  1e4,  1e5,  1e6,  1e7,  1e8,  1e9,  1e10, 1e11,
+        1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22
+    };
+
+    // Build a double from value = mant * 2^lsbExp. Handles normal, subnormal, carry-on-round and
+    // overflow. When lsbExp == -1074 the IEEE encoding is linear in mant, so the subnormal /
+    // smallest-normal boundary needs no special case
+    [[nodiscard]] constexpr double Pack(uint64_t mant, int lsbExp, bool bNeg) noexcept
+    {
+        if(mant == 0)
+            return bNeg? -0.0 : 0.0;
+        uint64_t bits;
+        if(lsbExp == -1074)
+        {
+            bits = mant;
+        }
+        else
+        {
+            int top = 63 - std::countl_zero(mant);
+            const int E = top + lsbExp;  // invariant under the renormalize below
+            if(top == 53)                // rounded up to 2^53
+            {
+                mant >>= 1;
+                lsbExp++;
+            }
+            if(E > 1023)
+                return bNeg? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity();
+            bits = (static_cast<uint64_t>(E + 1023) << 52) | (mant & ((1ull << 52) - 1));
+        }
+        if(bNeg)
+            bits |= (1ull << 63);
+        return std::bit_cast<double>(bits);
+    }
+
+    // value = digits * 10^exp10, correctly rounded (AlgorithmM). `bInputSticky` flags input digits
+    // dropped below the BigUint precision cap
+    [[nodiscard]] constexpr double SlowParse(const BigUint& digits, int exp10, bool bNeg, bool bInputSticky) noexcept
+    {
+        if(digits.IsZero())
+            return bNeg? -0.0 : 0.0;
+
+        BigUint N = digits;
+        BigUint D;
+        D.SetU64(1);
+        if(exp10 > 0)
+        {
+            const BigUint p = Pow10Big(exp10);
+            BigUint r;
+            r.len = 0;
+            for(int i = 0; i < p.len; i++)
+            {
+                BigUint partial = digits;
+                partial.MulSmall(p.limb[i]);
+                partial.ShiftLeft(32 * i);
+                r.Add(partial);
+            }
+            N = r;
+        }
+        else if(exp10 < 0)
+            D = Pow10Big(-exp10);
+
+        const int qbits = N.BitLength() - D.BitLength();
+        const int f = 54 - qbits;
+        BigUint Nn = N, Dn = D;
+        if(f >= 0)
+            Nn.ShiftLeft(f);
+        else
+            Dn.ShiftLeft(-f);
+
+        int kmax = Nn.BitLength() - Dn.BitLength();
+        if(kmax < 0)
+            kmax = 0;
+        BigUint shifted = Dn;
+        shifted.ShiftLeft(kmax);
+
+        uint64_t Q = 0;
+        BigUint rem = Nn;
+        for(int k = kmax; k >= 0; k--)
+        {
+            if(BigUint::Compare(shifted, rem) <= 0)
+            {
+                rem.Sub(shifted);
+                Q |= (1ull << k);
+            }
+            shifted.ShiftRight1();
+        }
+        const bool bSticky = bInputSticky || !rem.IsZero();
+
+        if(Q == 0)
+            return bNeg? -0.0 : 0.0;
+
+        // value = Q * 2^(-f). Round to result LSB exponent = max(E-52, -1074)
+        const int qBits = 64 - std::countl_zero(Q);
+        const int E = qBits - 1 - f;
+        int lsbExp = E - 52;
+        if(lsbExp < -1074)
+            lsbExp = -1074;
+        const int dropBits = lsbExp + f;
+
+        uint64_t mant;
+        if(dropBits <= 0)
+        {
+            mant = (-dropBits >= 64)? 0 : (Q << (-dropBits));
+        }
+        else
+        {
+            const uint64_t droppedMask = (dropBits >= 64)? ~0ull : ((1ull << dropBits) - 1);
+            const uint64_t dropped = Q & droppedMask;
+            mant = (dropBits >= 64)? 0 : (Q >> dropBits);
+            const uint64_t half = 1ull << (dropBits - 1);
+            bool bRoundUp;
+            if(dropped > half)
+                bRoundUp = true;
+            else if(dropped < half)
+                bRoundUp = false;
+            else
+                bRoundUp = bSticky? true : (mant & 1) != 0;
+            if(bRoundUp)
+                mant++;
+        }
+        return Pack(mant, lsbExp, bNeg);
+    }
+
+    // Parse one number from [s, end). Accepts: [-] digits [. digits] [(e|E)[+|-]digits].
+    // Sets *bOk false on malformed input; overflow yields +/-inf with *bOk true
+    [[nodiscard]] constexpr double ParseDouble(const char* s, const char* end, bool* bOk) noexcept
+    {
+        *bOk = true;
+        bool bNeg = false;
+        const char* p = s;
+        if(p < end && *p == '-')
+        {
+            bNeg = true;
+            p++;
+        }
+
+        uint64_t fastMant = 0;
+        int sigDigits = 0;
+        BigUint big;
+        big.SetU64(0);
+        int exp10 = 0;
+        bool bAnyDigit = false;
+        bool bSticky = false;
+        bool bFastExact = true;
+
+        auto pushDigit = [&](int d)
+        {
+            bAnyDigit = true;
+            if(d != 0 || sigDigits != 0)
+            {
+                if(sigDigits < 40)
+                {
+                    big.MulSmall(10);
+                    if(d)
+                    {
+                        BigUint t;
+                        t.SetU64(static_cast<uint64_t>(d));
+                        big.Add(t);
+                    }
+                    sigDigits++;
+                }
+                else
+                {
+                    if(d)
+                        bSticky = true;
+                    exp10++;
+                }
+            }
+            if(bFastExact)
+            {
+                if(fastMant <= (~0ull - 9) / 10)
+                    fastMant = fastMant * 10 + static_cast<uint64_t>(d);
+                else
+                    bFastExact = false;
+            }
+        };
+
+        for(; p < end && (*p >= '0' && *p <= '9'); p++)
+            pushDigit(*p - '0');
+
+        if(p < end && *p == '.')
+        {
+            p++;
+            for(; p < end && (*p >= '0' && *p <= '9'); p++)
+            {
+                pushDigit(*p - '0');
+                if(sigDigits <= 40)
+                    exp10--;
+            }
+        }
+
+        if(p < end && (*p == 'e' || *p == 'E'))
+        {
+            p++;
+            bool bExpNeg = false;
+            if(p < end && (*p == '+' || *p == '-'))
+            {
+                bExpNeg = (*p == '-');
+                p++;
+            }
+            if(p >= end || !(*p >= '0' && *p <= '9'))
+            {
+                *bOk = false;
+                return 0.0;
+            }
+            int ev = 0;
+            for(; p < end && (*p >= '0' && *p <= '9'); p++)
+                ev = ev < 100000? ev * 10 + (*p - '0') : ev;
+            exp10 += bExpNeg? -ev : ev;
+        }
+
+        if(p != end || !bAnyDigit)
+        {
+            *bOk = false;
+            return 0.0;
+        }
+
+        if(big.IsZero())
+            return bNeg? -0.0 : 0.0;
+
+        // Clinger fast path: exact mantissa times an exact power of ten
+        if(bFastExact && !bSticky && fastMant < (1ull << 53))
+        {
+            if(exp10 == 0)
+                return bNeg? -static_cast<double>(fastMant) : static_cast<double>(fastMant);
+            if(exp10 > 0 && exp10 <= 22)
+            {
+                const double r = static_cast<double>(fastMant) * POW10_D[exp10];
+                return bNeg? -r : r;
+            }
+            if(exp10 < 0 && exp10 >= -22)
+            {
+                const double r = static_cast<double>(fastMant) / POW10_D[-exp10];
+                return bNeg? -r : r;
+            }
+        }
+
+        // Magnitude clamp keeps the bignums bounded
+        const int magExp = exp10 + sigDigits;
+        if(magExp > 310)
+            return bNeg? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity();
+        if(magExp < -330)
+            return bNeg? -0.0 : 0.0;
+
+        return SlowParse(big, exp10, bNeg, bSticky);
+    }
+
 
         struct Chunk
         {
@@ -3333,10 +3962,12 @@ namespace fdf
                 const auto span = GetValue<uint64_t>();
                 if(span.empty())
                     return {};
-                if(size == 3)
-                    temp = std::format("{}.{}.{}", span[0], span[1], span[2]);
-                else
-                    temp = std::format("{}.{}.{}.{}", span[0], span[1], span[2], span[3]);
+                temp.clear();
+                for(size_t i = 0; i < span.size(); i++)
+                {
+                    if(i) temp.push_back('.');
+                    detail::AppendUInt(temp, span[i]);
+                }
                 return temp;
             }
 
@@ -3356,9 +3987,12 @@ namespace fdf
                 const auto span = GetValue<int64_t>();
                 if(span.empty())
                     return {};
-                temp = std::format("{}", span[0]);
-                for(size_t i = 1; i < span.size(); i++)
-                    temp = std::format("{}x{}", temp, span[i]);
+                temp.clear();
+                for(size_t i = 0; i < span.size(); i++)
+                {
+                    if(i) temp.push_back('x');
+                    detail::AppendUInt(temp, span[i]);
+                }
                 return temp;
             }
 
@@ -3367,9 +4001,12 @@ namespace fdf
                 const auto span = GetValue<uint64_t>();
                 if(span.empty())
                     return {};
-                temp = std::format("{}", span[0]);
-                for(size_t i = 1; i < span.size(); i++)
-                    temp = std::format("{}x{}", temp, span[i]);
+                temp.clear();
+                for(size_t i = 0; i < span.size(); i++)
+                {
+                    if(i) temp.push_back('x');
+                    detail::AppendInt(temp, span[i]);
+                }
                 return temp;
             }
 
@@ -3384,9 +4021,12 @@ namespace fdf
                 const auto span = GetValue<float>();
                 if(span.empty())
                     return {};
-                temp = formatFn(span[0]);
-                for(size_t i = 1; i < span.size(); i++)
-                    temp = std::format("{}x{}", temp, formatFn(span[i]));
+                temp.clear();
+                for(size_t i = 0; i < span.size(); i++)
+                {
+                    if(i) temp.push_back('x');
+                    detail::AppendDouble(temp, span[i]);
+                }
                 return temp;
             }
 
@@ -4168,9 +4808,11 @@ namespace fdf::detail
                     bIsNegative = false;
                     bAfterDot = false;
 
-                    multiplier = 1.0;
-                    result = 0.0;
-                    currentDimension++;
+                const std::string_view seg = view.substr(segStart, i - segStart);
+                bool bOk = false;
+                const double result = detail::ParseDouble(seg.data(), seg.data() + seg.size(), &bOk);
+                if(!bOk)
+                    return false;
 
                     continue;
                 }

@@ -408,17 +408,66 @@ namespace fdf::detail
 
 
             {
-                Entry* entry = e->GetChild("NON_EXISTING");
-                std::print("{:<32}  ->  ", "NON_EXISTING");
-                if(!entry)
-                {
-                    std::puts("<NON_EXISTING>");
-                }
-                else
-                {
-                    bResult = false;
-                    std::puts("<ERROR>");
-                }
+                UniqueEntryPtr root = NewEntry();
+                if(!root)
+                    return false;
+                if(Entry* e = root->Emplace("v"))
+                    e->SetValue(x);
+                std::string out;
+                WriteBuffer<Style{ .bCommas = false }>(*root, out);
+
+                UniqueEntryPtr re = ParseBuffer(out);
+                Entry* e = re? re->GetChild("v") : nullptr;
+                if(!e || e->GetType() != Type::Float)
+                    return false;
+                auto span = e->GetValue<double>();
+                return span.size() == 1 && std::bit_cast<uint64_t>(span[0]) == std::bit_cast<uint64_t>(x);
+            };
+
+            // Compile-time proof that the shared write/parse path round-trips in a consteval context
+            // (Subnormal/edge constexpr cases are covered by the runtime fuzz below to keep the
+            // static_assert's constexpr step count modest for MSVC.)
+            static_assert(std::bit_cast<uint64_t>([]
+            {
+                std::string s;
+                fdf::detail::AppendDouble(s, 3.141592653589793);
+                bool bOk = false;
+                return fdf::detail::ParseDouble(s.data(), s.data() + s.size(), &bOk);
+            }()) == std::bit_cast<uint64_t>(3.141592653589793));
+
+            // Curated hard cases
+            const double edges[] =
+            {
+                0.0, -0.0, 1.0, -1.0, 0.1, 0.2, 0.3, 1.5, 100.0, 1e7, 1e16, 1e17, 1e21, 1e22, 1e23,
+                1e-4, 1e-5, 1e-7, 3.141592653589793, 2.2250738585072014e-308,
+                std::numeric_limits<double>::denorm_min(), std::numeric_limits<double>::max(),
+                9007199254740993.0, 123456789.123456789
+            };
+            for(double x : edges)
+                CHECK_MSG(roundTrip(x), std::format("rt {:.17g}", x));
+
+            // Scientific / multi-dimensional input forms parse to the expected value
+            auto parseFloat = [](std::string_view text, double& out) -> bool
+            {
+                UniqueEntryPtr root = ParseBuffer(std::format("v = {}\n", text));
+                Entry* e = root? root->GetChild("v") : nullptr;
+                if(!e || e->GetType() != Type::Float)
+                    return false;
+                auto s = e->GetValue<double>();
+                if(s.size() != 1)
+                    return false;
+                out = s[0];
+                return true;
+            };
+            struct { const char* t; double v; } forms[] =
+            {
+                {"1.5e10", 1.5e10}, {"1.5E10", 1.5e10}, {"2.5e-3", 2.5e-3},
+                {"1.0e+7", 1.0e7}, {"5.0e-324", 5e-324}
+            };
+            for(auto& form : forms)
+            {
+                double y = 0.0;
+                CHECK_MSG(parseFloat(form.t, y) && y == form.v, form.t);
             }
 
 
@@ -652,6 +701,12 @@ int main()
     bResult = bTempResult && bResult;
     std::print("RESULT: {}\n{}\n\n\n", bTempResult, separator);
 
+        // Shortest round-trip floats: write(x) then reparse must reproduce x bitwise, for every
+        // finite double. Covers the hand-rolled Dragon4 writer + AlgorithmM parser, both used at
+        // compile time and runtime. Also checks scientific/exponent input forms
+        static void FloatRoundTripTest()
+        {
+            auto roundTrip = [](double x) -> bool
     return bResult? 0 : -1;
 }
 
