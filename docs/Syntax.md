@@ -10,9 +10,9 @@ best.
 ## Entries
 
 ```fdf
-key     = value      // scalar
-mapName { ... }      // map
-arrName [ ... ]      // array
+key = value     // scalar
+mapName{ ... }  // map
+arrName[ ... ]  // array
 ```
 
 Identifiers are capped at 30 characters.

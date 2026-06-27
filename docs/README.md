@@ -1,7 +1,7 @@
 # fdf docs
 
-fdf is a text data format built to be read and edited by hand. These pages cover the
-format itself and the C++ API around it.
+fdf is a text data format made to be read and edited by hand. These pages cover the
+format and the C++ API around it.
 
 ### The format
 

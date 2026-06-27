@@ -5,7 +5,7 @@ optional when entries sit on their own lines, and required between entries on th
 line. A trailing comma is fine
 
 ```fdf
-single { resolution = 1920x1080, fullscreen = true, volume = 75 }
+single{ resolution = 1920x1080, fullscreen = true, volume = 75 }
 
 multi
 {
@@ -14,7 +14,7 @@ multi
     volume     = 75
 }
 
-tags [ "config", "map", "example" ]
+tags[ "config", "map", "example" ]
 ```
 
 They nest freely, including arrays of maps and arrays of arrays

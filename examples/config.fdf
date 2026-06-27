@@ -15,7 +15,7 @@ graphics
     gamma      = 1.0
 
     // tried in order until one works
-    backends [ "vulkan", "d3d12", "opengl" ]
+    backends[ "vulkan", "d3d12", "opengl" ]
 }
 
 audio

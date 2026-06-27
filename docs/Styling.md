@@ -1,6 +1,6 @@
 # Styling
 
-`WriteFile` / `WriteBuffer` take a compile-time `fdf::Style`. The defaults stay readable
+`WriteFile` / `WriteBuffer` take a compile-time `fdf::Style`. The defaults are readable
 and keep diffs small. Pass a designated initializer to change just what you want, like
 `WriteFile<fdf::Style{ .bCommas = false }>(root, "out.fdf")`
 

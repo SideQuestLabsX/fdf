@@ -1,12 +1,7 @@
 # fdf (Flexible Data Format)
 
 A text data format for the kind of thing you'd normally use JSON, YAML, TOML or INI for:
-config, asset metadata, and so on. It's built to be read and edited by hand, so it stays
-easy on the eyes.
-
-A single-header C++26 library that works at runtime and at compile time. Header-only by
-default, with an optional C++ modules build if you'd rather `import fdf;`. A binary form
-for embedding and network transfer is planned.
+config, asset metadata, and so on. Designed to be frequently read and modified by hand
 
 ```fdf
 name       = "MyGame"
@@ -30,11 +25,13 @@ items
 
 ## Features
 
-- Comments are first-class citizens (read and write them through the API)
-- A lot of built-in types
+- Header only (with C++ modules support)
+- Human first design
+- Comments preserved, read and write them through the API
+- A lot of built-in types (timestamp, hex, ...)
 - Round-trip guarantee
-- Extensive styling options for the output
-- Works at runtime and at compile time
+- Extensive styling options
+- fully constexpr
 
 ## Quick start
 
@@ -108,9 +105,9 @@ ctest --test-dir build --verbose
 Rough ideas, nothing set in stone
 
 - A compact binary representation for embedding and network transfer
-- Leaning on C++26 reflection to map fdf straight onto your own structs
-- Validating a file against an expected shape, ideally derived from those structs
-- Editor support, syntax highlighting first, maybe an LSP later reusing the parser and writer
+- C++26 reflection to serialize from/to C++ structs
+- Validating a file against an expected shape, ideally with C++26 reflection too
+- Syntax highlighting (maybe LSP reusing the parser and writer)
 
 ## License
 
