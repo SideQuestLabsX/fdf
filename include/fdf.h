@@ -112,6 +112,25 @@ FDF_EXPORT namespace fdf
         Fatal,
     };
 
+        InvalidIdentifier,
+        UnexpectedEndOfFile,
+        UnterminatedString,
+        UnterminatedComment,
+        InvalidComment,
+        InvalidNumber,
+        InvalidTimestamp,
+        InvalidToken,        // generic lexer failure with no more specific reason
+    };
+
+    // Passed to a DIAGNOSTIC_CALLBACK for every issue found while parsing
+    struct Diagnostic
+    {
+        DiagnosticSeverity severity = DiagnosticSeverity::None;
+        DiagnosticType     type     = DiagnosticType::UnexpectedToken;
+        std::string_view   message;     // offending text, or a short description
+        uint32_t           line   = 0;  // 1-based line number
+        uint32_t           column = 0;  // column within the line
+        uint32_t           offset = 0;  // byte offset into the source buffer
     enum class DiagnosticType : uint8_t
     {
         AlreadyHasComment,
@@ -181,6 +200,330 @@ FDF_EXPORT namespace fdf
     struct NullType    { consteval NullType()    noexcept = default; };
     struct NilType     { consteval NilType()     noexcept = default; };
     struct ArrayType   { consteval ArrayType()   noexcept = default; };
+    // Decoded view of an ISO-8601 timestamp. Transient: a Timestamp entry stores the raw text
+    // (lossless round-trip), and GetValue<Timestamp>() parses that text into this struct on demand
+    // Ordinal (YYYY-DDD) and ISO week (YYYY-Www-D) dates are normalized to calendar year/month/day,
+    // with dateKind remembering the original spelling. Sub-second precision is capped at nanoseconds
+    struct Timestamp
+    {
+        enum class TzKind   : uint8_t { None, Utc, Offset };
+        enum class DateKind : uint8_t { Calendar, Ordinal, Week };
+
+        uint16_t year        = 0;   // 0-9999
+        uint8_t  month       = 0;   // 1-12
+        uint8_t  day         = 0;   // 1-31
+        uint8_t  hour        = 0;   // 0-23
+        uint8_t  minute      = 0;   // 0-59
+        uint8_t  second      = 0;   // 0-60
+        uint8_t  fracDigits  = 0;   // sub-second digits as written, 0-9
+        uint32_t nanosecond  = 0;   // 0-999'999'999
+        int16_t  tzOffsetMin = 0;   // signed minutes from UTC (Offset kind only)
+        TzKind   tzKind      = TzKind::None;
+        DateKind dateKind    = DateKind::Calendar;
+        bool     bHasDate    = false;
+        bool     bHasTime    = false;
+        bool     bValid      = false;
+
+        [[nodiscard]] constexpr bool IsValid() const noexcept  { return bValid; }
+
+        // --- Extract ---------------------------------------------------------------------------
+        // Seconds since the Unix epoch (UTC). A None/Utc zone is treated as UTC; an Offset is
+        // subtracted to normalize to UTC. With no date the result is just the time-of-day seconds
+        [[nodiscard]] constexpr int64_t ToUnixSeconds() const noexcept
+        {
+            const int64_t days = bHasDate? DaysFromCivil(year, month, day) : 0;
+            int64_t secs = days * 86400 + int64_t(hour) * 3600 + int64_t(minute) * 60 + second;
+            if(tzKind == TzKind::Offset)
+                secs -= int64_t(tzOffsetMin) * 60;
+            return secs;
+        }
+        [[nodiscard]] constexpr int64_t ToUnixMillis() const noexcept  { return ToUnixSeconds() * 1'000LL + nanosecond / 1'000'000; }
+        [[nodiscard]] constexpr int64_t ToUnixNanos()  const noexcept  { return ToUnixSeconds() * 1'000'000'000LL + nanosecond; }
+
+        // --- Inject ----------------------------------------------------------------------------
+        [[nodiscard]] static constexpr Timestamp Date(uint16_t y, uint8_t mo, uint8_t d) noexcept
+        {
+            Timestamp t;
+            t.year = y; t.month = mo; t.day = d;
+            t.bHasDate = t.bValid = true;
+            return t;
+        }
+        [[nodiscard]] static constexpr Timestamp Time(uint8_t h, uint8_t mi, uint8_t s) noexcept
+        {
+            Timestamp t;
+            t.hour = h; t.minute = mi; t.second = s;
+            t.bHasTime = t.bValid = true;
+            return t;
+        }
+        [[nodiscard]] static constexpr Timestamp DateTime(uint16_t y, uint8_t mo, uint8_t d, uint8_t h, uint8_t mi, uint8_t s) noexcept
+        {
+            Timestamp t = Date(y, mo, d);
+            t.hour = h; t.minute = mi; t.second = s;
+            t.bHasTime = true;
+            return t;
+        }
+        [[nodiscard]] static constexpr Timestamp FromUnixSeconds(int64_t s) noexcept
+        {
+            const int64_t days = FloorDiv(s, 86400);
+            const int64_t rem  = s - days * 86400;
+            Timestamp t;
+            CivilFromDays(days, t.year, t.month, t.day);
+            t.hour   = static_cast<uint8_t>(rem / 3600);
+            t.minute = static_cast<uint8_t>(rem % 3600 / 60);
+            t.second = static_cast<uint8_t>(rem % 60);
+            t.bHasDate = t.bHasTime = t.bValid = true;
+            t.tzKind = TzKind::Utc;
+            return t;
+        }
+        [[nodiscard]] static constexpr Timestamp FromUnixNanos(int64_t ns) noexcept
+        {
+            const int64_t s = FloorDiv(ns, 1'000'000'000);
+            Timestamp t = FromUnixSeconds(s);
+            t.nanosecond = static_cast<uint32_t>(ns - s * 1'000'000'000);
+            t.fracDigits = 9;
+            return t;
+        }
+
+        // --- Parse / serialize -----------------------------------------------------------------
+        [[nodiscard]] static constexpr Timestamp FromText(std::string_view ts) noexcept;
+        constexpr void AppendTo(std::string& out) const noexcept;
+
+    private:
+        [[nodiscard]] static constexpr bool IsLeap(int y) noexcept  { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
+        [[nodiscard]] static constexpr int64_t FloorDiv(int64_t a, int64_t b) noexcept  { return a >= 0? a / b : -((-a + b - 1) / b); }
+
+        // Howard Hinnant's civil <-> days-since-1970 algorithms (constexpr, no library calls)
+        [[nodiscard]] static constexpr int64_t DaysFromCivil(int32_t y, uint32_t m, uint32_t d) noexcept
+        {
+            y -= m <= 2;
+            const int32_t  era = (y >= 0? y : y - 399) / 400;
+            const uint32_t yoe = static_cast<uint32_t>(y - era * 400);
+            const uint32_t doy = (153 * (m > 2? m - 3 : m + 9) + 2) / 5 + d - 1;
+            const uint32_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+            return int64_t(era) * 146097 + int64_t(doe) - 719468;
+        }
+        static constexpr void CivilFromDays(int64_t z, uint16_t& y, uint8_t& m, uint8_t& d) noexcept
+        {
+            z += 719468;
+            const int64_t  era = (z >= 0? z : z - 146096) / 146097;
+            const uint64_t doe = static_cast<uint64_t>(z - era * 146097);
+            const uint64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+            const uint64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            const uint64_t mp  = (5 * doy + 2) / 153;
+            const uint64_t dd  = doy - (153 * mp + 2) / 5 + 1;
+            const uint64_t mm  = mp < 10? mp + 3 : mp - 9;
+            y = static_cast<uint16_t>(int64_t(yoe) + era * 400 + (mm <= 2));
+            m = static_cast<uint8_t>(mm);
+            d = static_cast<uint8_t>(dd);
+        }
+        static constexpr void AppendPadded(std::string& out, uint32_t v, uint8_t width) noexcept
+        {
+            char buf[10];
+            uint8_t n = 0;
+            do { buf[n++] = static_cast<char>('0' + v % 10); v /= 10; } while(v > 0);
+            for(uint8_t p = n; p < width; p++)
+                out.push_back('0');
+            while(n > 0)
+                out.push_back(buf[--n]);
+        }
+    };
+
+
+    // Parse + validate in one pass (the single source of truth; IsValidTimestamp wraps this)
+    // Returns a Timestamp with bValid == false on any structural or range error
+    constexpr Timestamp Timestamp::FromText(std::string_view ts) noexcept
+    {
+        Timestamp t;
+        if(ts.empty())
+            return t;
+
+        auto digit    = [](char c) noexcept { return c >= '0' && c <= '9'; };
+        auto digitsAt = [&](size_t p, size_t n) noexcept -> bool
+        {
+            if(p + n > ts.size()) return false;
+            for(size_t i = p; i < p + n; i++)
+                if(!digit(ts[i])) return false;
+            return true;
+        };
+        auto num = [&](size_t p, size_t n) noexcept -> int
+        {
+            int v = 0;
+            for(size_t i = p; i < p + n; i++)
+                v = v * 10 + (ts[i] - '0');
+            return v;
+        };
+
+        size_t pos = 0;
+
+        if(ts.size() >= 5 && digitsAt(0, 4) && ts[4] == '-')
+        {
+            t.year = static_cast<uint16_t>(num(0, 4));
+            t.bHasDate = true;
+            pos = 5;
+
+            if(pos < ts.size() && ts[pos] == 'W')
+            {
+                if(!(digitsAt(pos + 1, 2) && pos + 3 < ts.size() && ts[pos + 3] == '-' &&
+                     digitsAt(pos + 4, 1) && pos + 5 == ts.size()))
+                    return t;
+                const int week    = num(pos + 1, 2);
+                const int weekday  = num(pos + 4, 1);
+                if(week < 1 || week > 53 || weekday < 1 || weekday > 7)
+                    return t;
+
+                // ISO week date -> the Monday of week 1 is the Monday on/before Jan 4
+                const int64_t jan4 = DaysFromCivil(t.year, 1, 4);
+                const int     jan4Mon0 = static_cast<int>(((jan4 % 7) + 7 + 3) % 7);
+                CivilFromDays(jan4 - jan4Mon0 + int64_t(week - 1) * 7 + (weekday - 1), t.year, t.month, t.day);
+                t.dateKind = DateKind::Week;
+                t.bValid = true;
+                return t;
+            }
+
+            if(!digitsAt(pos, 2))
+                return t;
+
+            if(pos + 2 < ts.size() && ts[pos + 2] == '-')
+            {
+                if(!digitsAt(pos + 3, 2))
+                    return t;
+                const int month = num(pos, 2);
+                const int day   = num(pos + 3, 2);
+                constexpr int DAYS_IN_MONTH[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+                if(month < 1 || month > 12)
+                    return t;
+                const int maxDay = (month == 2 && IsLeap(t.year))? 29 : DAYS_IN_MONTH[month - 1];
+                if(day < 1 || day > maxDay)
+                    return t;
+                t.month = static_cast<uint8_t>(month);
+                t.day   = static_cast<uint8_t>(day);
+                pos += 5;
+            }
+            else if(pos + 2 < ts.size() && digit(ts[pos + 2]))
+            {
+                const int ordinal = num(pos, 3);
+                if(ordinal < 1 || ordinal > (IsLeap(t.year)? 366 : 365))
+                    return t;
+                CivilFromDays(DaysFromCivil(t.year, 1, 1) + (ordinal - 1), t.year, t.month, t.day);
+                t.dateKind = DateKind::Ordinal;
+                pos += 3;
+            }
+            else
+                return t;
+
+            if(pos == ts.size()) { t.bValid = true; return t; }
+            if(ts[pos] != 'T') return t;
+            pos++;
+        }
+        else if(!digitsAt(0, 2))
+            return t;
+
+        // Time part: HH:MM:SS
+        if(!digitsAt(pos, 2) || pos + 2 >= ts.size() || ts[pos + 2] != ':' ||
+           !digitsAt(pos + 3, 2) || pos + 5 >= ts.size() || ts[pos + 5] != ':' ||
+           !digitsAt(pos + 6, 2))
+            return t;
+        if(num(pos, 2) > 23 || num(pos + 3, 2) > 59 || num(pos + 6, 2) > 59)
+            return t;
+        t.hour    = static_cast<uint8_t>(num(pos, 2));
+        t.minute  = static_cast<uint8_t>(num(pos + 3, 2));
+        t.second  = static_cast<uint8_t>(num(pos + 6, 2));
+        t.bHasTime = true;
+        pos += 8;
+
+        if(pos == ts.size()) { t.bValid = true; return t; }
+
+        // Optional fractional seconds (kept to nanosecond precision; extra digits are validated but dropped)
+        if(ts[pos] == '.')
+        {
+            pos++;
+            if(pos >= ts.size() || !digit(ts[pos]))
+                return t;
+            uint64_t frac = 0;
+            while(pos < ts.size() && digit(ts[pos]))
+            {
+                if(t.fracDigits < 9)
+                {
+                    frac = frac * 10 + static_cast<uint64_t>(ts[pos] - '0');
+                    t.fracDigits++;
+                }
+                pos++;
+            }
+            for(uint8_t i = t.fracDigits; i < 9; i++)
+                frac *= 10;
+            t.nanosecond = static_cast<uint32_t>(frac);
+            if(pos == ts.size()) { t.bValid = true; return t; }
+        }
+
+        // Timezone
+        if(ts[pos] == 'Z')
+        {
+            if(pos + 1 != ts.size()) return t;
+            t.tzKind = TzKind::Utc;
+            t.bValid = true;
+            return t;
+        }
+        if(ts[pos] == '+' || ts[pos] == '-')
+        {
+            const bool bNeg = ts[pos] == '-';
+            pos++;
+            if(!(digitsAt(pos, 2) && pos + 2 < ts.size() && ts[pos + 2] == ':' &&
+                 digitsAt(pos + 3, 2) && pos + 5 == ts.size()))
+                return t;
+            const int offHour = num(pos, 2);
+            const int offMin  = num(pos + 3, 2);
+            if(offHour > 23 || offMin > 59)
+                return t;
+            t.tzKind = TzKind::Offset;
+            t.tzOffsetMin = static_cast<int16_t>((bNeg? -1 : 1) * (offHour * 60 + offMin));
+            t.bValid = true;
+            return t;
+        }
+
+        return t;
+    }
+
+    // Serialize to canonical ISO-8601 calendar text (used when injecting a Timestamp value)
+    // Ordinal/week origins are emitted as the equivalent calendar date
+    constexpr void Timestamp::AppendTo(std::string& out) const noexcept
+    {
+        if(bHasDate)
+        {
+            AppendPadded(out, year, 4);
+            out.push_back('-');
+            AppendPadded(out, month, 2);
+            out.push_back('-');
+            AppendPadded(out, day, 2);
+            if(bHasTime)
+                out.push_back('T');
+        }
+        if(bHasTime)
+        {
+            AppendPadded(out, hour, 2);
+            out.push_back(':');
+            AppendPadded(out, minute, 2);
+            out.push_back(':');
+            AppendPadded(out, second, 2);
+            if(fracDigits > 0)
+            {
+                uint32_t scale = 1;
+                for(uint8_t i = fracDigits; i < 9; i++)
+                    scale *= 10;
+                out.push_back('.');
+                AppendPadded(out, nanosecond / scale, fracDigits);
+            }
+        }
+        if(tzKind == TzKind::Utc)
+            out.push_back('Z');
+        else if(tzKind == TzKind::Offset)
+        {
+            out.push_back(tzOffsetMin < 0? '-' : '+');
+            const uint32_t abs = static_cast<uint32_t>(tzOffsetMin < 0? -tzOffsetMin : tzOffsetMin);
+            AppendPadded(out, abs / 60, 2);
+            out.push_back(':');
+            AppendPadded(out, abs % 60, 2);
+        }
+    }
     struct MapType     { consteval MapType()     noexcept = default; };
     struct VersionType { consteval VersionType() noexcept = default; };
 
@@ -230,13 +573,26 @@ FDF_EXPORT namespace fdf
         template<typename T>
         [[nodiscard]] constexpr       T* GetDataAs()       noexcept  { return static_cast<      T*>(data); }
         template<typename T>
-        [[nodiscard]] constexpr const T* GetDataAs() const noexcept  { return static_cast<const T*>(data); }
-        
-        
-        [[nodiscard]] constexpr       CommentControlBlock* GetCommentControlBlock()       noexcept  { return static_cast<      CommentControlBlock*>(comment); }
-        [[nodiscard]] constexpr const CommentControlBlock* GetCommentControlBlock() const noexcept  { return static_cast<const CommentControlBlock*>(comment); }
-        [[nodiscard]] constexpr       char*                GetCommentData()               noexcept  { return static_cast<      char*>(comment) + sizeof(CommentControlBlock); }
-        [[nodiscard]] constexpr const char*                GetCommentData()         const noexcept  { return static_cast<const char*>(comment) + sizeof(CommentControlBlock); }
+        [[nodiscard]] constexpr const T* GetDataAs() const noexcept
+        {
+            if constexpr(std::is_same_v<T, bool>) return data.boolArray;
+            else                                  return data.str;
+        }
+
+        // Null-check the data union through the member matching `type` (the active one at constexpr)
+        [[nodiscard]] constexpr bool IsDataNull() const noexcept
+        {
+            switch(type)
+            {
+                case Type::Bool:                                          return !data.boolArray;
+                case Type::Int:                                           return !data.vInt;
+                case Type::UInt:   case Type::Version:                    return !data.vUInt;
+                case Type::Float:                                         return !data.vFloat;
+                case Type::String: case Type::Hex: case Type::Timestamp:  return !data.str;
+                case Type::Array:  case Type::Map:                        return !data.vEntry;
+                default:                                                  return true;   // Null / Nil hold no data
+            }
+        }
 
         [[nodiscard]] constexpr       std::string* GetCommentString()       noexcept  { return static_cast<      std::string*>(comment); }
         [[nodiscard]] constexpr const std::string* GetCommentString() const noexcept  { return static_cast<const std::string*>(comment); }
@@ -402,7 +758,8 @@ FDF_EXPORT namespace fdf
         constexpr void SetValue(std::string_view value) noexcept;
         constexpr void SetValue(char value) noexcept;
         constexpr void SetValue(const char* value) noexcept;
-        constexpr void SetValue(auto* value) = delete; // We don't allow pointer types in here (except char*)
+        constexpr void SetValue(const Timestamp& value) noexcept;
+        constexpr void SetValue(auto* value) = delete; // no pointer types (except char*)
         
         constexpr void SetValue(std::span<bool> value) noexcept;
         template<std::signed_integral T>
@@ -493,9 +850,7 @@ namespace fdf::detail
         HexLiteral,
         VersionLiteral,
         TimestampLiteral,
-
-        EvaluateLiteral,
-        ValueLiteral_End = EvaluateLiteral,
+        ValueLiteral_End = TimestampLiteral,
     };
 
     struct Token
@@ -1288,6 +1643,14 @@ namespace fdf::detail
 
 
 
+    // Validates ISO-8601 timestamps (structure AND value ranges). Defers to Timestamp::FromText, the
+    // single parse/validate implementation. Accepts: YYYY-MM-DD, YYYY-DDD (ordinal), YYYY-Www-D
+    // (week), an optional Thh:mm:ss after a date, a bare hh:mm:ss, fractional seconds, Z / +-hh:mm
+    [[nodiscard]] constexpr bool IsValidTimestamp(std::string_view ts) noexcept
+    {
+        return Timestamp::FromText(ts).IsValid();
+    }
+
 
             /* Possible datetime formats (ISO 8601)
             *  2024-12-24T15:30:00       -> Date + Time without timezone info (Usually interpreted as local time)
@@ -1341,7 +1704,7 @@ namespace fdf::detail
                     return token;
                 }
 
-                return TokenType::Invalid;  // Invalid character after timestamp
+                return MakeInvalid(DiagnosticType::InvalidTimestamp);  // Invalid character after timestamp
             }
 
             if(content[firstNonDigit] == ':')  // time
@@ -1366,7 +1729,7 @@ namespace fdf::detail
                     return token;
                 }
 
-                return TokenType::Invalid;  // Invalid character after timestamp
+                return MakeInvalid(DiagnosticType::InvalidTimestamp);  // Invalid character after timestamp
             }
 
             return TokenType::Invalid;  // Something we didn't process yet?
@@ -3102,9 +3465,15 @@ namespace fdf
     }
     
     
-    
-    
-    
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<Timestamp>() const noexcept
+    {
+        return type == Type::Timestamp? Timestamp::FromText(GetValue<std::string_view>()) : Timestamp{};
+    }
+
+
+
     template<auto DIAGNOSTIC_CALLBACK>
     UniqueEntryPtr ParseFile(const std::filesystem::path& filepath) noexcept
     {
@@ -3309,6 +3678,12 @@ namespace fdf::detail
                             root->GetCommentString()->push_back(c);
                             bAfterNewLine = false;
                         }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<Timestamp>() noexcept
+    {
+        return type == Type::Timestamp? Timestamp::FromText(GetValue<std::string_view>()) : Timestamp{};
+    }
+
                         else
                         {
                             root->GetCommentString()->push_back(c);
@@ -3546,7 +3921,10 @@ namespace fdf::detail
 
 
 
-        if(currentToken.type == TokenType::EvaluateLiteral)
+        // Dimension count (Int/Float/Version, always small) or byte length (String/Hex/Timestamp)
+        // Length comes from the view, not extra8 (uint8) which truncates strings over 255 bytes,
+        // common with UTF-8 content, and would under-allocate then overflow on write
+        switch(currentToken.type)
         {
             entry.size = static_cast<uint32_t>(EVALUATE_LITERAL_TEXT.size());
             entry.type = Type::String;
@@ -4067,7 +4445,15 @@ namespace fdf::detail
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseMap        (Tokenizer& tokenizer, Entry& map   FDF_COMMENT_SWITCH(, Token comment)) noexcept
     {
         assert(tokenizer.Current().type == TokenType::CurlyBraceOpen && "Sanity check!");
-        
+
+        // Validate the timestamp before allocating below. Returning after the allocation would leave
+        // a String-shaped buffer attached to a still-default (Map) entry, which ReleaseData would
+        // later misread as a child array, corrupting recovery cleanup
+        if(currentToken.type == TokenType::TimestampLiteral && !IsValidTimestamp(view))
+        {
+            Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidTimestamp, tokenizer, currentToken);
+            return false;
+        }
         map.type = Type::Map;
 
         Token currentToken = tokenizer.Advance();
