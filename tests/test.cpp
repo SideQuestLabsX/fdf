@@ -1,15 +1,30 @@
 
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <filesystem>
+#include <format>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <print>
+#include <random>
+#include <ranges>
+#include <span>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
 #if FDF_USE_CPP_MODULES
-    import std;
-    import std.compat;
     import fdf;
 #else
     #include "fdf.h"
-    #include <bit>
-    #include <cmath>
-    #include <iostream>
-    #include <print>
-    #include <random>
 #endif
 
 #ifndef FDF_OUTPUT_DIRECTORY
@@ -391,6 +406,99 @@ namespace fdf::detail
 
 
 
+
+        // SetValue/GetValue round-trips for every scalar and span overload, plus type tagging
+        static void ValueTest()
+        {
+            UniqueEntryPtr root = NewEntry();
+            if(!CHECK(static_cast<bool>(root)))
+                return;
+
+            if(Entry* e = root->Emplace("i"); CHECK(e))
+            {
+                e->SetValue(-7);
+                auto v = e->GetValue<int64_t>();
+                CHECK(e->GetType() == Type::Int && v.size() == 1 && v[0] == -7);
+            }
+
+            if(Entry* e = root->Emplace("u"); CHECK(e))
+            {
+                e->SetValue(42u);
+                auto v = e->GetValue<uint64_t>();
+                CHECK(e->GetType() == Type::UInt && v.size() == 1 && v[0] == 42u);
+            }
+
+            if(Entry* e = root->Emplace("f"); CHECK(e))
+            {
+                e->SetValue(2.5);
+                auto v = e->GetValue<double>();
+                CHECK(e->GetType() == Type::Float && v.size() == 1 && v[0] == 2.5);
+            }
+
+            if(Entry* e = root->Emplace("b"); CHECK(e))
+            {
+                e->SetValue(true);
+                auto v = e->GetValue<bool>();
+                CHECK(e->GetType() == Type::Bool && v.size() == 1 && v[0] == true);
+            }
+
+            if(Entry* e = root->Emplace("s"); CHECK(e))
+            {
+                e->SetValue("hello");
+                CHECK(e->GetType() == Type::String && e->GetValue<std::string_view>() == "hello");
+            }
+
+            // Span overloads: set from an array reference, read every element back
+            if(Entry* e = root->Emplace("ints"); CHECK(e))
+            {
+                int64_t ints[3] = { 10, -20, 30 };
+                e->SetValue(std::span(ints, 3));
+                auto v = e->GetValue<int64_t>();
+                CHECK(e->GetType() == Type::Int && v.size() == 3 && v[0] == 10 && v[1] == -20 && v[2] == 30);
+            }
+
+            if(Entry* e = root->Emplace("uints"); CHECK(e))
+            {
+                uint64_t uints[2] = { 1u, 2u };
+                e->SetValue(std::span(uints, 2));
+                auto v = e->GetValue<uint64_t>();
+                CHECK(e->GetType() == Type::UInt && v.size() == 2 && v[0] == 1u && v[1] == 2u);
+            }
+
+            if(Entry* e = root->Emplace("dbls"); CHECK(e))
+            {
+                double dbls[3] = { 1.0, 2.5, 3.0 };
+                e->SetValue(std::span(dbls, 3));
+                auto v = e->GetValue<double>();
+                CHECK(e->GetType() == Type::Float && v.size() == 3 && v[0] == 1.0 && v[1] == 2.5 && v[2] == 3.0);
+            }
+
+            if(Entry* e = root->Emplace("bools"); CHECK(e))
+            {
+                bool bools[3] = { true, false, true };
+                e->SetValue(std::span(bools, 3));
+                auto v = e->GetValue<bool>();
+                CHECK(e->GetType() == Type::Bool && v.size() == 3 && v[0] == true && v[1] == false && v[2] == true);
+            }
+
+            // Set from a Timestamp reference, decode it back
+            if(Entry* e = root->Emplace("t"); CHECK(e))
+            {
+                const Timestamp ts = Timestamp::DateTime(2024, 12, 24, 15, 30, 0);
+                e->SetValue(ts);
+                CHECK(e->GetType() == Type::Timestamp);
+                Timestamp got = e->GetValue<Timestamp>();
+                CHECK(got.year == 2024 && got.month == 12 && got.day == 24 && got.hour == 15 && got.minute == 30);
+            }
+
+            // Re-set overwrites type and value cleanly
+            if(Entry* e = root->Emplace("re"); CHECK(e))
+            {
+                e->SetValue(123);
+                e->SetValue("now a string");
+                CHECK(e->GetType() == Type::String && e->GetValue<std::string_view>() == "now a string");
+            }
+        }
 
         // Exercises container growth, RemoveChild/OrphanChild index shifting, GetDirectChild(index)
         static void MutateTest()
@@ -1344,6 +1452,62 @@ consteval bool WriteCompositeProbe()
 }
 static_assert(WriteCompositeProbe(), "consteval write multidim int/float");
 
+// SetValue/GetValue round-trips exercised in a constant-evaluated context. Mirrors
+// ValueTest; covers the consteval storage path the runtime tests cannot reach
+consteval bool ValueRoundTripProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::NewEntry();
+
+    fdf::Entry* i = root->Emplace("i");
+    i->SetValue(static_cast<int64_t>(-7));
+    if(i->GetType() != fdf::Type::Int || i->GetValue<int64_t>()[0] != -7)
+        return false;
+
+    fdf::Entry* u = root->Emplace("u");
+    u->SetValue(static_cast<uint64_t>(42));
+    if(u->GetType() != fdf::Type::UInt || u->GetValue<uint64_t>()[0] != 42u)
+        return false;
+
+    fdf::Entry* f = root->Emplace("f");
+    f->SetValue(2.5);
+    if(f->GetType() != fdf::Type::Float || f->GetValue<double>()[0] != 2.5)
+        return false;
+
+    fdf::Entry* b = root->Emplace("b");
+    b->SetValue(true);
+    if(b->GetType() != fdf::Type::Bool || b->GetValue<bool>()[0] != true)
+        return false;
+
+    fdf::Entry* s = root->Emplace("s");
+    s->SetValue("hi");
+    if(s->GetType() != fdf::Type::String || s->GetValue<std::string_view>() != "hi")
+        return false;
+
+    int64_t ints[3] = { 10, -20, 30 };
+    fdf::Entry* iv = root->Emplace("iv");
+    iv->SetValue(std::span(ints, 3));
+    auto ri = iv->GetValue<int64_t>();
+    if(ri.size() != 3 || ri[0] != 10 || ri[1] != -20 || ri[2] != 30)
+        return false;
+
+    bool bools[3] = { true, false, true };
+    fdf::Entry* bv = root->Emplace("bv");
+    bv->SetValue(std::span(bools, 3));
+    auto rb = bv->GetValue<bool>();
+    if(rb.size() != 3 || rb[0] != true || rb[1] != false || rb[2] != true)
+        return false;
+
+    double dbls[2] = { 1.0, 2.5 };
+    fdf::Entry* dv = root->Emplace("dv");
+    dv->SetValue(std::span(dbls, 2));
+    auto rd = dv->GetValue<double>();
+    if(rd.size() != 2 || rd[0] != 1.0 || rd[1] != 2.5)
+        return false;
+
+    return true;
+}
+static_assert(ValueRoundTripProbe(), "consteval SetValue/GetValue round-trips");
+
 // Containers (array + nested map), single-line collapse exercised at compile time
 consteval bool WriteContainerProbe()
 {
@@ -1480,6 +1644,9 @@ int main()
 
     std::print("{0}\n\nWrite test -- file: {1}\n{0}", separator, FDF_OUTPUT_DIRECTORY "/WriteTest.fdf");
     Test::WriteTest();
+
+    std::print("{0}\n\nValue test\n{0}", separator);
+    Test::ValueTest();
 
     std::print("{0}\n\nMutate test\n{0}", separator);
     Test::MutateTest();

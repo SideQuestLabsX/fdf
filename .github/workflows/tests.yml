@@ -29,14 +29,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install CMake 4.3.3 + Ninja
+      - name: Install CMake + Ninja
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ninja-build curl ca-certificates
-          curl -fsSL https://github.com/Kitware/CMake/releases/download/v4.3.3/cmake-4.3.3-linux-x86_64.tar.gz \
-            | tar -xz -C /opt
-          echo "/opt/cmake-4.3.3-linux-x86_64/bin" >> "$GITHUB_PATH"
-          /opt/cmake-4.3.3-linux-x86_64/bin/cmake --version
+          apt-get install -y --no-install-recommends cmake ninja-build
+          cmake --version
           gcc --version
 
       - name: Configure
@@ -69,17 +66,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install CMake 4.3.3 + Ninja
+      - name: Install latest CMake + Ninja
         uses: lukka/get-cmake@latest
-        with:
-          cmakeVersion: 4.3.3
 
-      - name: Install Clang 22 + libc++
+      - name: Install Clang 22
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 22
-          sudo apt-get install -y clang-tools-22 libc++-22-dev libc++abi-22-dev
+          sudo apt-get install -y clang-tools-22
           clang++-22 --version
 
       - name: Configure
@@ -89,7 +84,6 @@ jobs:
         run: >
           cmake -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_CXX_FLAGS=-stdlib=libc++
           -DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS=$(command -v clang-scan-deps-22)
           -DFDF_USE_CPP_MODULES=${{ matrix.modules }}
           -DFDF_NO_COMMENTS=${{ matrix.no_comments }}
@@ -114,10 +108,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install CMake 4.3.3 + Ninja
+      - name: Install latest CMake + Ninja
         uses: lukka/get-cmake@latest
-        with:
-          cmakeVersion: 4.3.3
 
       - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@v1

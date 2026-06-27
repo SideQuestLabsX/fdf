@@ -1,9 +1,22 @@
 
 module;
+#include <algorithm>
+#include <bit>
 #include <cassert>
+#include <cctype>
+#include <charconv>
+#include <cstdint>
+#include <filesystem>
+#include <format>
+#include <fstream>
+#include <limits>
+#include <ranges>
+#include <span>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
 export module fdf;
-import std;
-import std.compat;
 
 extern "C++"
 {

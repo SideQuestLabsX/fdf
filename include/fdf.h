@@ -4038,7 +4038,7 @@ namespace fdf
             data.boolArray = new (std::nothrow) bool[size];
             assert(data.boolArray && "Allocation shouldn't fail");
             for(size_t i = 0; i < size; i++)
-                *(GetDataAs<bool>() + 1) = value[i];
+                *(GetDataAs<bool>() + i) = value[i];
         }
         else
         {
