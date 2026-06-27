@@ -13,7 +13,7 @@ window
 {
     title = "Main"
     pos   = 100x100
-    flags [ "resizable", "vsync" ]
+    flags[ "resizable", "vsync" ]
 }
 
 items
