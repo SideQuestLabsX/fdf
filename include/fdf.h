@@ -3,15 +3,17 @@
 
 #if !FDF_USE_CPP_MODULES
     #include <algorithm>
+    #include <bit>
     #include <cassert>
     #include <cctype>
+    #include <charconv>
     #include <cstdint>
     #include <filesystem>
+    #include <limits>
     #include <format>
     #include <fstream>
     #include <ranges>
     #include <span>
-    #include <stack>
     #include <string>
     #include <type_traits>
     #include <utility>
@@ -62,30 +64,24 @@ FDF_EXPORT namespace fdf
         // Spacing
         bool bUseSpacesOverTabs = true;
         uint8_t tabSize = 4;
-        bool bSpaceAfterComma = true; // Think about removing this
-        bool bSpaceWithinParentheses = true; // And this
-        bool bSpaceBeforeAndAfterEqualSign = false; // Also this, so we make sure maximum readability
+        bool bSpaceBeforeAndAfterEqualSign = false;  // 'k = v' vs 'k=v'
         bool bParenthesesOnNewLine = true;
-        bool bEmptyLineAtEOF = true;
 
         // Comment
         bool bFileComment = true;
-        bool bEntryComment = true;       // TODO: implement
-        bool bAlignCloseComments = true; // TODO: implement
+        bool bEntryComment = true;       // emit per-entry comments (inline when short, leading when long)
+        bool bAlignCloseComments = true; // pad consecutive inline comments to a shared column
 
         // Single-line limits
         uint8_t singleLineCommentLimit  = 80U;  // Characters
         uint8_t singleLineContainerLimit = 80U;  // Characters
 
         // Containers
-        bool bGlobalCommas = true;
-        bool bVariableCommas = true;
-        bool bContainersCommas = false;
-        bool bTrailingCommas = true;
-        bool bUseEqualSignForSingleLineArraysAndMaps = false;
+        bool bCommas = true;          // trailing comma at the end of each multi-line entry (single-line always uses commas)
+        bool bTopLevelCommas = false; // also comma-terminate top-level entries (off = newline-separated)
 
         // General
-        bool bGroupSimilarTypes = true;
+        bool bGroupSimilarTypes = false;  // off = preserve source order (stable diffs); on = group by type
         bool bUppercaseHex = true;
         bool bUseNilInsteadOfNull = false;
         bool bAlwaysUseDoubleQuoteForStrings = false;
@@ -112,6 +108,10 @@ FDF_EXPORT namespace fdf
         Fatal,
     };
 
+    enum class DiagnosticType : uint8_t
+    {
+        AlreadyHasComment,
+        UnexpectedToken,
         InvalidIdentifier,
         UnexpectedEndOfFile,
         UnterminatedString,
@@ -131,10 +131,6 @@ FDF_EXPORT namespace fdf
         uint32_t           line   = 0;  // 1-based line number
         uint32_t           column = 0;  // column within the line
         uint32_t           offset = 0;  // byte offset into the source buffer
-    enum class DiagnosticType : uint8_t
-    {
-        AlreadyHasComment,
-        UnexpectedToken,
     };
 
     class Entry;
@@ -155,7 +151,7 @@ namespace fdf::detail
     concept IsValidIDType = std::integral<std::remove_cvref_t<T>> || std::convertible_to<std::remove_cvref_t<T>, std::string_view>;
     
     template<typename Callable>
-    constexpr bool IsValidDiagnosticCallback = std::is_invocable_v<Callable, DiagnosticSeverity, DiagnosticType, std::string_view>;
+    constexpr bool IsValidDiagnosticCallback = std::is_invocable_v<Callable, const Diagnostic&>;
 
     constexpr size_t MAX_IDENTIFIER_LENGTH = FDF_NO_COMMENTS && FDF_EXTENDED_NO_COMMENT_IDENTIFIERS? 38 : 30;
     
@@ -200,6 +196,10 @@ FDF_EXPORT namespace fdf
     struct NullType    { consteval NullType()    noexcept = default; };
     struct NilType     { consteval NilType()     noexcept = default; };
     struct ArrayType   { consteval ArrayType()   noexcept = default; };
+    struct MapType     { consteval MapType()     noexcept = default; };
+    struct VersionType { consteval VersionType() noexcept = default; };
+
+
     // Decoded view of an ISO-8601 timestamp. Transient: a Timestamp entry stores the raw text
     // (lossless round-trip), and GetValue<Timestamp>() parses that text into this struct on demand
     // Ordinal (YYYY-DDD) and ISO week (YYYY-Www-D) dates are normalized to calendar year/month/day,
@@ -524,10 +524,6 @@ FDF_EXPORT namespace fdf
             AppendPadded(out, abs % 60, 2);
         }
     }
-    struct MapType     { consteval MapType()     noexcept = default; };
-    struct VersionType { consteval VersionType() noexcept = default; };
-
-
 
 
 
@@ -540,9 +536,12 @@ FDF_EXPORT namespace fdf
         
         constexpr Entry(Entry&& other) noexcept;
         constexpr Entry& operator=(Entry&& other) noexcept;
-        
+
+        // Public so constexpr `new Entry{}` works on MSVC (no friend access to a private ctor in
+        // constant eval). Dtor stays private, so construct via NewEntry/Emplace
+        constexpr Entry() noexcept;
+
     private:
-        constexpr  Entry() noexcept;
         constexpr ~Entry() noexcept;
 
         friend struct detail::Test;
@@ -557,21 +556,59 @@ FDF_EXPORT namespace fdf
         char identifier[detail::MAX_IDENTIFIER_LENGTH + 1] = {};
         Type type = Type::Map;
         uint32_t size = 0;
-        uint32_t capacity = 0; //TODO convert everything to use this capacity
+        uint32_t capacity = 0;  // container child-buffer capacity (containers only)
         Entry* parent = nullptr;
-        void* data = nullptr;
+
+        // Union of typed pointers, not a bare void*: constexpr can't cast void*->T* (MSVC). Consteval
+        // reads the member matching `type`; runtime uses `raw` (all members alias). Active member == type
+        // TODO: collapse to `void* data` once MSVC allows void*->T* in constant expressions
+        union DataPtr
+        {
+            void* raw = nullptr;
+            bool* boolArray;
+            std::string* str;
+            std::vector<int64_t>* vInt;
+            std::vector<uint64_t>* vUInt;
+            std::vector<double>* vFloat;
+            std::vector<Entry*>* vEntry;
+        };
+        DataPtr data;
     #if !FDF_NO_COMMENTS
-        void* comment = nullptr;
+        union CommentPtr
+        {
+            std::string* str = nullptr;   // default-active member: at consteval comment is always a std::string
+            void* raw;
+            CommentControlBlock* block;
+        };
+        CommentPtr comment;
     #endif
 
     private:
         template<typename T>
-        [[nodiscard]] constexpr       std::vector<T>* GetDataVector()       noexcept  { return static_cast<      std::vector<T>*>(data); }
+        [[nodiscard]] constexpr std::vector<T>*& GetDataVector() noexcept
+        {
+            if constexpr(std::is_same_v<T, int64_t>)       return data.vInt;
+            else if constexpr(std::is_same_v<T, uint64_t>) return data.vUInt;
+            else if constexpr(std::is_same_v<T, double>)   return data.vFloat;
+            else                                           return data.vEntry;   // Entry*
+        }
         template<typename T>
-        [[nodiscard]] constexpr const std::vector<T>* GetDataVector() const noexcept  { return static_cast<const std::vector<T>*>(data); }
+        [[nodiscard]] constexpr const std::vector<T>* GetDataVector() const noexcept
+        {
+            if constexpr(std::is_same_v<T, int64_t>)       return data.vInt;
+            else if constexpr(std::is_same_v<T, uint64_t>) return data.vUInt;
+            else if constexpr(std::is_same_v<T, double>)   return data.vFloat;
+            else                                           return data.vEntry;
+        }
 
+        // Consteval-only typed pointers (std::string / bool[]). Runtime raw-byte access casts
+        // data.raw directly at the call site
         template<typename T>
-        [[nodiscard]] constexpr       T* GetDataAs()       noexcept  { return static_cast<      T*>(data); }
+        [[nodiscard]] constexpr T*& GetDataAs() noexcept
+        {
+            if constexpr(std::is_same_v<T, bool>) return data.boolArray;
+            else                                  return data.str;   // std::string
+        }
         template<typename T>
         [[nodiscard]] constexpr const T* GetDataAs() const noexcept
         {
@@ -594,9 +631,17 @@ FDF_EXPORT namespace fdf
             }
         }
 
-        [[nodiscard]] constexpr       std::string* GetCommentString()       noexcept  { return static_cast<      std::string*>(comment); }
-        [[nodiscard]] constexpr const std::string* GetCommentString() const noexcept  { return static_cast<const std::string*>(comment); }
         
+    #if !FDF_NO_COMMENTS
+        [[nodiscard]] constexpr       CommentControlBlock* GetCommentControlBlock()       noexcept  { return comment.block; }
+        [[nodiscard]] constexpr const CommentControlBlock* GetCommentControlBlock() const noexcept  { return comment.block; }
+        [[nodiscard]] constexpr       char*                GetCommentData()               noexcept  { return static_cast<      char*>(comment.raw) + sizeof(CommentControlBlock); }
+        [[nodiscard]] constexpr const char*                GetCommentData()         const noexcept  { return static_cast<const char*>(comment.raw) + sizeof(CommentControlBlock); }
+
+        [[nodiscard]] constexpr       std::string* GetCommentString()       noexcept  { return comment.str; }
+        [[nodiscard]] constexpr const std::string* GetCommentString() const noexcept  { return comment.str; }
+    #endif
+
         [[nodiscard]] constexpr uint8_t GetIdentifierSize()                    const noexcept  { return static_cast<uint8_t>(detail::MAX_IDENTIFIER_LENGTH) - static_cast<uint8_t>(identifier[detail::MAX_IDENTIFIER_LENGTH]); }
                       constexpr void    SetIdentifierSize(const uint8_t value)       noexcept  { identifier[detail::MAX_IDENTIFIER_LENGTH] = static_cast<char>(detail::MAX_IDENTIFIER_LENGTH - value); }
 
@@ -667,12 +712,12 @@ FDF_EXPORT namespace fdf
             #if !FDF_NO_COMMENTS
                 if consteval
                 {
-                    if(comment)
+                    if(comment.str)
                         return *GetCommentString();
                 }
                 else
                 {
-                    if(comment)
+                    if(comment.raw)
                         return {GetCommentData(), GetCommentControlBlock()->size};
                 }
             #endif
@@ -745,7 +790,7 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr auto GetValue() const noexcept       { static_assert(false, "Invalid type"); }
         
         constexpr void SetType(Type _type) noexcept;
-        //constexpr void Resize(uint32_t _size) noexcept; //TODO Implement
+        constexpr void Resize(uint32_t _size) noexcept;
         
         constexpr void SetValue(NullType) noexcept;
         constexpr void SetValue(NilType) noexcept;
@@ -804,7 +849,6 @@ FDF_EXPORT namespace fdf
 
 namespace fdf::detail
 {
-    constexpr std::string_view EVALUATE_LITERAL_TEXT = "Evaluate Literal";
     constexpr std::string_view UNEXPECTED_TEXT = "<UNEXPECTED-ERROR>";
     constexpr std::string_view ARRAY_TEXT   = "<ARRAY>";
     constexpr std::string_view MAP_TEXT     = "<MAP>";
@@ -880,6 +924,27 @@ namespace fdf::detail
     private:
         [[nodiscard]] constexpr Token GetNextToken() noexcept;
 
+        // Build a token at the current position, set its line/column, and advance past it
+        [[nodiscard]] constexpr Token MakeToken(TokenType type, uint32_t count) noexcept
+        {
+            Token token = Token(type, index, count);
+            token.line = line;
+            token.column = static_cast<uint16_t>(index - lastNewLineIndex);
+            index += count;
+            return token;
+        }
+
+        // Build an Invalid token tagged with the reason and the current position so the parser
+        // can forward a precise diagnostic. The reason is stashed in extra8
+        [[nodiscard]] constexpr Token MakeInvalid(DiagnosticType reason) const noexcept
+        {
+            Token token = Token(TokenType::Invalid, index);
+            token.line = line;
+            token.column = static_cast<uint16_t>(index - lastNewLineIndex);
+            token.extra8 = static_cast<uint8_t>(reason);
+            return token;
+        }
+
     public:
         std::string_view content;
         uint32_t index;
@@ -900,71 +965,6 @@ namespace fdf::detail
             dest[i] = src[i];
     }
 
-    [[nodiscard]] constexpr bool IsValueLiteral(TokenType type) noexcept
-    { 
-        return static_cast<uint8_t>(type) >= static_cast<uint8_t>(TokenType::ValueLiteral_Begin) &&
-               static_cast<uint8_t>(type) <= static_cast<uint8_t>(TokenType::ValueLiteral_End);
-    }
-
-    [[nodiscard]] constexpr bool constexpr_isspace(char c) noexcept
-    {
-        return (c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r');
-    }
-
-    [[nodiscard]] constexpr bool constexpr_isalpha(char c) noexcept
-    {
-        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
-    }
-
-    [[nodiscard]] constexpr bool constexpr_isdigit(char c) noexcept
-    {
-        return c >= '0' && c <= '9';
-    }
-    
-    [[nodiscard]] constexpr bool IsKeyword(std::string_view view) noexcept
-    {
-        for(const auto keyword : KEYWORDS)
-        {
-            if(view == keyword)
-                return true;
-        }
-        return false;
-    }
-    
-    [[nodiscard]] constexpr bool IsValidIdentifier(std::string_view identifier) noexcept
-    {
-        if(identifier.empty() || identifier.size() > MAX_IDENTIFIER_LENGTH || (!constexpr_isalpha(identifier[0]) && identifier[0] != '_'))
-            return false;
-        
-        size_t firstNonID = 1;
-        while(firstNonID < identifier.size() && (constexpr_isalpha(identifier[firstNonID]) || constexpr_isdigit(identifier[firstNonID]) || identifier[firstNonID] == '_'))
-            firstNonID++;
-        
-        return firstNonID >= identifier.size()? !IsKeyword(identifier) : false;
-    }
-    
-    [[nodiscard]] constexpr bool IsOpenBrace(const char c)   noexcept  { return c == '{' || c == '['; }
-    [[nodiscard]] constexpr bool IsCloseBrace(const char c)  noexcept  { return c == '}' || c == ']'; }
-    [[nodiscard]] constexpr bool IsCurlyBrace(const char c)  noexcept  { return c == '{' || c == '}'; }
-    [[nodiscard]] constexpr bool IsSquareBrace(const char c) noexcept  { return c == '[' || c == ']'; }
-    [[nodiscard]] constexpr bool IsBrace(const char c)       noexcept  { return c == '{' || c == '}' || c == '[' || c == ']'; }
-}
-
-
-
-
-
-
-
-
-
-
-namespace fdf::detail
-{
-    template<size_t BLOCK_SIZE, size_t BLOCK_ALIGNMENT = BLOCK_SIZE, size_t CHUNK_SIZE = 4096U, size_t LAZILY_DEALLOCATED_CHUNK_COUNT = 1>
-    class SlabAllocator
-    {
-        static_assert(BLOCK_SIZE >= sizeof(void*), "BLOCK_SIZE can't be smaller than size of a pointer");
     // Constexpr number -> string appenders, so the writer can run at compile time (std::format isn't
     // constexpr). std::to_chars is constexpr for integers
     constexpr void AppendInt(std::string& s, int64_t v) noexcept
@@ -1594,6 +1594,79 @@ namespace fdf::detail
         return SlowParse(big, exp10, bNeg, bSticky);
     }
 
+    [[nodiscard]] constexpr bool IsValueLiteral(TokenType type) noexcept
+    { 
+        return static_cast<uint8_t>(type) >= static_cast<uint8_t>(TokenType::ValueLiteral_Begin) &&
+               static_cast<uint8_t>(type) <= static_cast<uint8_t>(TokenType::ValueLiteral_End);
+    }
+
+    [[nodiscard]] constexpr bool constexpr_isspace(char c) noexcept
+    {
+        return (c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r');
+    }
+
+    [[nodiscard]] constexpr bool constexpr_isalpha(char c) noexcept
+    {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+    }
+
+    [[nodiscard]] constexpr bool constexpr_isdigit(char c) noexcept
+    {
+        return c >= '0' && c <= '9';
+    }
+    
+    [[nodiscard]] constexpr bool IsKeyword(std::string_view view) noexcept
+    {
+        for(const auto keyword : KEYWORDS)
+        {
+            if(view == keyword)
+                return true;
+        }
+        return false;
+    }
+    
+    [[nodiscard]] constexpr bool IsValidIdentifier(std::string_view identifier) noexcept
+    {
+        if(identifier.empty() || identifier.size() > MAX_IDENTIFIER_LENGTH || (!constexpr_isalpha(identifier[0]) && identifier[0] != '_'))
+            return false;
+        
+        size_t firstNonID = 1;
+        while(firstNonID < identifier.size() && (constexpr_isalpha(identifier[firstNonID]) || constexpr_isdigit(identifier[firstNonID]) || identifier[firstNonID] == '_'))
+            firstNonID++;
+        
+        return firstNonID >= identifier.size()? !IsKeyword(identifier) : false;
+    }
+    
+    [[nodiscard]] constexpr bool IsOpenBrace(const char c)   noexcept  { return c == '{' || c == '['; }
+    [[nodiscard]] constexpr bool IsCloseBrace(const char c)  noexcept  { return c == '}' || c == ']'; }
+    [[nodiscard]] constexpr bool IsCurlyBrace(const char c)  noexcept  { return c == '{' || c == '}'; }
+    [[nodiscard]] constexpr bool IsSquareBrace(const char c) noexcept  { return c == '[' || c == ']'; }
+    [[nodiscard]] constexpr bool IsBrace(const char c)       noexcept  { return c == '{' || c == '}' || c == '[' || c == ']'; }
+
+    // Validates ISO-8601 timestamps (structure AND value ranges). Defers to Timestamp::FromText, the
+    // single parse/validate implementation. Accepts: YYYY-MM-DD, YYYY-DDD (ordinal), YYYY-Www-D
+    // (week), an optional Thh:mm:ss after a date, a bare hh:mm:ss, fractional seconds, Z / +-hh:mm
+    [[nodiscard]] constexpr bool IsValidTimestamp(std::string_view ts) noexcept
+    {
+        return Timestamp::FromText(ts).IsValid();
+    }
+}
+
+
+
+
+
+
+
+
+
+
+namespace fdf::detail
+{
+    template<size_t BLOCK_SIZE, size_t BLOCK_ALIGNMENT = BLOCK_SIZE, size_t CHUNK_SIZE = 4096U, size_t LAZILY_DEALLOCATED_CHUNK_COUNT = 1>
+    class SlabAllocator
+    {
+        static_assert(BLOCK_SIZE >= sizeof(void*), "BLOCK_SIZE can't be smaller than size of a pointer");
 
         struct Chunk
         {
@@ -1891,7 +1964,7 @@ namespace fdf::detail
     constexpr Token Tokenizer::GetNextToken() noexcept
     {
         if(index >= content.size())
-            return TokenType::EndOfFile;
+            return MakeToken(TokenType::EndOfFile, 0);
 
         while(constexpr_isspace(content[index]))
         {
@@ -1916,11 +1989,9 @@ namespace fdf::detail
                 return token;
             }
 
-            if(constexpr_isspace(content[index]))
-                index++;
-
+            index++;
             if(index >= content.size())
-                return TokenType::EndOfFile;
+                return MakeToken(TokenType::EndOfFile, 0);
         }
 
 
@@ -1929,13 +2000,13 @@ namespace fdf::detail
         {
             size_t nextQuote = content.find_first_of(content[index], index + 1);
             if(nextQuote == std::string_view::npos)
-                return TokenType::Invalid;  // Non matching quotes
+                return MakeInvalid(DiagnosticType::UnterminatedString);  // Non matching quotes
 
             while(content[nextQuote - 1] == '\\' && content[nextQuote - 2] != '\\')
             {
                 nextQuote = content.find_first_of(content[index], nextQuote + 1);
                 if(nextQuote == std::string_view::npos)
-                    return TokenType::Invalid;  // Non matching quotes
+                    return MakeInvalid(DiagnosticType::UnterminatedString);  // Non matching quotes
             }
 
             Token token = Token(TokenType::StringLiteral, index, static_cast<uint32_t>(nextQuote) + 1 - index);
@@ -1951,7 +2022,7 @@ namespace fdf::detail
         if(content[index] == '/')
         {
             if(index + 2 >= content.size())
-                return TokenType::Invalid; // not enough space for a comment
+                return MakeInvalid(DiagnosticType::InvalidComment); // not enough space for a comment
 
             if(content[index + 1] == '/') // single line comment
             {
@@ -1979,7 +2050,7 @@ namespace fdf::detail
                 while(true)
                 {
                     if(slashPos == std::string_view::npos)
-                        return TokenType::Invalid; // Non-matching comment scope (There is only "/*" and not "*/")
+                        return MakeInvalid(DiagnosticType::UnterminatedComment); // Non-matching comment scope (There is only "/*" and not "*/")
 
                     if(content[slashPos - 1] == '*')
                     {
@@ -2012,44 +2083,24 @@ namespace fdf::detail
                 }
             }
 
-            return TokenType::Invalid;  // slash "/" without a comment
+            return MakeInvalid(DiagnosticType::InvalidComment);  // slash "/" without a comment
         }
 
 
 
         if(content[index] == '{')
-            return Token(TokenType::CurlyBraceOpen, index++, 1);
+            return MakeToken(TokenType::CurlyBraceOpen, 1);
         if(content[index] == '}')
-            return Token(TokenType::CurlyBraceClose, index++, 1);
+            return MakeToken(TokenType::CurlyBraceClose, 1);
         if(content[index] == '[')
-            return Token(TokenType::SquareBraceOpen, index++, 1);
+            return MakeToken(TokenType::SquareBraceOpen, 1);
         if(content[index] == ']')
-            return Token(TokenType::SquareBraceClose, index++, 1);
+            return MakeToken(TokenType::SquareBraceClose, 1);
 
         if(content[index] == '=')
-            return Token(TokenType::Equal, index++, 1);
+            return MakeToken(TokenType::Equal, 1);
         if(content[index] == ',')
-            return Token(TokenType::Comma, index++, 1);
-
-
-
-        if(content[index] == '$')
-        {
-            if(index + 1 < content.size() && content[index + 1] == '{')
-            {
-                size_t braceClose = content.find_first_of('}', index + 2);
-                if(braceClose == std::string_view::npos) // we reached eof before "}"
-                    return TokenType::Invalid;
-
-                Token token = Token(TokenType::EvaluateLiteral, index, static_cast<uint32_t>(braceClose) + 1 - index);
-                token.line = line;
-                token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
-                index = static_cast<uint32_t>(braceClose + 1);
-                return token;
-            }
-
-            return TokenType::Invalid; // Random "$" without "{"
-        }
+            return MakeToken(TokenType::Comma, 1);
 
 
 
@@ -2106,19 +2157,19 @@ namespace fdf::detail
                     return token;
                 }
 
-                if(firstNonHex == std::string_view::npos) // we reached eof before any space or any other token
-                    return TokenType::Invalid;
+                if(firstNonHex == std::string_view::npos) // eof before any separator
+                    return MakeInvalid(DiagnosticType::InvalidNumber);
 
-                if(firstChar < firstNonHex) // it contains hex characters, so we can't let it slide as a number
-                    return TokenType::Invalid;
+                if(firstChar < firstNonHex) // has hex chars, not a number
+                    return MakeInvalid(DiagnosticType::InvalidNumber);
 
-                // Let it fallthrough as "multidimensional int"
+                // falls through as a multidimensional int
             }
 
 
 
             size_t firstNonDigit = content.find_first_not_of("0123456789", index + 1);
-            if(firstNonDigit == std::string_view::npos)  // we reached eof before any space or any other token
+            if(firstNonDigit == std::string_view::npos)  // eof before any separator
             {
                 Token token = Token(TokenType::IntLiteral, index, static_cast<uint32_t>(content.size()) - index);
                 token.line = line;
@@ -2189,9 +2240,9 @@ namespace fdf::detail
                     if(content[temp] == '.')
                     {
                         if(dotCount == 1 && token.extra8 > 1)
-                            return TokenType::Invalid;  // Float can't have more than 1 dot
+                            return MakeInvalid(DiagnosticType::InvalidNumber);  // Float can't have more than 1 dot
                         if(dotCount > 2)
-                            return TokenType::Invalid;  // Version can have 3 dots maximum
+                            return MakeInvalid(DiagnosticType::InvalidNumber);  // Version can have 3 dots maximum
                         
                         dotCount++;
                         temp++;
@@ -2206,6 +2257,19 @@ namespace fdf::detail
                         continue;
                     }
 
+                    if((content[temp] == 'e' || content[temp] == 'E') && dotCount <= 1)
+                    {
+                        // Scientific exponent: optional sign then at least one digit
+                        size_t j = temp + 1;
+                        if(j < content.size() && (content[j] == '+' || content[j] == '-'))
+                            j++;
+                        if(j >= content.size() || !constexpr_isdigit(content[j]))
+                            return MakeInvalid(DiagnosticType::InvalidNumber);  // Exponent needs a digit
+
+                        temp = j;  // loop consumes the exponent digits
+                        continue;
+                    }
+
                     if(constexpr_isspace(content[temp]) || content[temp] == ',')
                     {
                         calculateResult();
@@ -2213,7 +2277,7 @@ namespace fdf::detail
                         return token;
                     }
 
-                    return TokenType::Invalid; // Non allowed character
+                    return MakeInvalid(DiagnosticType::InvalidNumber); // Non allowed character
                 }
 
                 calculateResult();
@@ -2242,7 +2306,7 @@ namespace fdf::detail
                     }
 
                     if(previous + 1 == firstNonDigit && (content[previous] != ',' || !constexpr_isspace(content[firstNonDigit])) && (content[previous] != 'x' || content[firstNonDigit] != '-'))
-                        return TokenType::Invalid;  // It must have number(s) in between
+                        return MakeInvalid(DiagnosticType::InvalidNumber);  // It must have number(s) in between
 
                     if(constexpr_isspace(content[firstNonDigit]) || content[firstNonDigit] == ',')
                     {
@@ -2262,7 +2326,7 @@ namespace fdf::detail
                     {
                         dotCount++;
                         if(dotCount > 1)
-                            return TokenType::Invalid;  // Multidimensional numbers can't contain more than 1 dot (for each number)
+                            return MakeInvalid(DiagnosticType::InvalidNumber);  // Multidimensional numbers can't contain more than 1 dot (for each number)
 
                         continue;
                     }
@@ -2271,14 +2335,6 @@ namespace fdf::detail
 
 
 
-
-    // Validates ISO-8601 timestamps (structure AND value ranges). Defers to Timestamp::FromText, the
-    // single parse/validate implementation. Accepts: YYYY-MM-DD, YYYY-DDD (ordinal), YYYY-Www-D
-    // (week), an optional Thh:mm:ss after a date, a bare hh:mm:ss, fractional seconds, Z / +-hh:mm
-    [[nodiscard]] constexpr bool IsValidTimestamp(std::string_view ts) noexcept
-    {
-        return Timestamp::FromText(ts).IsValid();
-    }
 
 
             /* Possible datetime formats (ISO 8601)
@@ -2292,7 +2348,7 @@ namespace fdf::detail
             *  2024-359                  -> Year + Day of Year (359th day of 2024)
             */
 
-            /* Possible duration formats (if we want to support it, currently we don't) (Note: not here, it starts with a letter)
+            /* ISO-8601 durations, not supported (they start with a letter, so not handled here)
             *  P3D              -> 3 days
             *  P2W              -> 2 weeks (14 days)
             *  P1Y2M3D          -> 1 year, 2 months, 3 days
@@ -2341,7 +2397,7 @@ namespace fdf::detail
                 Token token = Token(TokenType::TimestampLiteral, index);
                 token.line = line;
                 token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
-                const size_t firstNonDate = content.find_first_not_of("0123456789+:.", index);  // idk if it can include timezone ("+" sign)
+                const size_t firstNonDate = content.find_first_not_of("0123456789+-:.Z", index);  // time may carry a Z or +-hh:mm timezone
                 if(firstNonDate == std::string_view::npos)
                 {
                     token.count = static_cast<uint32_t>(content.size()) - token.startPosition;
@@ -2361,10 +2417,10 @@ namespace fdf::detail
                 return MakeInvalid(DiagnosticType::InvalidTimestamp);  // Invalid character after timestamp
             }
 
-            return TokenType::Invalid;  // Something we didn't process yet?
+            return MakeInvalid(DiagnosticType::InvalidToken);  // unhandled token
         }
 
-        return TokenType::Invalid;  // Something we didn't process yet?
+        return MakeInvalid(DiagnosticType::InvalidToken);  // unhandled token
     }
 }
 
@@ -2386,6 +2442,9 @@ namespace fdf::detail
         template<typename... Args>
         [[nodiscard]] static constexpr UniqueEntryPtr Create(Args&&... args) noexcept;
                       static constexpr void           Destroy(Entry* e) noexcept;
+
+        static constexpr void                         Diagnose(DiagnosticSeverity severity, DiagnosticType type, const Tokenizer& tokenizer, const Token& token) noexcept;
+        static constexpr void                         SkipToNextEntry(Tokenizer& tokenizer, bool bStopAtCloseBrace) noexcept;
 
         [[nodiscard]] static constexpr UniqueEntryPtr ParseBuffer(std::string_view content) noexcept;
         [[nodiscard]] static constexpr bool           ParseVariable   (Tokenizer& tokenizer, Entry& parent   FDF_COMMENT_SWITCH(, Token comment)) noexcept;
@@ -2410,17 +2469,19 @@ namespace fdf::detail
 namespace fdf
 {
     constexpr Entry::Entry(Entry&& other) noexcept
-        : type(other.type), size(other.size), parent(other.parent), data(other.data)   FDF_COMMENT_SWITCH(, comment(other.comment))
+        : type(other.type), size(other.size), capacity(other.capacity), parent(other.parent), data(other.data)   FDF_COMMENT_SWITCH(, comment(other.comment))
     {
         other.type = Type::Map;
+        other.size = 0;
+        other.capacity = 0;
         other.parent = nullptr;
-        other.data = nullptr;
-        
+        other.data.vEntry = nullptr;   // active member matches the reset type (Map)
+
         detail::constexpr_memcpy(identifier, other.identifier, detail::MAX_IDENTIFIER_LENGTH + 1);
         other.SetIdentifierSize(0U);
-            
+
 #if !FDF_NO_COMMENTS
-        other.comment = nullptr;
+        other.comment.str = nullptr;
 #endif
     }
     
@@ -2432,21 +2493,24 @@ namespace fdf
         
         type = other.type;
         size = other.size;
+        capacity = other.capacity;
         parent = other.parent;
         data = other.data;
-            
+
         other.type = Type::Map;
+        other.size = 0;
+        other.capacity = 0;
         other.parent = nullptr;
-        other.data = nullptr;
-            
+        other.data.vEntry = nullptr;
+
         detail::constexpr_memcpy(identifier, other.identifier, detail::MAX_IDENTIFIER_LENGTH + 1);
         other.SetIdentifierSize(0U);
-            
+
 #if !FDF_NO_COMMENTS
         comment = other.comment;
-        other.comment = nullptr;
+        other.comment.str = nullptr;
 #endif
-        
+
         return *this;
     }
     
@@ -2454,6 +2518,7 @@ namespace fdf
     constexpr Entry::Entry() noexcept
     {
         SetIdentifierSize(0);
+        data.vEntry = nullptr;   // default type is Map -> keep vEntry the active union member
     }
     constexpr Entry::~Entry() noexcept
     {
@@ -2480,26 +2545,27 @@ namespace fdf
         return true;
     }
 
-    constexpr void Entry::SetComment(std::string_view newComment) noexcept
+    constexpr void Entry::SetComment([[maybe_unused]] std::string_view newComment) noexcept
     {
+    #if !FDF_NO_COMMENTS
         if consteval
         {
-            if(comment)
-                *GetCommentString() = newComment;
+            if(comment.str)
+                *comment.str = newComment;
             else
             {
-                comment = new (std::nothrow) std::string(newComment);
-                assert(comment && "Allocation shouldn't fail");
+                comment.str = new (std::nothrow) std::string(newComment);
+                assert(comment.str && "Allocation shouldn't fail");
             }
         }
         else
         {
-            if(comment)
+            if(comment.raw)
             {
                 if(newComment.size() > GetCommentControlBlock()->capacity)
                 {
-                    detail::GlobalAllocator::Deallocate(comment, GetCommentControlBlock()->capacity + sizeof(Entry::CommentControlBlock) + 1);
-                    comment = static_cast<CommentControlBlock*>(detail::GlobalAllocator::Allocate(newComment.size() + sizeof(Entry::CommentControlBlock) + 1));
+                    detail::GlobalAllocator::Deallocate(comment.raw, GetCommentControlBlock()->capacity + sizeof(Entry::CommentControlBlock) + 1);
+                    comment.raw = detail::GlobalAllocator::Allocate(newComment.size() + sizeof(Entry::CommentControlBlock) + 1);
                     GetCommentControlBlock()->capacity = static_cast<uint32_t>(newComment.size());
                     GetCommentControlBlock()->size = GetCommentControlBlock()->capacity;
                 }
@@ -2510,7 +2576,7 @@ namespace fdf
             }
             else
             {
-                comment = static_cast<CommentControlBlock*>(detail::GlobalAllocator::Allocate(newComment.size() + sizeof(Entry::CommentControlBlock) + 1));
+                comment.raw = detail::GlobalAllocator::Allocate(newComment.size() + sizeof(Entry::CommentControlBlock) + 1);
                 GetCommentControlBlock()->capacity = static_cast<uint32_t>(newComment.size());
                 GetCommentControlBlock()->size = GetCommentControlBlock()->capacity;
             }
@@ -2532,62 +2598,63 @@ namespace fdf
             GetCommentControlBlock()->size = static_cast<uint32_t>(j);
             GetCommentData()[GetCommentControlBlock()->size] = '\0';
         }
+    #endif
     }
 
     constexpr void Entry::ReleaseData() noexcept
     {
-        if(!data)
+        if(IsDataNull())
             return;
-        
+
         switch(type)
         {
         case Type::Bool:
             if consteval
                 { delete[] GetDataAs<bool>(); }
             else
-                { detail::GlobalAllocator::Deallocate(data, size * sizeof(bool)); }
+                { detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(bool)); }
             break;
         case Type::Int:
             if consteval
                 { delete GetDataVector<int64_t>(); }
             else
-                { detail::GlobalAllocator::Deallocate(data, size * sizeof(int64_t)); }
+                { detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(int64_t)); }
             break;
         case Type::UInt:
             if consteval
                 { delete GetDataVector<uint64_t>(); }
             else
-                { detail::GlobalAllocator::Deallocate(data, size * sizeof(uint64_t)); }
+                { detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(uint64_t)); }
             break;
         case Type::Float:
             if consteval
                 { delete GetDataVector<double>(); }
             else
-                { detail::GlobalAllocator::Deallocate(data, size * sizeof(double)); }
+                { detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(double)); }
             break;
         case Type::String:
             if consteval
                 { delete GetDataAs<std::string>(); }
             else
-                { detail::GlobalAllocator::Deallocate(data, size * sizeof(char)); }
+                { detail::GlobalAllocator::Deallocate(data.raw, *static_cast<uint32_t*>(data.raw) + 1 + sizeof(uint32_t)); }
             break;
         case Type::Hex:
             if consteval
                 { delete GetDataAs<std::string>(); }
             else
-                { detail::GlobalAllocator::Deallocate(data, size * sizeof(char) / 8); } //TODO: Think why we do "/ 8"
+                { detail::GlobalAllocator::Deallocate(data.raw, *static_cast<uint32_t*>(data.raw) + 1 + sizeof(uint32_t)); }
             break;
         case Type::Version:
             if consteval
                 { delete GetDataVector<uint64_t>(); }
             else
-                { detail::GlobalAllocator::Deallocate(data, size * sizeof(uint64_t)); }
+                { detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(uint64_t)); }
             break;
         case Type::Timestamp:
             if consteval
                 { delete GetDataAs<std::string>(); }
             else
-                { detail::GlobalAllocator::Deallocate(data, size * sizeof(char)); }
+                { detail::GlobalAllocator::Deallocate(data.raw, *static_cast<uint32_t*>(data.raw) + 1 + sizeof(uint32_t)); }
             break;
         case Type::Array:
         case Type::Map:
@@ -2595,14 +2662,16 @@ namespace fdf
             if consteval
                 { delete GetDataVector<Entry*>(); }
             else
-                { (void)detail::GlobalAllocator::Deallocate(data, (*static_cast<size_t*>(data) * sizeof(void*)) + sizeof(size_t)); }
+                { (void)detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(void*)); }
+            data.vEntry = nullptr;   // keep the active member consistent with type (Map/Array)
+            capacity = 0;
             return;
         case Type::Null:
         default:
             return;
         }
-        
-        data = nullptr;
+
+        data.raw = nullptr;
     }
 
     constexpr void Entry::ReleaseComment() noexcept
@@ -2610,16 +2679,16 @@ namespace fdf
     #if !FDF_NO_COMMENTS
         if consteval
         {
-            if(comment)
-                delete GetCommentString();
+            if(comment.str)
+                delete comment.str;
+            comment.str = nullptr;
         }
         else
         {
-            if(comment)
-                detail::GlobalAllocator::Deallocate(comment, GetCommentControlBlock()->capacity + sizeof(Entry::CommentControlBlock) + 1);
+            if(comment.raw)
+                detail::GlobalAllocator::Deallocate(comment.raw, GetCommentControlBlock()->capacity + sizeof(Entry::CommentControlBlock) + 1);
+            comment.raw = nullptr;
         }
-
-        comment = nullptr;
     #endif
     }
     
@@ -2644,7 +2713,7 @@ namespace fdf
             }
             else
             {
-                if((static_cast<Entry**>(data) + 1)[i] == &e)
+                if(static_cast<Entry**>(data.raw)[i] == &e)
                     return i;
             }
         }
@@ -2663,7 +2732,7 @@ namespace fdf
             }
             else
             {
-                if((static_cast<Entry**>(data) + 1)[i]->GetIdentifier() == _identifier)
+                if(static_cast<Entry**>(data.raw)[i]->GetIdentifier() == _identifier)
                     return i;
             }
         }
@@ -2700,6 +2769,7 @@ namespace fdf
             {
                 std::swap(found->type, e->type);
                 std::swap(found->size, e->size);
+                std::swap(found->capacity, e->capacity);
                 std::swap(found->data, e->data);
             #if !FDF_NO_COMMENTS
                 std::swap(found->comment, e->comment);
@@ -2711,39 +2781,39 @@ namespace fdf
 
         if consteval
         {
-            if(!data)
-                data = new (std::nothrow) std::vector<Entry*>();
-            assert(data && "Allocation shouldn't fail");
+            if(!data.vEntry)
+                data.vEntry = new (std::nothrow) std::vector<Entry*>();
+            assert(data.vEntry && "Allocation shouldn't fail");
             GetDataVector<Entry*>()->push_back(e.get());
             size = static_cast<uint32_t>(GetDataVector<Entry*>()->size());
             return e.release();
         }
         else
         {
-            if(data)
+            if(data.raw)
             {
-                const size_t _capacity = *static_cast<size_t*>(data);
-            
-                if(static_cast<size_t>(size) >= _capacity) //TODO: convert >= to == and add an assert as a sanity check
+                assert(size <= capacity && "size must never exceed capacity");
+                if(size == capacity)
                 {
-                    void* newBuffer = detail::GlobalAllocator::Allocate((2 * _capacity * sizeof(void*)) + sizeof(size_t));
-                    *static_cast<size_t*>(newBuffer) = 2 * _capacity;
+                    const uint32_t newCapacity = capacity * 2;
+                    void* newBuffer = detail::GlobalAllocator::Allocate(newCapacity * sizeof(void*));
 
                     for(size_t i = 0; i < size; i++)
-                        (static_cast<Entry**>(newBuffer) + 1)[i] = (static_cast<Entry**>(data) + 1)[i];
+                        static_cast<Entry**>(newBuffer)[i] = static_cast<Entry**>(data.raw)[i];
 
-                    (void)detail::GlobalAllocator::Deallocate(data, (_capacity * sizeof(void*)) + sizeof(size_t));
-                    data = newBuffer;
+                    (void)detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(void*));
+                    data.raw = newBuffer;
+                    capacity = newCapacity;
                 }
             }
             else
             {
-                data = detail::GlobalAllocator::Allocate((4 * sizeof(void*)) + sizeof(size_t));
-                *static_cast<size_t*>(data) = 4;
-                size = 0;  // Just in case
+                data.raw = detail::GlobalAllocator::Allocate(4 * sizeof(void*));
+                capacity = 4;
+                size = 0;
             }
 
-            (static_cast<Entry**>(data) + 1)[size++] = e.get();
+            static_cast<Entry**>(data.raw)[size++] = e.get();
             return e.release();
         }
     }
@@ -2774,42 +2844,50 @@ namespace fdf
 
         if consteval
         {
-            detail::Utils<>::Destroy((*GetDataVector<Entry*>())[index]);
-            GetDataVector<Entry*>()->erase(GetDataVector<Entry*>()->begin() + index);
+            Entry* child = (*GetDataVector<Entry*>())[index];
+            child->parent = nullptr;  // prevent the destructor from self-orphaning (double removal)
+            // Manual shift + pop_back instead of vector::erase: MSVC's debug iterators aren't
+            // constexpr-evaluable, and erase adopts an iterator over the new end
+            auto& vec = *GetDataVector<Entry*>();
+            for(size_t i = index; i + 1 < vec.size(); i++)
+                vec[i] = vec[i + 1];
+            vec.pop_back();
+            detail::Utils<>::Destroy(child);
         }
         else
         {
-            detail::Utils<>::Destroy((static_cast<Entry**>(data) + 1)[index]);
+            Entry* child = static_cast<Entry**>(data.raw)[index];
+            child->parent = nullptr;  // prevent the destructor from self-orphaning (double removal)
             for(; index + 1 < size; index++)
-                (static_cast<Entry**>(data) + 1)[index] = (static_cast<Entry**>(data) + 1)[index + 1];
-            (static_cast<Entry**>(data) + 1)[index] = nullptr;
+                static_cast<Entry**>(data.raw)[index] = static_cast<Entry**>(data.raw)[index + 1];
+            static_cast<Entry**>(data.raw)[index] = nullptr;
+            detail::Utils<>::Destroy(child);
         }
-        
+
         size--;
         return true;
     }
     
     constexpr bool Entry::ClearChildren() noexcept
     {
-        if(!IsContainer() || !data)
+        if(!IsContainer() || !data.vEntry)
             return false;
 
         if consteval
         {
             std::vector<Entry*>& childVec = (*GetDataVector<Entry*>());
             for(size_t i = 0; i < childVec.size(); i++)
+            {
+                childVec[i]->parent = nullptr;  // stop the dtor self-orphaning, which would mutate childVec mid-loop
                 detail::Utils<>::Destroy(childVec[i]);
-            
-            // For some reason, this doesn't compile on clang on Windows...
-            //for(Entry* e : childVec)
-            //    detail::Utils<>::Destroy(e);
+            }
         }
         else
         {
             for(size_t i = 0; i < size; i++)
             {
-                (static_cast<Entry**>(data) + 1)[i]->parent = nullptr;
-                detail::Utils<>::Destroy((static_cast<Entry**>(data) + 1)[i]);
+                static_cast<Entry**>(data.raw)[i]->parent = nullptr;
+                detail::Utils<>::Destroy(static_cast<Entry**>(data.raw)[i]);
             }
         }
         
@@ -2875,24 +2953,28 @@ namespace fdf
         if consteval
         {
             original = (*GetDataVector<Entry*>())[index];
-            GetDataVector<Entry*>()->erase(GetDataVector<Entry*>()->begin() + index);
+            auto& vec = *GetDataVector<Entry*>();   // manual shift + pop_back (MSVC debug erase isn't constexpr)
+            for(size_t i = index; i + 1 < vec.size(); i++)
+                vec[i] = vec[i + 1];
+            vec.pop_back();
         }
         else
         {
-            original = (static_cast<Entry**>(data) + 1)[index];
+            original = static_cast<Entry**>(data.raw)[index];
             for(; index + 1 < size; index++)
-                (static_cast<Entry**>(data) + 1)[index] = (static_cast<Entry**>(data) + 1)[index + 1];
+                static_cast<Entry**>(data.raw)[index] = static_cast<Entry**>(data.raw)[index + 1];
 
-            (static_cast<Entry**>(data) + 1)[index] = nullptr;
+            static_cast<Entry**>(data.raw)[index] = nullptr;
         }
-        
+
+        original->parent = nullptr;
         size--;
         return original;
     }
     
     constexpr std::span<Entry*> Entry::OrphanChildren_INTERNAL() noexcept
     {
-        if(!IsContainer() || !data)
+        if(!IsContainer() || !data.vEntry)
             return {};
         
         const auto children = GetChildren();
@@ -2978,7 +3060,7 @@ namespace fdf
         
         if consteval
             { return (*GetDataVector<Entry*>())[index]; }
-        return (static_cast<Entry**>(data) + 1)[index];
+        return static_cast<Entry**>(data.raw)[index];
     }
     constexpr const Entry* Entry::GetDirectChild(uint32_t index) const noexcept
     {
@@ -2987,7 +3069,7 @@ namespace fdf
         
         if consteval
             { return (*GetDataVector<Entry*>())[index]; }
-        return (static_cast<Entry**>(data) + 1)[index];
+        return static_cast<Entry**>(data.raw)[index];
     }
 
     
@@ -3002,7 +3084,7 @@ namespace fdf
         {
             return *GetDataVector<Entry*>();
         }
-        return {(static_cast<Entry**>(data) + 1), size};
+        return {static_cast<Entry**>(data.raw), size};
     }
     constexpr std::span<const Entry*> Entry::GetChildren() const noexcept
     {
@@ -3013,7 +3095,7 @@ namespace fdf
         {
             return {const_cast<const Entry**>(const_cast<Entry*>(this)->GetDataVector<Entry*>()->data()), size};
         }
-        return {(static_cast<const Entry**>(data) + 1), size};
+        return {static_cast<const Entry**>(data.raw), size};
     }
     
     constexpr std::span<Entry*> Entry::GetChildren_INTERNAL() noexcept
@@ -3024,7 +3106,7 @@ namespace fdf
         {
             return *GetDataVector<Entry*>();
         }
-        return {(static_cast<Entry**>(data) + 1), size};
+        return {static_cast<Entry**>(data.raw), size};
     }
     constexpr std::span<const Entry*> Entry::GetChildren_INTERNAL() const noexcept
     {
@@ -3034,7 +3116,7 @@ namespace fdf
         {
             return {const_cast<const Entry**>(const_cast<Entry*>(this)->GetDataVector<Entry*>()->data()), size};
         }
-        return {(static_cast<const Entry**>(data) + 1), size};
+        return {static_cast<const Entry**>(data.raw), size};
     }
 
 
@@ -3063,8 +3145,11 @@ namespace fdf
             if((current->type == Type::Array || current->type == Type::Map) && current->size > 0)
             {
                 total += current->size;
-                for(const Entry* child : std::ranges::reverse_view(current->GetChildren_INTERNAL()))
-                    stack.push_back(child);
+                {
+                    const auto reverseChildren = current->GetChildren_INTERNAL();
+                    for(size_t ci = reverseChildren.size(); ci-- > 0; )
+                        stack.push_back(reverseChildren[ci]);
+                }
             }
         }
         
@@ -3088,8 +3173,11 @@ namespace fdf
 
             if((current->type == Type::Array || current->type == Type::Map) && current->size > 0)
             {
-                for(Entry* child : std::ranges::reverse_view(current->GetChildren_INTERNAL()))
-                    stack.push_back(child);
+                {
+                    const auto reverseChildren = current->GetChildren_INTERNAL();
+                    for(size_t ci = reverseChildren.size(); ci-- > 0; )
+                        stack.push_back(reverseChildren[ci]);
+                }
             }
         }
         
@@ -3113,8 +3201,11 @@ namespace fdf
 
             if((current->type == Type::Array || current->type == Type::Map) && current->size > 0)
             {
-                for(const Entry* child : std::ranges::reverse_view(current->GetChildren_INTERNAL()))
-                    stack.push_back(child);
+                {
+                    const auto reverseChildren = current->GetChildren_INTERNAL();
+                    for(size_t ci = reverseChildren.size(); ci-- > 0; )
+                        stack.push_back(reverseChildren[ci]);
+                }
             }
         }
         
@@ -3175,25 +3266,31 @@ namespace fdf
                 return;
             }
             
-            std::stack<Entry*> stack;
+            std::vector<Entry*> stack;
             if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
             {
-                stack.push(this);
+                stack.push_back(this);
             }
             else
             {
-                for(Entry* child : std::ranges::reverse_view(GetChildren_INTERNAL()))
-                    stack.push(child);
+                {
+                    const auto reverseChildren = GetChildren_INTERNAL();
+                    for(size_t ci = reverseChildren.size(); ci-- > 0; )
+                        stack.push_back(reverseChildren[ci]);
+                }
             }
 
             while(!stack.empty())
             {
-                Entry* current = stack.top();
-                stack.pop();
+                Entry* current = stack.back();
+                stack.pop_back();
                 callback(*current);
 
-                for(Entry* child : std::ranges::reverse_view(current->GetChildren()))
-                    stack.push(child);
+                {
+                    const auto reverseChildren = current->GetChildren();
+                    for(size_t ci = reverseChildren.size(); ci-- > 0; )
+                        stack.push_back(reverseChildren[ci]);
+                }
             }
         }
         else if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::Recursive | ForEachFlags::Group))
@@ -3206,15 +3303,15 @@ namespace fdf
                 return;
             }
             
-            enum class Phase : uint8_t { Pre, Leaf, Array, Map };
+            enum class Phase : uint8_t { Pre, InOrder, Leaf, Array, Map };
             struct Frame { Entry* e; Phase phase; uint32_t idx;};
         
-            std::stack<Frame> stack;
-            stack.push(Frame{ this, Phase::Pre, 0 });
+            std::vector<Frame> stack;
+            stack.push_back(Frame{ this, Phase::Pre, 0 });
         
             while(!stack.empty())
             {
-                Frame& f = stack.top();
+                Frame& f = stack.back();
                 switch(f.phase)
                 {
                     case Phase::Pre:
@@ -3229,7 +3326,28 @@ namespace fdf
                                 callback(*f.e);
                         }
             
-                        f.phase = Phase::Leaf;
+                        // Arrays are positional: emit children in order. Maps group by type
+                        f.phase = f.e->type == Type::Array? Phase::InOrder : Phase::Leaf;
+                        break;
+                    }
+                    case Phase::InOrder:
+                    {
+                        auto children = f.e->GetChildren_INTERNAL();
+                        bool pushed = false;
+                        while(f.idx < children.size())
+                        {
+                            auto* c = children[f.idx++];
+                            if(!c->IsContainer())
+                            {
+                                callback(*c);
+                                continue;
+                            }
+                            stack.push_back(Frame{ c, Phase::Pre, 0 });
+                            pushed = true;
+                            break;
+                        }
+                        if(!pushed)
+                            stack.pop_back();
                         break;
                     }
                     case Phase::Leaf:
@@ -3252,7 +3370,7 @@ namespace fdf
                             Entry* c = children[f.idx++];
                             if(c->IsContainer() && c->type == Type::Array)
                             {
-                                stack.push(Frame{ c, Phase::Pre, 0 });
+                                stack.push_back(Frame{ c, Phase::Pre, 0 });
                                 pushed = true;
                                 break;
                             }
@@ -3273,13 +3391,13 @@ namespace fdf
                             Entry* c = children[f.idx++];
                             if(c->IsContainer() && c->type == Type::Map)
                             {
-                                stack.push(Frame{ c, Phase::Pre, 0 });
+                                stack.push_back(Frame{ c, Phase::Pre, 0 });
                                 pushed = true;
                                 break;
                             }
                         }
                         if(!pushed)
-                            stack.pop();
+                            stack.pop_back();
                         break;
                     }
                     default:
@@ -3340,25 +3458,31 @@ namespace fdf
                 return;
             }
             
-            std::stack<const Entry*> stack;
+            std::vector<const Entry*> stack;
             if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
             {
-                stack.push(this);
+                stack.push_back(this);
             }
             else
             {
-                for(const Entry* child : std::ranges::reverse_view(GetChildren_INTERNAL()))
-                    stack.push(child);
+                {
+                    const auto reverseChildren = GetChildren_INTERNAL();
+                    for(size_t ci = reverseChildren.size(); ci-- > 0; )
+                        stack.push_back(reverseChildren[ci]);
+                }
             }
 
             while(!stack.empty())
             {
-                const Entry* current = stack.top();
-                stack.pop();
+                const Entry* current = stack.back();
+                stack.pop_back();
                 callback(*current);
 
-                for(const Entry* child : std::ranges::reverse_view(current->GetChildren()))
-                    stack.push(child);
+                {
+                    const auto reverseChildren = current->GetChildren();
+                    for(size_t ci = reverseChildren.size(); ci-- > 0; )
+                        stack.push_back(reverseChildren[ci]);
+                }
             }
         }
         else if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::Recursive | ForEachFlags::Group))
@@ -3371,15 +3495,15 @@ namespace fdf
                 return;
             }
             
-            enum class Phase : uint8_t { Pre, Leaf, Array, Map };
+            enum class Phase : uint8_t { Pre, InOrder, Leaf, Array, Map };
             struct Frame { const Entry* e; Phase phase; uint32_t idx;};
         
-            std::stack<Frame> stack;
-            stack.push(Frame{ this, Phase::Pre, 0 });
+            std::vector<Frame> stack;
+            stack.push_back(Frame{ this, Phase::Pre, 0 });
         
             while(!stack.empty())
             {
-                Frame& f = stack.top();
+                Frame& f = stack.back();
                 switch(f.phase)
                 {
                     case Phase::Pre:
@@ -3394,7 +3518,28 @@ namespace fdf
                                 callback(*f.e);
                         }
             
-                        f.phase = Phase::Leaf;
+                        // Arrays are positional: emit children in order. Maps group by type
+                        f.phase = f.e->type == Type::Array? Phase::InOrder : Phase::Leaf;
+                        break;
+                    }
+                    case Phase::InOrder:
+                    {
+                        auto children = f.e->GetChildren_INTERNAL();
+                        bool pushed = false;
+                        while(f.idx < children.size())
+                        {
+                            auto* c = children[f.idx++];
+                            if(!c->IsContainer())
+                            {
+                                callback(*c);
+                                continue;
+                            }
+                            stack.push_back(Frame{ c, Phase::Pre, 0 });
+                            pushed = true;
+                            break;
+                        }
+                        if(!pushed)
+                            stack.pop_back();
                         break;
                     }
                     case Phase::Leaf:
@@ -3417,7 +3562,7 @@ namespace fdf
                             const Entry* c = children[f.idx++];
                             if(c->IsContainer() && c->type == Type::Array)
                             {
-                                stack.push(Frame{ c, Phase::Pre, 0 });
+                                stack.push_back(Frame{ c, Phase::Pre, 0 });
                                 pushed = true;
                                 break;
                             }
@@ -3438,13 +3583,13 @@ namespace fdf
                             const Entry* c = children[f.idx++];
                             if(c->IsContainer() && c->type == Type::Map)
                             {
-                                stack.push(Frame{ c, Phase::Pre, 0 });
+                                stack.push_back(Frame{ c, Phase::Pre, 0 });
                                 pushed = true;
                                 break;
                             }
                         }
                         if(!pushed)
-                            stack.pop();
+                            stack.pop_back();
                         break;
                     }
                     default:
@@ -3470,7 +3615,7 @@ namespace fdf
             return std::span<bool>();
         if consteval
             { return std::span(GetDataAs<bool>(), size); }
-        return std::span(static_cast<bool*>(data), size);
+        return std::span(static_cast<bool*>(data.raw), size);
     }
 
     template<>
@@ -3480,7 +3625,7 @@ namespace fdf
             return std::span<int64_t>();
         if consteval
             { return std::span(*GetDataVector<int64_t>()); }
-        return std::span(static_cast<int64_t*>(data), size);
+        return std::span(static_cast<int64_t*>(data.raw), size);
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<int>() noexcept  { return GetValue<int64_t>(); }
@@ -3492,7 +3637,7 @@ namespace fdf
             return std::span<uint64_t>();
         if consteval
             { return std::span(*GetDataVector<uint64_t>()); }
-        return std::span(static_cast<uint64_t*>(data), size);
+        return std::span(static_cast<uint64_t*>(data.raw), size);
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<unsigned int>() noexcept  { return GetValue<uint64_t>(); }
@@ -3504,7 +3649,7 @@ namespace fdf
             return std::span<double>();
         if consteval
             { return std::span(*GetDataVector<double>()); }
-        return std::span(static_cast<double*>(data), size);
+        return std::span(static_cast<double*>(data.raw), size);
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<float>() noexcept  { return GetValue<double>(); }
@@ -3516,7 +3661,7 @@ namespace fdf
             return std::string_view();
         if consteval
             { return std::string_view(*GetDataAs<std::string>()); }
-        return std::string_view((static_cast<char*>(data) + sizeof(uint32_t)), size);
+        return std::string_view((static_cast<char*>(data.raw) + sizeof(uint32_t)), size);
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<std::string>() noexcept  { return GetValue<char>(); }
@@ -3526,6 +3671,12 @@ namespace fdf
     [[nodiscard]] constexpr auto Entry::GetValue<char*>() noexcept  { return GetValue<char>(); }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<const char*>() noexcept  { return GetValue<char>(); }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<Timestamp>() noexcept
+    {
+        return type == Type::Timestamp? Timestamp::FromText(GetValue<std::string_view>()) : Timestamp{};
+    }
 
 
 
@@ -3537,7 +3688,7 @@ namespace fdf
             return std::span<const bool>();
         if consteval
             { return std::span(GetDataAs<bool>(), size); }
-        return std::span(static_cast<const bool*>(data), size);
+        return std::span(static_cast<const bool*>(data.raw), size);
     }
 
     template<>
@@ -3547,7 +3698,7 @@ namespace fdf
             return std::span<const int64_t>();
         if consteval
             { return std::span(*GetDataVector<int64_t>()); }
-        return std::span(static_cast<const int64_t*>(data), size);
+        return std::span(static_cast<const int64_t*>(data.raw), size);
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<int>() const noexcept  { return GetValue<int64_t>(); }
@@ -3559,7 +3710,7 @@ namespace fdf
             return std::span<const uint64_t>();
         if consteval
             { return std::span(*GetDataVector<uint64_t>()); }
-        return std::span(static_cast<const uint64_t*>(data), size);
+        return std::span(static_cast<const uint64_t*>(data.raw), size);
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<unsigned int>() const noexcept  { return GetValue<uint64_t>(); }
@@ -3571,7 +3722,7 @@ namespace fdf
             return std::span<const double>();
         if consteval
             { return std::span(*GetDataVector<double>()); }
-        return std::span(static_cast<const double*>(data), size);
+        return std::span(static_cast<const double*>(data.raw), size);
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<float>() const noexcept  { return GetValue<double>(); }
@@ -3583,7 +3734,7 @@ namespace fdf
             return std::string_view();
         if consteval
             { return std::string_view(*GetDataAs<std::string>()); }
-        return std::string_view((static_cast<const char*>(data) + sizeof(uint32_t)), size);
+        return std::string_view((static_cast<const char*>(data.raw) + sizeof(uint32_t)), size);
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<std::string>() const noexcept  { return GetValue<char>(); }
@@ -3593,9 +3744,15 @@ namespace fdf
     [[nodiscard]] constexpr auto Entry::GetValue<char*>() const noexcept  { return GetValue<char>(); }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<const char*>() const noexcept  { return GetValue<char>(); }
-    
-    
-    
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<Timestamp>() const noexcept
+    {
+        return type == Type::Timestamp? Timestamp::FromText(GetValue<std::string_view>()) : Timestamp{};
+    }
+
+
+
     
     
     
@@ -3611,59 +3768,86 @@ namespace fdf
         type = _type;
     }
     
-    //TODO Implement
-    /*constexpr void Entry::Resize(const uint32_t _size) noexcept
+    // Resize only applies to numeric scalar arrays. Existing elements are preserved, new ones zero-filled
+    constexpr void Entry::Resize(const uint32_t _size) noexcept
     {
+        switch(type)
+        {
+        case Type::Bool:
+        case Type::Int:
+        case Type::UInt:
+        case Type::Float:
+        case Type::Version:
+            break;
+        default:
+            return;
+        }
+
         if(size == _size)
             return;
-        
-        if(type == Type::Bool)
+
+        // Bool stores a raw bool[] at compile time (not a vector), so it needs its own consteval branch
+        if(type == Type::Bool && std::is_constant_evaluated())
+        {
+            bool* newData = _size? new (std::nothrow) bool[_size] : nullptr;
+            assert((_size == 0 || newData) && "Allocation shouldn't fail");
+            uint32_t i = 0;
+            if(data.boolArray)
+            {
+                for(; i < std::min(size, _size); i++)
+                    newData[i] = GetDataAs<bool>()[i];
+                delete[] GetDataAs<bool>();
+            }
+            for(; i < _size; i++)
+                newData[i] = false;
+
+            data.boolArray = newData;
+            size = _size;
+            return;
+        }
+
+        auto resize = [&]<typename T>() noexcept
         {
             if consteval
             {
-                bool* _data = new (std::nothrow) bool[_size];
-                assert(_data && "Allocation shouldn't fail");
-                uint32_t i = 0;
-                for(; i < std::min(size, _size); i++)
-                    _data[i] = GetDataAs<bool>()[i];
-                for(; i < _size; i++)
-                    _data[i] = false;
-                
-                delete[] GetDataAs<bool>();
-                data = _data;
-                size = _size;
+                // Bool's consteval path (raw bool[]) is handled above; this lambda only runs for bool at runtime
+                if constexpr(!std::is_same_v<T, bool>)
+                {
+                    if(!GetDataVector<T>())
+                    {
+                        GetDataVector<T>() = new (std::nothrow) std::vector<T>();
+                        assert(GetDataVector<T>() && "Allocation shouldn't fail");
+                    }
+                    GetDataVector<T>()->resize(_size);
+                }
             }
             else
             {
-                void* _data = detail::GlobalAllocator::Allocate(_size * sizeof(bool));
+                void* newData = _size? detail::GlobalAllocator::Allocate(_size * sizeof(T)) : nullptr;
                 uint32_t i = 0;
-                for(; i < std::min(size, _size); i++)
-                    static_cast<bool*>(_data)[i] = static_cast<bool*>(data)[i];
+                if(data.raw)
+                {
+                    for(; i < std::min(size, _size); i++)
+                        static_cast<T*>(newData)[i] = static_cast<T*>(data.raw)[i];
+                    detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(T));
+                }
                 for(; i < _size; i++)
-                    static_cast<bool*>(_data)[i] = false;
-                
-                detail::GlobalAllocator::Deallocate(data, size);
-                data = _data;
-                size = _size;
+                    static_cast<T*>(newData)[i] = T{};
+                data.raw = newData;
             }
-        }
-        else if(type == Type::Int)
+        };
+
+        switch(type)
         {
-            
+        case Type::Bool:                    resize.operator()<bool>();     break;  // runtime only (consteval handled above)
+        case Type::Int:                     resize.operator()<int64_t>();  break;
+        case Type::UInt: case Type::Version: resize.operator()<uint64_t>(); break;
+        case Type::Float:                   resize.operator()<double>();   break;
+        default:                                                           break;
         }
-        else if(type == Type::UInt)
-        {
-            
-        }
-        else if(type == Type::Float)
-        {
-            
-        }
-        else if(type == Type::Version)
-        {
-            size = _size;
-        }
-    }*/
+
+        size = _size;
+    }
     
     
     
@@ -3698,14 +3882,14 @@ namespace fdf
         size = 1;
         if consteval
         {
-            data = new (std::nothrow) bool[1];
-            assert(data && "Allocation shouldn't fail");
+            data.boolArray = new (std::nothrow) bool[1];
+            assert(data.boolArray && "Allocation shouldn't fail");
             *GetDataAs<bool>() = value;
         }
         else
         {
-            data = detail::GlobalAllocator::Allocate(sizeof(bool));
-            static_cast<bool*>(data)[0] = value;
+            data.raw = detail::GlobalAllocator::Allocate(sizeof(bool));
+            static_cast<bool*>(data.raw)[0] = value;
         }
     }
     
@@ -3716,15 +3900,15 @@ namespace fdf
         size = 1;
         if consteval
         {
-            data = new (std::nothrow) std::vector<int64_t>();
-            assert(data && "Allocation shouldn't fail");
+            data.vInt = new (std::nothrow) std::vector<int64_t>();
+            assert(data.vInt && "Allocation shouldn't fail");
             GetDataVector<int64_t>()->resize(size);
             (*GetDataVector<int64_t>())[0] = static_cast<int64_t>(value);
         }
         else
         {
-            data = detail::GlobalAllocator::Allocate(size * sizeof(int64_t));
-            static_cast<int64_t*>(data)[0] = static_cast<int64_t>(value);
+            data.raw = detail::GlobalAllocator::Allocate(size * sizeof(int64_t));
+            static_cast<int64_t*>(data.raw)[0] = static_cast<int64_t>(value);
         }
     }
     
@@ -3735,15 +3919,15 @@ namespace fdf
         size = 1;
         if consteval
         {
-            data = new (std::nothrow) std::vector<uint64_t>();
-            assert(data && "Allocation shouldn't fail");
+            data.vUInt = new (std::nothrow) std::vector<uint64_t>();
+            assert(data.vUInt && "Allocation shouldn't fail");
             GetDataVector<uint64_t>()->resize(size);
             (*GetDataVector<uint64_t>())[0] = static_cast<uint64_t>(value);
         }
         else
         {
-            data = detail::GlobalAllocator::Allocate(size * sizeof(uint64_t));
-            static_cast<uint64_t*>(data)[0] = static_cast<uint64_t>(value);
+            data.raw = detail::GlobalAllocator::Allocate(size * sizeof(uint64_t));
+            static_cast<uint64_t*>(data.raw)[0] = static_cast<uint64_t>(value);
         }
     }
     
@@ -3754,15 +3938,15 @@ namespace fdf
         size = 1;
         if consteval
         {
-            data = new (std::nothrow) std::vector<double>();
-            assert(data && "Allocation shouldn't fail");
+            data.vFloat = new (std::nothrow) std::vector<double>();
+            assert(data.vFloat && "Allocation shouldn't fail");
             GetDataVector<double>()->resize(size);
             (*GetDataVector<double>())[0] = static_cast<double>(value);
         }
         else
         {
-            data = detail::GlobalAllocator::Allocate(size * sizeof(double));
-            static_cast<double*>(data)[0] = static_cast<double>(value);
+            data.raw = detail::GlobalAllocator::Allocate(size * sizeof(double));
+            static_cast<double*>(data.raw)[0] = static_cast<double>(value);
         }
     }
     
@@ -3773,16 +3957,16 @@ namespace fdf
         type = Type::String;
         if consteval
         {
-            data = new (std::nothrow) std::string();
-            assert(data && "Allocation shouldn't fail");
+            data.str = new (std::nothrow) std::string();
+            assert(data.str && "Allocation shouldn't fail");
             (*GetDataAs<std::string>()) = value;
         }
         else
         {
-            data = detail::GlobalAllocator::Allocate(size + 1 + sizeof(uint32_t));
-            *static_cast<uint32_t*>(data) = size;
-            detail::constexpr_memcpy((static_cast<char*>(data) + sizeof(uint32_t)), value.data(), value.size() + 1);
-            (static_cast<char*>(data) + sizeof(uint32_t))[value.size()] = '\0';
+            data.raw = detail::GlobalAllocator::Allocate(size + 1 + sizeof(uint32_t));
+            *static_cast<uint32_t*>(data.raw) = size;
+            detail::constexpr_memcpy((static_cast<char*>(data.raw) + sizeof(uint32_t)), value.data(), value.size() + 1);
+            (static_cast<char*>(data.raw) + sizeof(uint32_t))[value.size()] = '\0';
         }
     }
     
@@ -3794,6 +3978,27 @@ namespace fdf
     constexpr void Entry::SetValue(const char* value) noexcept
     {
         SetValue(std::string_view(value));
+    }
+
+    constexpr void Entry::SetValue(const Timestamp& value) noexcept
+    {
+        ReleaseData();
+        std::string text;
+        value.AppendTo(text);
+        type = Type::Timestamp;
+        size = static_cast<uint32_t>(text.size());
+        if consteval
+        {
+            data.str = new (std::nothrow) std::string(std::move(text));
+            assert(data.str && "Allocation shouldn't fail");
+        }
+        else
+        {
+            data.raw = detail::GlobalAllocator::Allocate(size + 1 + sizeof(uint32_t));
+            *static_cast<uint32_t*>(data.raw) = size;
+            detail::constexpr_memcpy((static_cast<char*>(data.raw) + sizeof(uint32_t)), text.data(), size);
+            (static_cast<char*>(data.raw) + sizeof(uint32_t))[size] = '\0';
+        }
     }
     
     
@@ -3807,16 +4012,16 @@ namespace fdf
         size = static_cast<uint32_t>(std::max(0ULL, value.size()));
         if consteval
         {
-            data = new (std::nothrow) bool[size];
-            assert(data && "Allocation shouldn't fail");
+            data.boolArray = new (std::nothrow) bool[size];
+            assert(data.boolArray && "Allocation shouldn't fail");
             for(size_t i = 0; i < size; i++)
                 *(GetDataAs<bool>() + 1) = value[i];
         }
         else
         {
-            data = detail::GlobalAllocator::Allocate(size * sizeof(bool));
+            data.raw = detail::GlobalAllocator::Allocate(size * sizeof(bool));
             for(size_t i = 0; i < size; i++)
-                static_cast<bool*>(data)[i] = value[i];
+                static_cast<bool*>(data.raw)[i] = value[i];
         }
     }
     
@@ -3830,17 +4035,17 @@ namespace fdf
             return;
         if consteval
         {
-            data = new (std::nothrow) std::vector<int64_t>();
-            assert(data && "Allocation shouldn't fail");
+            data.vInt = new (std::nothrow) std::vector<int64_t>();
+            assert(data.vInt && "Allocation shouldn't fail");
             GetDataVector<int64_t>()->resize(size);
             for(size_t i = 0; i < size; i++)
                 (*GetDataVector<int64_t>())[i] = static_cast<int64_t>(value[i]);
         }
         else
         {
-            data = detail::GlobalAllocator::Allocate(size * sizeof(int64_t));
+            data.raw = detail::GlobalAllocator::Allocate(size * sizeof(int64_t));
             for(size_t i = 0; i < size; i++)
-                static_cast<int64_t*>(data)[i] = static_cast<int64_t>(value[i]);
+                static_cast<int64_t*>(data.raw)[i] = static_cast<int64_t>(value[i]);
         }
     }
     
@@ -3854,17 +4059,17 @@ namespace fdf
             return;
         if consteval
         {
-            data = new (std::nothrow) std::vector<uint64_t>();
-            assert(data && "Allocation shouldn't fail");
+            data.vUInt = new (std::nothrow) std::vector<uint64_t>();
+            assert(data.vUInt && "Allocation shouldn't fail");
             GetDataVector<uint64_t>()->resize(size);
             for(size_t i = 0; i < size; i++)
                 (*GetDataVector<uint64_t>())[i] = static_cast<uint64_t>(value[i]);
         }
         else
         {
-            data = detail::GlobalAllocator::Allocate(size * sizeof(uint64_t));
+            data.raw = detail::GlobalAllocator::Allocate(size * sizeof(uint64_t));
             for(size_t i = 0; i < size; i++)
-                static_cast<uint64_t*>(data)[i] = static_cast<uint64_t>(value[i]);
+                static_cast<uint64_t*>(data.raw)[i] = static_cast<uint64_t>(value[i]);
         }
     }
     
@@ -3877,21 +4082,21 @@ namespace fdf
         size = static_cast<uint32_t>(std::max(0ULL, value.size()));
         if consteval
         {
-            data = new (std::nothrow) std::vector<uint64_t>();
-            assert(data && "Allocation shouldn't fail");
+            data.vUInt = new (std::nothrow) std::vector<uint64_t>();
+            assert(data.vUInt && "Allocation shouldn't fail");
             GetDataVector<uint64_t>()->resize(4, 0ULL);
             for(size_t i = 0; i < size; i++)
                 (*GetDataVector<uint64_t>())[i] = static_cast<uint64_t>(value[i]);
         }
         else
         {
-            data = detail::GlobalAllocator::Allocate(4 * sizeof(uint64_t));
-            static_cast<uint64_t*>(data)[0] = 0ULL;
-            static_cast<uint64_t*>(data)[1] = 0ULL;
-            static_cast<uint64_t*>(data)[2] = 0ULL;
-            static_cast<uint64_t*>(data)[3] = 0ULL;
+            data.raw = detail::GlobalAllocator::Allocate(4 * sizeof(uint64_t));
+            static_cast<uint64_t*>(data.raw)[0] = 0ULL;
+            static_cast<uint64_t*>(data.raw)[1] = 0ULL;
+            static_cast<uint64_t*>(data.raw)[2] = 0ULL;
+            static_cast<uint64_t*>(data.raw)[3] = 0ULL;
             for(size_t i = 0; i < size; i++)
-                static_cast<uint64_t*>(data)[i] = static_cast<uint64_t>(value[i]);
+                static_cast<uint64_t*>(data.raw)[i] = static_cast<uint64_t>(value[i]);
         }
     }
     
@@ -3905,17 +4110,17 @@ namespace fdf
             return;
         if consteval
         {
-            data = new (std::nothrow) std::vector<double>();
-            assert(data && "Allocation shouldn't fail");
+            data.vFloat = new (std::nothrow) std::vector<double>();
+            assert(data.vFloat && "Allocation shouldn't fail");
             GetDataVector<double>()->resize(size);
             for(size_t i = 0; i < size; i++)
                 (*GetDataVector<double>())[i] = static_cast<double>(value[i]);
         }
         else
         {
-            data = detail::GlobalAllocator::Allocate(size * sizeof(double));
+            data.raw = detail::GlobalAllocator::Allocate(size * sizeof(double));
             for(size_t i = 0; i < size; i++)
-                static_cast<double*>(data)[i] = static_cast<double>(value[i]);
+                static_cast<double*>(data.raw)[i] = static_cast<double>(value[i]);
         }
     }
 
@@ -3947,14 +4152,19 @@ namespace fdf
             
             case Type::Hex:
             {
-                const std::string_view view = GetValue<char>();
-                if constexpr(STYLE.bUppercaseHex)
+                // Stored as "0x" + digits, no terminator. Keep the "0x" prefix lowercase (the lexer only
+                // accepts a lowercase x), case the digits per style, and re-append the '#' terminator
+                temp = GetValue<char>();
+                for(size_t i = 2; i < temp.size(); i++)
                 {
-                    temp = view;
-                    std::ranges::transform(temp, temp.begin(), [](char c)  { return static_cast<char>(std::toupper(c)); });
-                    return temp;
+                    const char c = temp[i];
+                    if constexpr(STYLE.bUppercaseHex)
+                        { if(c >= 'a' && c <= 'f') temp[i] = static_cast<char>(c - 32); }
+                    else
+                        { if(c >= 'A' && c <= 'F') temp[i] = static_cast<char>(c + 32); }
                 }
-                return view;
+                temp.push_back('#');
+                return temp;
             }
 
             case Type::Version:
@@ -3976,9 +4186,12 @@ namespace fdf
                 const auto span = GetValue<bool>();
                 if(span.empty())
                     return {};
-                temp = std::format("{}", (span[0]? detail::KEYWORDS[2] : detail::KEYWORDS[3]));
-                for(size_t i = 1; i < span.size(); i++)
-                    temp = std::format("{}x{}", temp, (span[i]? detail::KEYWORDS[2] : detail::KEYWORDS[3]));
+                temp.clear();
+                for(size_t i = 0; i < span.size(); i++)
+                {
+                    if(i) temp.push_back('x');
+                    temp.append(span[i]? detail::KEYWORDS[2] : detail::KEYWORDS[3]);
+                }
                 return temp;
             }
 
@@ -3991,7 +4204,7 @@ namespace fdf
                 for(size_t i = 0; i < span.size(); i++)
                 {
                     if(i) temp.push_back('x');
-                    detail::AppendUInt(temp, span[i]);
+                    detail::AppendInt(temp, span[i]);
                 }
                 return temp;
             }
@@ -4005,19 +4218,13 @@ namespace fdf
                 for(size_t i = 0; i < span.size(); i++)
                 {
                     if(i) temp.push_back('x');
-                    detail::AppendInt(temp, span[i]);
+                    detail::AppendUInt(temp, span[i]);
                 }
                 return temp;
             }
 
             case Type::Float:
             {
-                auto formatFn = [](double value) -> std::string
-                {
-                    if(static_cast<int>(value) == value)
-                        return std::format("{:.1f}", value);
-                    return std::format("{}", value);
-                };
                 const auto span = GetValue<float>();
                 if(span.empty())
                     return {};
@@ -4076,7 +4283,7 @@ namespace fdf
         return Combine(other, fileCommentCombineStrategy);
     }
     
-    constexpr bool Entry::Combine(UniqueEntryPtr& other, CommentCombineStrategy fileCommentCombineStrategy) noexcept
+    constexpr bool Entry::Combine(UniqueEntryPtr& other, [[maybe_unused]] CommentCombineStrategy fileCommentCombineStrategy) noexcept
     {
         if(!IsContainer() || type != other->type)
             return false;
@@ -4094,7 +4301,14 @@ namespace fdf
             if(GetComment().empty())
                 SetComment(other->GetComment());
             else if(!other->GetComment().empty())
-                SetComment((std::string(GetComment()) + '\n').append(other->GetComment()));  //TODO: Maybe optimize
+            {
+                const std::string_view existing = GetComment();
+                const std::string_view incoming = other->GetComment();
+                std::string merged;
+                merged.reserve(existing.size() + 1 + incoming.size());
+                merged.append(existing).append(1, '\n').append(incoming);
+                SetComment(merged);
+            }
             break;
         case CommentCombineStrategy::Clear: ReleaseComment(); break;
         default: std::unreachable();
@@ -4105,15 +4319,9 @@ namespace fdf
     }
     
     
-
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<Timestamp>() const noexcept
-    {
-        return type == Type::Timestamp? Timestamp::FromText(GetValue<std::string_view>()) : Timestamp{};
-    }
-
-
-
+    
+    
+    
     template<auto DIAGNOSTIC_CALLBACK>
     UniqueEntryPtr ParseFile(const std::filesystem::path& filepath) noexcept
     {
@@ -4214,8 +4422,71 @@ namespace fdf::detail
     }
 
     template<auto DIAGNOSTIC_CALLBACK>
+    constexpr void Utils<DIAGNOSTIC_CALLBACK>::Diagnose(DiagnosticSeverity severity, DiagnosticType type, const Tokenizer& tokenizer, const Token& token) noexcept
+    {
+        if constexpr(!std::is_null_pointer_v<std::remove_cvref_t<decltype(DIAGNOSTIC_CALLBACK)>>)
+        {
+            static_assert(IsValidDiagnosticCallback<decltype(DIAGNOSTIC_CALLBACK)>, "DIAGNOSTIC_CALLBACK must be invocable with (const Diagnostic&)");
+            DIAGNOSTIC_CALLBACK(Diagnostic{ severity, type, tokenizer.ToView(token), token.line, token.column, token.startPosition });
+        }
+    }
+
+    // Skip tokens until the next entry boundary so parsing can resume after a malformed entry
+    // Brace-depth aware so it behaves the same for single-line and multi-line containers: a
+    // comma or newline at depth 0 separates entries, a close brace at depth 0 ends the container
+    // When bStopAtCloseBrace, that close brace is left for the caller's container loop to consume
+    template<auto DIAGNOSTIC_CALLBACK>
+    constexpr void Utils<DIAGNOSTIC_CALLBACK>::SkipToNextEntry(Tokenizer& tokenizer, bool bStopAtCloseBrace) noexcept
+    {
+        uint32_t depth = 0;
+        while(true)
+        {
+            const Token current = tokenizer.Current();
+            switch(current.type)
+            {
+            case TokenType::EndOfFile:
+            case TokenType::Invalid:
+                return;
+            case TokenType::CurlyBraceOpen:
+            case TokenType::SquareBraceOpen:
+                depth++;
+                break;
+            case TokenType::CurlyBraceClose:
+            case TokenType::SquareBraceClose:
+                if(depth == 0)
+                {
+                    if(bStopAtCloseBrace)
+                        return;  // belongs to the enclosing container, let its loop handle it
+                }
+                else
+                    depth--;
+                break;
+            case TokenType::Comma:
+            case TokenType::NewLine:
+                if(depth == 0)
+                {
+                    (void)tokenizer.Advance();  // consume the separator, resume at the next entry
+                    return;
+                }
+                break;
+            default:
+                break;
+            }
+
+            (void)tokenizer.Advance();
+        }
+    }
+
+    template<auto DIAGNOSTIC_CALLBACK>
     constexpr UniqueEntryPtr Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(std::string_view content) noexcept
     {
+        // Strip UTF-8 BOM if present
+        if(content.size() >= 3 &&
+           static_cast<uint8_t>(content[0]) == 0xEF &&
+           static_cast<uint8_t>(content[1]) == 0xBB &&
+           static_cast<uint8_t>(content[2]) == 0xBF)
+            content = content.substr(3);
+
         Tokenizer tokenizer(content);
         #if !FDF_NO_COMMENTS
             Token fileCommentToken = TokenType::NonExisting;
@@ -4234,15 +4505,16 @@ namespace fdf::detail
             Token currentToken = tokenizer.Current();
             if(currentToken.type == TokenType::Invalid)
             {
+                Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(currentToken.extra8), tokenizer, currentToken);
                 return nullptr;
             }
-        
+
             while(currentToken.type == TokenType::Comment || currentToken.type == TokenType::NewLine)
             {
             #if !FDF_NO_COMMENTS
                 if(currentToken.type == TokenType::Comment)
                 {
-                    if(root->size == 0 && root->comment == nullptr && currentToken.count > 0 && content[currentToken.startPosition] == '#')
+                    if(root->size == 0 && root->comment.str == nullptr && currentToken.count > 0 && content[currentToken.startPosition] == '#')
                     {
                         std::string_view sv = tokenizer.ToView(currentToken);
                         size_t firstChar = sv.find_first_not_of("# ");
@@ -4262,16 +4534,14 @@ namespace fdf::detail
                             }
                         }
         
-                        //if(fileCommentToken.type != TokenType::NonExisting)
-                        //    if(!DIAGNOSTIC_CALLBACK(Error::AlreadyHasComment, std::format("File already has a comment\nOld Comment: \"{}\" ({}:{})\nNew Comment: \"{}\" ({}:{})", fileCommentToken.ToView(content), fileCommentToken.line, fileCommentToken.column, currentToken.ToView(content), currentToken.line, currentToken.column)))
-                        //        return false;
+                        if(fileCommentToken.type != TokenType::NonExisting)
+                            Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
                         fileCommentToken = currentToken;
                     }
                     else
                     {
-                        //if(comment.type != TokenType::NonExisting)
-                        //    if(!DIAGNOSTIC_CALLBACK(Error::AlreadyHasComment, std::format("Token already has a comment\nOld Comment: \"{}\" ({}:{})\nNew Comment: \"{}\" ({}:{})", comment.ToView(content), comment.line, comment.column, currentToken.ToView(content), currentToken.line, currentToken.column)))
-                        //        return false;
+                        if(comment.type != TokenType::NonExisting)
+                            Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
                         comment = currentToken;
                     }
                 }
@@ -4282,18 +4552,30 @@ namespace fdf::detail
         
             if(currentToken.type == TokenType::Identifier)
             {
+                const uint32_t childCountBefore = root->GetChildCount();
                 if(!ParseVariable(tokenizer, *root   FDF_COMMENT_SWITCH(,comment)))
                 {
-                    return nullptr;
+                    // Drop the half-built entry, report it, and resume at the next line
+                    while(root->GetChildCount() > childCountBefore)
+                        (void)root->RemoveChild(root->GetChildCount() - 1);
+
+                    if(tokenizer.Current().type == TokenType::Invalid)
+                    {
+                        Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(tokenizer.Current().extra8), tokenizer, tokenizer.Current());
+                        return nullptr;  // Lexer error: can't reliably resume
+                    }
+                    SkipToNextEntry(tokenizer, false);  // ParseVariable already reported the error
                 }
-        
+
                 continue;
             }
-            
+
             if(currentToken.type == TokenType::EndOfFile)
                 break;
-        
-            return nullptr;  // First token can't be anything else
+
+            // A top-level line must start with an identifier; report and skip it
+            Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken);
+            SkipToNextEntry(tokenizer, false);
         }
 
         #if !FDF_NO_COMMENTS
@@ -4303,8 +4585,8 @@ namespace fdf::detail
                 std::string_view view = tokenizer.ToView(fileCommentToken);
                 if consteval
                 {
-                    root->comment = new (std::nothrow) std::string();
-                    assert(root->comment && "Allocation shouldn't fail");
+                    root->comment.str = new (std::nothrow) std::string();
+                    assert(root->comment.str && "Allocation shouldn't fail");
                     root->GetCommentString()->reserve(view.size());
                     
                     bool bAfterNewLine = true;
@@ -4318,12 +4600,6 @@ namespace fdf::detail
                             root->GetCommentString()->push_back(c);
                             bAfterNewLine = false;
                         }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<Timestamp>() noexcept
-    {
-        return type == Type::Timestamp? Timestamp::FromText(GetValue<std::string_view>()) : Timestamp{};
-    }
-
                         else
                         {
                             root->GetCommentString()->push_back(c);
@@ -4333,7 +4609,7 @@ namespace fdf::detail
                 }
                 else
                 {
-                    root->comment = static_cast<Entry::CommentControlBlock*>(GlobalAllocator::Allocate(view.size() + sizeof(Entry::CommentControlBlock) + 1));
+                    root->comment.raw = GlobalAllocator::Allocate(view.size() + sizeof(Entry::CommentControlBlock) + 1);
                     root->GetCommentControlBlock()->capacity = static_cast<uint32_t>(view.size());
                     root->GetCommentControlBlock()->size = 0;
 
@@ -4377,7 +4653,10 @@ namespace fdf::detail
         {
             assert(tokenizer.Current().type == TokenType::Identifier && "Sanity check!");
             if(!entry->SetIdentifier(tokenizer.ToView(currentToken)))
-                return false; // TODO: report too long identifier and continue?
+            {
+                Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidIdentifier, tokenizer, currentToken);
+                return false;  // caller recovers: skips to the next entry
+            }
             currentToken = tokenizer.Advance();
         }
 
@@ -4399,9 +4678,8 @@ namespace fdf::detail
         #if !FDF_NO_COMMENTS
             if(currentToken.type == TokenType::Comment)
             {
-                //if(comment.type != TokenType::NonExisting)
-                //    if(!DIAGNOSTIC_CALLBACK(Error::AlreadyHasComment, std::format("Token already has a comment\nOld Comment: \"{}\" ({}:{})\nNew Comment: \"{}\" ({}:{})", comment.ToView(content), comment.line, comment.column, currentToken.ToView(content), currentToken.line, currentToken.column)))
-                //        return false;
+                if(comment.type != TokenType::NonExisting)
+                    Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
                 comment = currentToken;
             }
         #endif
@@ -4413,12 +4691,20 @@ namespace fdf::detail
         
         if(IsValueLiteral(currentToken.type) && (bHasEqual || parent.type == Type::Array))
             return ParseSimpleValue(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
+
+        // '=' introduces a scalar value only; a container must follow the identifier directly
+        if(bHasEqual && (currentToken.type == TokenType::CurlyBraceOpen || currentToken.type == TokenType::SquareBraceOpen))
+        {
+            Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken);
+            return false;
+        }
         if(currentToken.type == TokenType::CurlyBraceOpen)
             return ParseMap(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
         if(currentToken.type == TokenType::SquareBraceOpen)
             return ParseArray(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
-    
-        return false;  // Something we didn't process yet?
+
+        Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken);
+        return false;  // unhandled token
     }
     template<auto DIAGNOSTIC_CALLBACK>
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseSimpleValue(Tokenizer& tokenizer, Entry& entry    FDF_COMMENT_SWITCH(, Token comment)) noexcept
@@ -4441,9 +4727,8 @@ namespace fdf::detail
             if(currentToken.type == TokenType::Comment)
             {
             #if !FDF_NO_COMMENTS
-                //if(comment.type != TokenType::NonExisting)
-                //    if(!DIAGNOSTIC_CALLBACK(Error::AlreadyHasComment, std::format("Token already has a comment\nOld Comment: \"{}\" ({}:{})\nNew Comment: \"{}\" ({}:{})", comment.ToView(content), comment.line, comment.column, currentToken.ToView(content), currentToken.line, currentToken.column)))
-                //        return false;
+                if(comment.type != TokenType::NonExisting)
+                    Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
                 comment = currentToken;
             #endif
                 currentToken = tokenizer.Advance();
@@ -4472,14 +4757,14 @@ namespace fdf::detail
                 entry.size = 1;
                 if consteval
                 {
-                    entry.data = new (std::nothrow) bool[1];
-                    assert(entry.data && "Allocation shouldn't fail");
+                    entry.data.boolArray = new (std::nothrow) bool[1];
+                    assert(entry.data.boolArray && "Allocation shouldn't fail");
                     *entry.GetDataAs<bool>() = currentToken.extra8 == 2;
                 }
                 else
                 {
-                    entry.data = GlobalAllocator::Allocate(sizeof(bool));
-                    static_cast<bool*>(entry.data)[0] = currentToken.extra8 == 2;
+                    entry.data.raw = GlobalAllocator::Allocate(sizeof(bool));
+                    static_cast<bool*>(entry.data.raw)[0] = currentToken.extra8 == 2;
                 }
                 return postProcess();
             }
@@ -4492,12 +4777,12 @@ namespace fdf::detail
                 entry.size = static_cast<uint32_t>(std::ranges::count(mdBool, 'x')) + 1;
                 if consteval
                 {
-                    entry.data = new (std::nothrow) bool[entry.size];
-                    assert(entry.data && "Allocation shouldn't fail");
+                    entry.data.boolArray = new (std::nothrow) bool[entry.size];
+                    assert(entry.data.boolArray && "Allocation shouldn't fail");
                 }
                 else
                 {
-                    entry.data = GlobalAllocator::Allocate(entry.size * sizeof(bool));
+                    entry.data.raw = GlobalAllocator::Allocate(entry.size * sizeof(bool));
                 }
                 
                 size_t cur = 0;
@@ -4516,7 +4801,7 @@ namespace fdf::detail
                         if consteval
                             { entry.GetDataAs<bool>()[cur++] = true; }
                         else
-                            { static_cast<bool*>(entry.data)[cur++] = true; }
+                            { static_cast<bool*>(entry.data.raw)[cur++] = true; }
                         mdBool = mdBool.substr(4);
                     }
                     else if(mdBool.starts_with(KEYWORDS[3]))
@@ -4531,7 +4816,7 @@ namespace fdf::detail
                         if consteval
                             { entry.GetDataAs<bool>()[cur++] = false; }
                         else
-                            { static_cast<bool*>(entry.data)[cur++] = false; }
+                            { static_cast<bool*>(entry.data.raw)[cur++] = false; }
                         mdBool = mdBool.substr(5);
                     }
                     else if(mdBool.starts_with('x'))
@@ -4566,30 +4851,10 @@ namespace fdf::detail
         // common with UTF-8 content, and would under-allocate then overflow on write
         switch(currentToken.type)
         {
-            entry.size = static_cast<uint32_t>(EVALUATE_LITERAL_TEXT.size());
-            entry.type = Type::String;
-            if consteval
-            {
-                entry.data = new (std::nothrow) std::string();
-                assert(entry.data && "Allocation shouldn't fail");
-                (*entry.GetDataAs<std::string>()) = EVALUATE_LITERAL_TEXT;
-            }
-            else
-            {
-                entry.data = GlobalAllocator::Allocate(entry.size + 1 + sizeof(uint32_t));
-                *static_cast<uint32_t*>(entry.data) = entry.size;
-                constexpr_memcpy((static_cast<char*>(entry.data) + sizeof(uint32_t)), EVALUATE_LITERAL_TEXT.data(), EVALUATE_LITERAL_TEXT.size() + 1);
-                (static_cast<char*>(entry.data) + sizeof(uint32_t))[EVALUATE_LITERAL_TEXT.size()] = '\0';
-            }
-
-            //[[maybe_unused]] auto DEBUG = std::string_view(static_cast<char*>(entry.data) + sizeof(uint32_t), entry.size);
-            return postProcess();
+            case TokenType::StringLiteral:                            entry.size = static_cast<uint32_t>(view.size() - 2); break;
+            case TokenType::HexLiteral: case TokenType::TimestampLiteral: entry.size = static_cast<uint32_t>(view.size()); break;
+            default:                                                  entry.size = currentToken.extra8; break;
         }
-
-
-
-        
-        entry.size = currentToken.extra8;  // Dimension count or string length
 
 
 
@@ -4598,13 +4863,13 @@ namespace fdf::detail
         {
             if consteval
             {
-                entry.data = new (std::nothrow) std::vector<int64_t>();
-                assert(entry.data && "Allocation shouldn't fail");
+                entry.data.vInt = new (std::nothrow) std::vector<int64_t>();
+                assert(entry.data.vInt && "Allocation shouldn't fail");
                 entry.GetDataVector<int64_t>()->resize(entry.size);
             }
             else
             {
-                entry.data = GlobalAllocator::Allocate(entry.size * sizeof(int64_t));
+                entry.data.raw = GlobalAllocator::Allocate(entry.size * sizeof(int64_t));
             }
             
             bool bIsUnsigned = false;
@@ -4626,7 +4891,7 @@ namespace fdf::detail
                     if consteval
                         { (*entry.GetDataVector<int64_t>())[currentDimension] = -static_cast<int64_t>(result); }
                     else
-                        { static_cast<int64_t*>(entry.data)[currentDimension] = -static_cast<int64_t>(result); }
+                        { static_cast<int64_t*>(entry.data.raw)[currentDimension] = -static_cast<int64_t>(result); }
                 }
                 else
                 {
@@ -4655,14 +4920,14 @@ namespace fdf::detail
                                     (*temp)[i] = static_cast<uint64_t>(oldVec[i]);
 
                                 delete entry.GetDataVector<int64_t>();
-                                entry.data = temp;
+                                entry.data.vUInt = temp;
                             }
                             else
                             {
                                 for(uint8_t i = 0; i < currentDimension - 1; i++)
                                 {
-                                    const int64_t temp = static_cast<int64_t*>(entry.data)[i];
-                                    static_cast<uint64_t*>(entry.data)[i] = static_cast<uint64_t>(temp);
+                                    const int64_t temp = static_cast<int64_t*>(entry.data.raw)[i];
+                                    static_cast<uint64_t*>(entry.data.raw)[i] = static_cast<uint64_t>(temp);
                                 }
                             }
                         }
@@ -4670,14 +4935,14 @@ namespace fdf::detail
                         if consteval
                             { (*entry.GetDataVector<uint64_t>())[currentDimension] = result; }
                         else
-                            { static_cast<uint64_t*>(entry.data)[currentDimension] = result; }
+                            { static_cast<uint64_t*>(entry.data.raw)[currentDimension] = result; }
                     }
                     else
                     {
                         if consteval
                             { (*entry.GetDataVector<int64_t>())[currentDimension] = static_cast<int64_t>(result); }
                         else
-                            { static_cast<int64_t*>(entry.data)[currentDimension] = static_cast<int64_t>(result); }
+                            { static_cast<int64_t*>(entry.data.raw)[currentDimension] = static_cast<int64_t>(result); }
                     }
                 }
 
@@ -4737,7 +5002,6 @@ namespace fdf::detail
                 return false;
 
             entry.type = bIsUnsigned? Type::UInt : Type::Int;
-            //[[maybe_unused]] auto DEBUG = std::span<int64_t>(static_cast<int64_t*>(entry.data), entry.size);
             return postProcess();
         }
 
@@ -4749,64 +5013,27 @@ namespace fdf::detail
             entry.type = Type::Float;
             if consteval
             {
-                entry.data = new (std::nothrow) std::vector<double>();
-                assert(entry.data && "Allocation shouldn't fail");
+                entry.data.vFloat = new (std::nothrow) std::vector<double>();
+                assert(entry.data.vFloat && "Allocation shouldn't fail");
                 entry.GetDataVector<double>()->resize(entry.size);
             }
             else
             {
-                entry.data = GlobalAllocator::Allocate(entry.size * sizeof(double));
+                entry.data.raw = GlobalAllocator::Allocate(entry.size * sizeof(double));
             }
 
-            bool bIsFirstChar = true;
-            bool bIsNegative = false;
-            bool bAfterDot = false;
-
-            double multiplier = 1.0;
-            double result = 0.0;
             uint8_t currentDimension = 0;
             const uint8_t dimensionCount = static_cast<uint8_t>(entry.size);
 
-            for(char c : view)
+            // Split on 'x' (multi-dimensional) and round-trip-parse each component
+            size_t segStart = 0;
+            for(size_t i = 0; i <= view.size(); i++)
             {
-                if(bIsFirstChar && c == '-')
-                {
-                    bIsNegative = true;
-                }
-                else if(constexpr_isdigit(c))
-                {
-                    if(result > DOUBLE_MAX_VALUE / 10)
-                        return false;  // Overflow
+                if(i != view.size() && view[i] != 'x')
+                    continue;
 
-                    if(!bAfterDot)
-                        result *= 10;
-
-                    const double value = static_cast<double>(c - '0') * multiplier;
-                    if(result > DOUBLE_MAX_VALUE - value)
-                        return false; // Overflow
-
-                    result += value;
-                }
-                else if(c == '.')
-                {
-                    if(bAfterDot)
-                        return false;  // Can't contain multiple dots
-
-                    bAfterDot = true;
-                }
-                else if(c == 'x')
-                {
-                    if(currentDimension >= dimensionCount - 1)
-                        return false;  // Too much dimensions
-
-                    if consteval
-                        { (*entry.GetDataVector<double>())[currentDimension] = bIsNegative? -result : result; }
-                    else
-                        { static_cast<double*>(entry.data)[currentDimension] = bIsNegative? -result : result; }
-
-                    bIsFirstChar = true;
-                    bIsNegative = false;
-                    bAfterDot = false;
+                if(currentDimension >= dimensionCount)
+                    return false;  // more components than the tokenizer counted
 
                 const std::string_view seg = view.substr(segStart, i - segStart);
                 bool bOk = false;
@@ -4814,22 +5041,18 @@ namespace fdf::detail
                 if(!bOk)
                     return false;
 
-                    continue;
-                }
+                if consteval
+                    { (*entry.GetDataVector<double>())[currentDimension] = result; }
                 else
-                    return false;  // unknown character
+                    { static_cast<double*>(entry.data.raw)[currentDimension] = result; }
 
-                bIsFirstChar = false;
-                if(bAfterDot)
-                    multiplier *= 0.1;
+                currentDimension++;
+                segStart = i + 1;
             }
 
-            if consteval
-                { (*entry.GetDataVector<double>())[currentDimension] = bIsNegative? -result : result; }
-            else
-                { static_cast<double*>(entry.data)[currentDimension] = bIsNegative? -result : result; }
-            
-            //[[maybe_unused]] auto DEBUG = std::span<double>(static_cast<double*>(entry.data), entry.size);
+            if(currentDimension != dimensionCount)
+                return false;
+
             return postProcess();
         }
     
@@ -4839,17 +5062,18 @@ namespace fdf::detail
         if(currentToken.type == TokenType::VersionLiteral)
         {
             entry.type = Type::Version;
+
+            // Allocate exactly entry.size (the component count): GetValue and ReleaseData both key off
+            // size, so over-allocating to 4 desynced the consteval span length and the runtime free size
             if consteval
             {
-                entry.data = new (std::nothrow) std::vector<uint64_t>();
-                assert(entry.data && "Allocation shouldn't fail");
-                entry.GetDataVector<uint64_t>()->resize(4);
-                (*entry.GetDataVector<uint64_t>())[3] = 0;
+                entry.data.vUInt = new (std::nothrow) std::vector<uint64_t>();
+                assert(entry.data.vUInt && "Allocation shouldn't fail");
+                entry.GetDataVector<uint64_t>()->resize(entry.size);
             }
             else
             {
-                entry.data = GlobalAllocator::Allocate(4 * sizeof(uint64_t));
-                static_cast<uint64_t*>(entry.data)[3] = 0;
+                entry.data.raw = GlobalAllocator::Allocate(entry.size * sizeof(uint64_t));
             }
     
             uint8_t currentDimension = 0;
@@ -4879,7 +5103,7 @@ namespace fdf::detail
                     if consteval
                         { (*entry.GetDataVector<uint64_t>())[currentDimension] = result; }
                     else
-                        { static_cast<uint64_t*>(entry.data)[currentDimension] = result; }
+                        { static_cast<uint64_t*>(entry.data.raw)[currentDimension] = result; }
     
                     result = 0;
                     currentDimension++;
@@ -4891,25 +5115,32 @@ namespace fdf::detail
             if consteval
                 { (*entry.GetDataVector<uint64_t>())[currentDimension] = result; }
             else
-                { static_cast<uint64_t*>(entry.data)[currentDimension] = result; }
-            
-            //[[maybe_unused]] auto DEBUG = std::span<uint64_t>(static_cast<uint64_t*>(entry.data), entry.size);
+                { static_cast<uint64_t*>(entry.data.raw)[currentDimension] = result; }
+
             return postProcess();
         }
 
-        
+
+        // Validate the timestamp before allocating below. Returning after the allocation would leave
+        // a String-shaped buffer attached to a still-default (Map) entry, which ReleaseData would
+        // later misread as a child array, corrupting recovery cleanup
+        if(currentToken.type == TokenType::TimestampLiteral && !IsValidTimestamp(view))
+        {
+            Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidTimestamp, tokenizer, currentToken);
+            return false;
+        }
 
 
         if consteval
         {
-            entry.data = new (std::nothrow) std::string();
-            assert(entry.data && "Allocation shouldn't fail");
+            entry.data.str = new (std::nothrow) std::string();
+            assert(entry.data.str && "Allocation shouldn't fail");
             entry.GetDataAs<std::string>()->resize(entry.size);
         }
         else
         {
-            entry.data = GlobalAllocator::Allocate(entry.size + 1 + sizeof(uint32_t));
-            *static_cast<uint32_t*>(entry.data) = entry.size;
+            entry.data.raw = GlobalAllocator::Allocate(entry.size + 1 + sizeof(uint32_t));
+            *static_cast<uint32_t*>(entry.data.raw) = entry.size;
         }
         
         size_t size = 0;
@@ -4918,7 +5149,7 @@ namespace fdf::detail
             if consteval
                 { (*entry.GetDataAs<std::string>())[size++] = c; }
             else
-                { (static_cast<char*>(entry.data) + sizeof(uint32_t))[size++] = c; }
+                { (static_cast<char*>(entry.data.raw) + sizeof(uint32_t))[size++] = c; }
         };
 
         if(currentToken.type == TokenType::StringLiteral)
@@ -4930,7 +5161,6 @@ namespace fdf::detail
 
             auto isEscapableChar     = [](char c) -> bool  { return c == '\"' || c == '\'' || c == '\\'; };
             auto isMergeEscapeChar   = [](char c) -> bool  { return c == 'n'  || c == 'r'  || c == 't' || c == 'v' || c == 'b' || c == 'f' || c == 'a'; };
-            //auto isUnicodeEscapeChar = [](char c) -> bool  { return c == 'u'  || c == 'U'; };  // TODO: Maybe handle unicode?
 
             auto convertMergedEscapeChar = [](char c) -> char
             {
@@ -4970,11 +5200,10 @@ namespace fdf::detail
             }
 
             if consteval
-                { } // We don't need to write \0 when dealing with std::string
+                { entry.GetDataAs<std::string>()->resize(size); }  // escapes shrink the string below the pre-allocated upper bound
             else
                 { writeCharacter('\0'); }
 
-            //[[maybe_unused]] auto DEBUG = std::string_view(static_cast<char*>(entry.data) + sizeof(uint32_t), entry.size);
             return postProcess();
         }
 
@@ -4991,15 +5220,14 @@ namespace fdf::detail
             }
             else
             {
-                constexpr_memcpy((static_cast<char*>(entry.data) + sizeof(uint32_t)), view.data(), entry.size);
-                (static_cast<char*>(entry.data) + sizeof(uint32_t))[entry.size] = '\0';
+                constexpr_memcpy((static_cast<char*>(entry.data.raw) + sizeof(uint32_t)), view.data(), entry.size);
+                (static_cast<char*>(entry.data.raw) + sizeof(uint32_t))[entry.size] = '\0';
             }
-            
-            //[[maybe_unused]] auto DEBUG = std::string_view(static_cast<char*>(entry.data) + sizeof(uint32_t), entry.size);
+
             return postProcess();
         }
 
-        return false;  // Something we didn't process yet?
+        return false;  // unhandled token
     }
     template<auto DIAGNOSTIC_CALLBACK>
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseArray      (Tokenizer& tokenizer, Entry& array   FDF_COMMENT_SWITCH(, Token comment)) noexcept
@@ -5022,9 +5250,8 @@ namespace fdf::detail
             #if !FDF_NO_COMMENTS
                 if(currentToken.type == TokenType::Comment)
                 {
-                    //if(childComment.type != TokenType::NonExisting)
-                    //    if(!DIAGNOSTIC_CALLBACK(Error::AlreadyHasComment, std::format("Token already has a comment\nOld Comment: \"{}\" ({}:{})\nNew Comment: \"{}\" ({}:{})", childComment.ToView(content), childComment.line, childComment.column, currentToken.ToView(content), currentToken.line, currentToken.column)))
-                    //        return false;
+                    if(childComment.type != TokenType::NonExisting)
+                        Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
                     childComment = currentToken;
                 }
             #endif
@@ -5037,8 +5264,21 @@ namespace fdf::detail
 
             if(IsValueLiteral(currentToken.type) || currentToken.type == TokenType::CurlyBraceOpen || currentToken.type == TokenType::SquareBraceOpen)
             {
+                const uint32_t childCountBefore = array.GetChildCount();
                 if(!ParseVariable(tokenizer, array   FDF_COMMENT_SWITCH(,childComment)))
-                    return false;
+                {
+                    while(array.GetChildCount() > childCountBefore)
+                        (void)array.RemoveChild(array.GetChildCount() - 1);
+
+                    if(tokenizer.Current().type == TokenType::Invalid)
+                    {
+                        Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(tokenizer.Current().extra8), tokenizer, tokenizer.Current());
+                        return false;  // Lexer error: can't reliably resume
+                    }
+                    SkipToNextEntry(tokenizer, true);  // ParseVariable already reported the error
+                    currentToken = tokenizer.Current();
+                    continue;
+                }
                 currentToken = tokenizer.Current();
             }
             else if(currentToken.type == TokenType::SquareBraceClose)
@@ -5056,9 +5296,8 @@ namespace fdf::detail
                 if(currentToken.type == TokenType::Comment)
                 {
                 #if !FDF_NO_COMMENTS
-                    //if(comment.type != TokenType::NonExisting)
-                    //    if(!DIAGNOSTIC_CALLBACK(Error::AlreadyHasComment, std::format("Token already has a comment\nOld Comment: \"{}\" ({}:{})\nNew Comment: \"{}\" ({}:{})", comment.ToView(content), comment.line, comment.column, currentToken.ToView(content), currentToken.line, currentToken.column)))
-                    //        return false;
+                    if(comment.type != TokenType::NonExisting)
+                        Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
                     comment = currentToken;
                 #endif
                     currentToken = tokenizer.Advance();
@@ -5076,26 +5315,32 @@ namespace fdf::detail
                     array.SetComment(tokenizer.ToView(comment));
             #endif
 
-                //[[maybe_unused]] auto DEBUG = std::span<Entry*>((static_cast<Entry**>(array.data) + 1), array.size);
                 return true;
             }
             else
-                return false;
+            {
+                // Unexpected token inside an array: report and skip to the next element or the array's end
+                if(currentToken.type == TokenType::EndOfFile)
+                {
+                    Diagnose(DiagnosticSeverity::Fatal, DiagnosticType::UnexpectedEndOfFile, tokenizer, currentToken);
+                    return false;
+                }
+                if(currentToken.type == TokenType::Invalid)
+                {
+                    Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(currentToken.extra8), tokenizer, currentToken);
+                    return false;
+                }
+                Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken);
+                SkipToNextEntry(tokenizer, true);
+                currentToken = tokenizer.Current();
+            }
         }
     }
     template<auto DIAGNOSTIC_CALLBACK>
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseMap        (Tokenizer& tokenizer, Entry& map   FDF_COMMENT_SWITCH(, Token comment)) noexcept
     {
         assert(tokenizer.Current().type == TokenType::CurlyBraceOpen && "Sanity check!");
-
-        // Validate the timestamp before allocating below. Returning after the allocation would leave
-        // a String-shaped buffer attached to a still-default (Map) entry, which ReleaseData would
-        // later misread as a child array, corrupting recovery cleanup
-        if(currentToken.type == TokenType::TimestampLiteral && !IsValidTimestamp(view))
-        {
-            Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidTimestamp, tokenizer, currentToken);
-            return false;
-        }
+        
         map.type = Type::Map;
 
         Token currentToken = tokenizer.Advance();
@@ -5112,9 +5357,8 @@ namespace fdf::detail
             #if !FDF_NO_COMMENTS
                 if(currentToken.type == TokenType::Comment)
                 {
-                    //if(childComment.type != TokenType::NonExisting)
-                    //    if(!DIAGNOSTIC_CALLBACK(Error::AlreadyHasComment, std::format("Token already has a comment\nOld Comment: \"{}\" ({}:{})\nNew Comment: \"{}\" ({}:{})", childComment.ToView(content), childComment.line, childComment.column, currentToken.ToView(content), currentToken.line, currentToken.column)))
-                    //        return false;
+                    if(childComment.type != TokenType::NonExisting)
+                        Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
                     childComment = currentToken;
                 }
             #endif
@@ -5127,8 +5371,21 @@ namespace fdf::detail
 
             if(currentToken.type == TokenType::Identifier)
             {
+                const uint32_t childCountBefore = map.GetChildCount();
                 if(!ParseVariable(tokenizer, map   FDF_COMMENT_SWITCH(,childComment)))
-                    return false;
+                {
+                    while(map.GetChildCount() > childCountBefore)
+                        (void)map.RemoveChild(map.GetChildCount() - 1);
+
+                    if(tokenizer.Current().type == TokenType::Invalid)
+                    {
+                        Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(tokenizer.Current().extra8), tokenizer, tokenizer.Current());
+                        return false;  // Lexer error: can't reliably resume
+                    }
+                    SkipToNextEntry(tokenizer, true);  // ParseVariable already reported the error
+                    currentToken = tokenizer.Current();
+                    continue;
+                }
                 currentToken = tokenizer.Current();
             }
             else if(currentToken.type == TokenType::CurlyBraceClose)
@@ -5146,9 +5403,8 @@ namespace fdf::detail
                 if(currentToken.type == TokenType::Comment)
                 {
                 #if !FDF_NO_COMMENTS
-                    //if(comment.type != TokenType::NonExisting)
-                    //    if(!DIAGNOSTIC_CALLBACK(Error::AlreadyHasComment, std::format("Token already has a comment\nOld Comment: \"{}\" ({}:{})\nNew Comment: \"{}\" ({}:{})", comment.ToView(content), comment.line, comment.column, currentToken.ToView(content), currentToken.line, currentToken.column)))
-                    //        return false;
+                    if(comment.type != TokenType::NonExisting)
+                        Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
                     comment = currentToken;
                 #endif
                     currentToken = tokenizer.Advance();
@@ -5166,11 +5422,25 @@ namespace fdf::detail
                     map.SetComment(tokenizer.ToView(comment));
             #endif
 
-                //[[maybe_unused]] auto DEBUG = std::span<Entry*>((static_cast<Entry**>(map.data) + 1), map.size);
                 return true;
             }
             else
-                return false;
+            {
+                // Unexpected token inside a map: report and skip to the next entry or the map's end
+                if(currentToken.type == TokenType::EndOfFile)
+                {
+                    Diagnose(DiagnosticSeverity::Fatal, DiagnosticType::UnexpectedEndOfFile, tokenizer, currentToken);
+                    return false;
+                }
+                if(currentToken.type == TokenType::Invalid)
+                {
+                    Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(currentToken.extra8), tokenizer, currentToken);
+                    return false;
+                }
+                Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken);
+                SkipToNextEntry(tokenizer, true);
+                currentToken = tokenizer.Current();
+            }
         }
     }
 
@@ -5228,10 +5498,7 @@ namespace fdf::detail
         };
         [[maybe_unused]] auto addCommaFn = [&buffer]() -> void
         {
-            if constexpr(STYLE.bSpaceAfterComma)
-                buffer.append(", ");
-            else
-                buffer.push_back(',');
+            buffer.append(", ");
         };
 
 
@@ -5245,54 +5512,36 @@ namespace fdf::detail
             if(e.type != Type::String)
             {
                 buffer.append(view);
+                return;
             }
-            else
+
+            // Pick the quote that needs the least escaping: single quotes when the value has a double
+            // quote but no single quote (and the style allows it), double quotes otherwise. Backslash
+            // and control chars are always escaped so the output re-parses to the exact same value
+            const bool bHasDouble = view.contains('\"');
+            const bool bHasSingle = view.contains('\'');
+            const char quote = (bHasDouble && !bHasSingle && !STYLE.bAlwaysUseDoubleQuoteForStrings)? '\'' : '\"';
+
+            buffer.push_back(quote);
+            for(char c : view)
             {
-                //TODO: Check out this logic... wtf is going on here?
-                if(bool bContainsQuote = view.find_first_of('\"') != std::string_view::npos) // does it contain double quote?
+                switch(c)
                 {
-                    if constexpr(STYLE.bAlwaysUseDoubleQuoteForStrings)
-                    {
-                        buffer.push_back('\"');
-                        for(char c : view)
-                        {
-                            if(c == '\"')
-                                buffer.append("\\\"");
-                            else
-                                buffer.push_back(c);
-                        }
-                        buffer.push_back('\"');
-                    }
-                    else
-                    {
-                        bContainsQuote = view.find_first_of('\'') != std::string_view::npos; // does it contain single quote?
-                        if(bContainsQuote)
-                        {
-                            buffer.push_back('\"');
-                            for(char c : view)
-                            {
-                                if(c == '\"')
-                                    buffer.append("\\\"");
-                                else
-                                    buffer.push_back(c);
-                            }
-                            buffer.push_back('\"');
-                        }
-                        else
-                        {
-                            buffer.push_back('\'');
-                            buffer.append(view);
-                            buffer.push_back('\'');
-                        }
-                    }
-                }
-                else
-                {
-                    buffer.push_back('\"');
-                    buffer.append(view);
-                    buffer.push_back('\"');
+                    case '\\': buffer.append("\\\\"); break;
+                    case '\n': buffer.append("\\n");  break;
+                    case '\t': buffer.append("\\t");  break;
+                    case '\r': buffer.append("\\r");  break;
+                    case '\v': buffer.append("\\v");  break;
+                    case '\b': buffer.append("\\b");  break;
+                    case '\f': buffer.append("\\f");  break;
+                    case '\a': buffer.append("\\a");  break;
+                    default:
+                        if(c == quote)
+                            buffer.push_back('\\');
+                        buffer.push_back(c);
                 }
             }
+            buffer.push_back(quote);
         };
         [[maybe_unused]] auto writeSimpleEntryFn = [&](const Entry& e) -> void
         {
@@ -5305,14 +5554,6 @@ namespace fdf::detail
 
 
 
-        auto preCloseScopes = [&]() -> void
-        {
-            if constexpr(!STYLE.bTrailingCommas)
-            {
-                if(buffer.size() > 2 && buffer[buffer.size() - 2] == ',')
-                    buffer.erase(buffer.size() - 2, 1);
-            }
-        };
         auto closeScopes = [&](const int64_t i, const bool bNested) -> void
         {
             if constexpr(CHECK_SINGLE_LINE)
@@ -5326,7 +5567,7 @@ namespace fdf::detail
                         buffer.push_back(bWasMap? '}' : ']');
                         scopes[j].end = buffer.size() - 1;
                         
-                        if constexpr(STYLE.bContainersCommas)
+                        if constexpr(STYLE.bCommas)
                         {
                             if(bNested)
                                 buffer.push_back(',');
@@ -5337,7 +5578,7 @@ namespace fdf::detail
                         {
                             if(buffer[pos] == '/' && buffer[pos - 1] == '/')
                             {
-                                scopes.erase(scopes.begin() + static_cast<int64_t>(j));
+                                { for(size_t k = j; k + 1 < scopes.size(); k++) scopes[k] = scopes[k + 1]; scopes.pop_back(); }   // manual erase (MSVC debug vector::erase isn't constexpr)
                                 return;
                             }
                             if(buffer[pos] == ' ' && (detail::constexpr_isspace(buffer[pos - 2]) || IsBrace(buffer[pos - 2])))
@@ -5346,7 +5587,7 @@ namespace fdf::detail
                                 scopes[j].spaces += STYLE.tabSize;
                         }
                         if(scopes[j].end - scopes[j].textBegin + 1 - scopes[j].spaces > STYLE.singleLineContainerLimit)
-                            scopes.erase(scopes.begin() + static_cast<int64_t>(j));
+                            { for(size_t k = j; k + 1 < scopes.size(); k++) scopes[k] = scopes[k + 1]; scopes.pop_back(); }   // manual erase (MSVC debug vector::erase isn't constexpr)
                         return;
                     }
                 }
@@ -5369,10 +5610,8 @@ namespace fdf::detail
         auto writeFn = [&](const Entry& e) -> void
         {
             const uint32_t depth = bHasDedicatedRoot? e.CalculateDepth() - 1 : e.CalculateDepth();
-            if(static_cast<int64_t>(lastDepth) - static_cast<int64_t>(depth) > 0)
-                preCloseScopes();
             for(int64_t i = 0; i < static_cast<int64_t>(lastDepth) - static_cast<int64_t>(depth); i++)
-                closeScopes(i, depth > 0 || (STYLE.bTrailingCommas && i + 1 < static_cast<int64_t>(lastDepth) - static_cast<int64_t>(depth)));
+                closeScopes(i, depth > 0 || STYLE.bTopLevelCommas || i + 1 < static_cast<int64_t>(lastDepth) - static_cast<int64_t>(depth));
 
 
 
@@ -5380,7 +5619,7 @@ namespace fdf::detail
 
             if(e.IsContainer())
             {
-                // Make sure we don't do empty line on first element of a nested container (when first element is also a container)
+                // no blank line before the first element of a nested container
                 const size_t found = buffer.find_last_not_of("\n\t ");
                 if(found == std::string::npos || !IsOpenBrace(buffer[found]))
                     buffer.push_back('\n');   
@@ -5391,9 +5630,13 @@ namespace fdf::detail
 
 
         #if !FDF_NO_COMMENTS
-            if(!e.GetComment().empty())
+            // Short comments on simple entries go inline (trailing); long ones and container
+            // comments stay as leading // lines because they can't share the value's line
+            const std::string_view entryComment = STYLE.bEntryComment? e.GetComment() : std::string_view{};
+            const bool bInlineComment = !entryComment.empty() && !e.IsContainer() && entryComment.size() <= STYLE.singleLineCommentLimit;
+            if(!entryComment.empty() && !bInlineComment)
             {
-                std::string_view sv = e.GetComment();
+                std::string_view sv = entryComment;
                 const size_t start = buffer.size();
                 if constexpr(STYLE.singleLineCommentLimit < 5)
                 {
@@ -5460,18 +5703,48 @@ namespace fdf::detail
                     addEqualSignFn();
                 }
                 writeSimpleEntryValueFn(e);
-                
-                if constexpr(STYLE.bVariableCommas)
+
+                if constexpr(STYLE.bCommas)
                 {
-                    if(!bHasDedicatedRoot || e.parent != &root)
+                    if(STYLE.bTopLevelCommas || !bHasDedicatedRoot || e.parent != &root)
                         buffer.push_back(',');
                 }
+            #if !FDF_NO_COMMENTS
+                if(bInlineComment)
+                {
+                    // '\x01' is a placeholder for the gap before the comment, resolved (and aligned) in a final pass
+                    buffer.push_back('\x01');
+                    buffer.append("// ");
+                    buffer.append(entryComment);
+                }
+            #endif
                 buffer.push_back('\n');
             }
             else
             {
                 const bool bIsMap = e.type == Type::Map;
                 addTabFn(depth);
+
+                // Empty containers emit inline (name{ } / name[ ]) without opening a scope. A deferred
+                // close brace would otherwise be lost: the final flush only closes lastDepth scopes,
+                // and an empty container never advances depth past its own opening
+                if(e.GetChildCount() == 0)
+                {
+                    if(!e.parent || e.parent->type != Type::Array)
+                        writeEntryNameFn(e);
+                    buffer.push_back(bIsMap? '{' : '[');
+                    buffer.push_back(' ');
+                    buffer.push_back(bIsMap? '}' : ']');
+                    if constexpr(STYLE.bCommas)
+                    {
+                        if(STYLE.bTopLevelCommas || !bHasDedicatedRoot || e.parent != &root)
+                            buffer.push_back(',');
+                    }
+                    buffer.push_back('\n');
+                    lastDepth = depth;
+                    return;
+                }
+
                 auto& scope = scopes.emplace_back();
                 if constexpr(CHECK_SINGLE_LINE)
                     { scope.textBegin = buffer.size(); }
@@ -5490,8 +5763,7 @@ namespace fdf::detail
                 scope.begin = buffer.size() - 1;
                 buffer.push_back('\n');
             }
-            //TODO: implement
-            
+
             lastDepth = depth;
         };
 
@@ -5545,9 +5817,8 @@ namespace fdf::detail
         }
 
 
-        preCloseScopes();
         for(int64_t i = 0; i < static_cast<int64_t>(lastDepth); i++)
-            closeScopes(i, STYLE.bTrailingCommas && i + 1 < static_cast<int64_t>(lastDepth));
+            closeScopes(i, STYLE.bTopLevelCommas || i + 1 < static_cast<int64_t>(lastDepth));
 
 
 
@@ -5615,30 +5886,26 @@ namespace fdf::detail
                     {
                         buffer[pos] = ' ';
                         bool bIncremented = false;
-                        if constexpr(!STYLE.bVariableCommas)
+                        if constexpr(!STYLE.bCommas)
                         {
                             if(buffer[pos - 1] != '{' && buffer[pos - 1] != '[')
                             {
                                 found = buffer.find_first_not_of(' ', pos);
-                                if(found != std::string::npos && !IsCloseBrace(buffer[found]))
+                                // Skip an open brace too: the token before it is the container's name
+                                // (or a prior array element), separated fine by a space, never a comma
+                                if(found != std::string::npos && !IsCloseBrace(buffer[found]) && !IsOpenBrace(buffer[found]))
                                 {
                                     buffer[pos] = ',';
-                                    if constexpr(STYLE.bSpaceAfterComma)
-                                    {
-                                        buffer.insert(++pos, 1, ' ');
-                                        bIncremented = true;
-                                    }
+                                    buffer.insert(++pos, 1, ' ');
+                                    bIncremented = true;
                                 }
                             }
                         }
-                        
+
                         while(pos + 1 < scopes[i].end && (buffer[pos + 1] == ' ' || buffer[pos + 1] == '\t'))
                             buffer.erase(pos + 1, 1);
-                        if constexpr(STYLE.bSpaceAfterComma)
-                        {
-                            if(bIncremented)
-                                --pos;
-                        }
+                        if(bIncremented)
+                            --pos;
                         
                         // Eliminate multiple new lines
                         while(pos - 1 > scopes[i].begin && buffer[pos - 1] == '\n')
@@ -5662,6 +5929,52 @@ namespace fdf::detail
                 }
             }
         }
+
+
+    #if !FDF_NO_COMMENTS
+        // Resolve inline-comment pad placeholders ('\x01'). Each marks the gap before a trailing
+        // "// comment". With bAlignCloseComments, the '//' of consecutive inline-commented lines
+        // are padded to a shared column; otherwise each becomes a single space
+        {
+            constexpr char MARKER = '\x01';
+            std::vector<size_t> markers;
+            for(size_t p = buffer.find(MARKER); p != std::string::npos; p = buffer.find(MARKER, p + 1))
+                markers.push_back(p);
+
+            if(!markers.empty())
+            {
+                std::vector<size_t> pads(markers.size(), 1);
+                if constexpr(STYLE.bAlignCloseComments)
+                {
+                    auto columnOf = [&](size_t m) -> size_t
+                    {
+                        const size_t lineStart = buffer.rfind('\n', m);
+                        return lineStart == std::string::npos? m : m - lineStart - 1;
+                    };
+
+                    for(size_t groupStart = 0; groupStart < markers.size(); )
+                    {
+                        size_t groupEnd = groupStart;
+                        while(groupEnd + 1 < markers.size() &&
+                              std::count(buffer.begin() + static_cast<int64_t>(markers[groupEnd]), buffer.begin() + static_cast<int64_t>(markers[groupEnd + 1]), '\n') == 1)
+                            groupEnd++;
+
+                        size_t maxColumn = 0;
+                        for(size_t k = groupStart; k <= groupEnd; k++)
+                            maxColumn = std::max(maxColumn, columnOf(markers[k]));
+                        for(size_t k = groupStart; k <= groupEnd; k++)
+                            pads[k] = (maxColumn - columnOf(markers[k])) + 1;
+
+                        groupStart = groupEnd + 1;
+                    }
+                }
+
+                // Replace from the last marker to the first so earlier indices stay valid
+                for(size_t k = markers.size(); k-- > 0; )
+                    buffer.replace(markers[k], 1, pads[k], ' ');
+            }
+        }
+    #endif
     }
 }
 
