@@ -27,7 +27,7 @@ jobs:
         no_comments: ["OFF", "ON"]
         extended: ["OFF", "ON"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install CMake + Ninja
         run: |
@@ -64,7 +64,7 @@ jobs:
         no_comments: ["OFF", "ON"]
         extended: ["OFF", "ON"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install latest CMake + Ninja
         uses: lukka/get-cmake@latest
@@ -108,7 +108,7 @@ jobs:
         no_comments: ["OFF", "ON"]
         extended: ["OFF", "ON"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install latest CMake + Ninja
         uses: lukka/get-cmake@latest
@@ -146,7 +146,7 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup MSYS2 (UCRT64)
         uses: msys2/setup-msys2@v2
@@ -190,7 +190,7 @@ jobs:
       run:
         shell: msys2 {0}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup MSYS2 (CLANG64)
         uses: msys2/setup-msys2@v2
