@@ -1,6 +1,22 @@
 
 #pragma once
 
+
+
+
+#if !defined(FDF_USE_CPP_MODULES)
+    #define FDF_USE_CPP_MODULES false
+#endif
+#if !defined(FDF_NO_COMMENTS)
+    #define FDF_NO_COMMENTS false
+#endif
+#if !defined(FDF_EXTENDED_NO_COMMENT_IDENTIFIERS)
+    #define FDF_EXTENDED_NO_COMMENT_IDENTIFIERS false
+#endif
+
+
+
+
 #if !FDF_USE_CPP_MODULES
     #include <algorithm>
     #include <bit>
