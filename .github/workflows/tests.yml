@@ -1,0 +1,220 @@
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Linux / GCC
+  linux-gcc:
+    name: linux-gcc (mod=${{ matrix.modules }} noCmt=${{ matrix.no_comments }} ext=${{ matrix.extended }})
+    runs-on: ubuntu-24.04
+    container: gcc:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        modules: ["OFF", "ON"]
+        no_comments: ["OFF", "ON"]
+        extended: ["OFF", "ON"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CMake + Ninja
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake ninja-build
+          cmake --version
+          gcc --version
+
+      - name: Configure
+        env:
+          CC: gcc
+          CXX: g++
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DFDF_USE_CPP_MODULES=${{ matrix.modules }}
+          -DFDF_NO_COMMENTS=${{ matrix.no_comments }}
+          -DFDF_EXTENDED_NO_COMMENT_IDENTIFIERS=${{ matrix.extended }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # Linux / Clang
+  linux-clang:
+    name: linux-clang (mod=${{ matrix.modules }} noCmt=${{ matrix.no_comments }} ext=${{ matrix.extended }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        modules: ["OFF", "ON"]
+        no_comments: ["OFF", "ON"]
+        extended: ["OFF", "ON"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install latest CMake + Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Install Clang 22
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 22
+          sudo apt-get install -y clang-tools-22
+          clang++-22 --version
+
+      - name: Configure
+        env:
+          CC: clang-22
+          CXX: clang++-22
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS=$(command -v clang-scan-deps-22)
+          -DFDF_USE_CPP_MODULES=${{ matrix.modules }}
+          -DFDF_NO_COMMENTS=${{ matrix.no_comments }}
+          -DFDF_EXTENDED_NO_COMMENT_IDENTIFIERS=${{ matrix.extended }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # Windows / MSVC
+  windows-msvc:
+    name: windows-msvc (mod=${{ matrix.modules }} noCmt=${{ matrix.no_comments }} ext=${{ matrix.extended }})
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        modules: ["OFF", "ON"]
+        no_comments: ["OFF", "ON"]
+        extended: ["OFF", "ON"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install latest CMake + Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=cl
+          -DCMAKE_CXX_COMPILER=cl
+          -DFDF_USE_CPP_MODULES=${{ matrix.modules }}
+          -DFDF_NO_COMMENTS=${{ matrix.no_comments }}
+          -DFDF_EXTENDED_NO_COMMENT_IDENTIFIERS=${{ matrix.extended }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # Windows / GCC (MSYS2 UCRT64)
+  windows-gcc:
+    name: windows-gcc (mod=${{ matrix.modules }} noCmt=${{ matrix.no_comments }} ext=${{ matrix.extended }})
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        modules: ["OFF", "ON"]
+        no_comments: ["OFF", "ON"]
+        extended: ["OFF", "ON"]
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Configure
+        env:
+          CC: gcc
+          CXX: g++
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DFDF_USE_CPP_MODULES=${{ matrix.modules }}
+          -DFDF_NO_COMMENTS=${{ matrix.no_comments }}
+          -DFDF_EXTENDED_NO_COMMENT_IDENTIFIERS=${{ matrix.extended }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # Windows / Clang (MSYS2 CLANG64)
+  windows-clang:
+    name: windows-clang (mod=${{ matrix.modules }} noCmt=${{ matrix.no_comments }} ext=${{ matrix.extended }})
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        modules: ["OFF", "ON"]
+        no_comments: ["OFF", "ON"]
+        extended: ["OFF", "ON"]
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSYS2 (CLANG64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            git
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-lld
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+
+      - name: Configure
+        env:
+          CC: clang
+          CXX: clang++
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DFDF_USE_CPP_MODULES=${{ matrix.modules }}
+          -DFDF_NO_COMMENTS=${{ matrix.no_comments }}
+          -DFDF_EXTENDED_NO_COMMENT_IDENTIFIERS=${{ matrix.extended }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
