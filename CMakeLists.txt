@@ -13,6 +13,19 @@ option(FDF_ENABLE_ASAN                     "Enable AddressSanitizer (bundles Lea
 option(FDF_ENABLE_LSAN                     "Enable standalone LeakSanitizer (non-MSVC)" OFF)
 
 
+if(FDF_USE_CPP_MODULES)
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.3")
+        set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "451f2fe2-a8a2-47c3-bc32-94786d8fc91b")
+    elseif(CMAKE_VERSION VERSION_GREATER_EQUAL "3.31")
+        set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
+    elseif(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30")
+        set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "0e5b6991-d74f-4b3d-a41c-cf096e0b2508")
+    else()
+        message(FATAL_ERROR "FDF_USE_CPP_MODULES requires CMake >= 3.30 for `import std`")
+    endif()
+    set(CMAKE_CXX_MODULE_STD ON)
+endif()
+
 project(fdf VERSION 0.1.0 LANGUAGES CXX)
 if(FDF_USE_CPP_MODULES)
     add_library(fdf STATIC)
@@ -39,6 +52,10 @@ if(FDF_USE_CPP_MODULES)
 
     target_compile_definitions(fdf PUBLIC FDF_ROOT_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_definitions(fdf PUBLIC FDF_TEST_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/tests")
+
+    if(PROJECT_IS_TOP_LEVEL)
+        target_compile_definitions(fdf PUBLIC FDF_TESTING)
+    endif()
 else()
     add_library(fdf INTERFACE)
     target_include_directories(fdf INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)

@@ -17,6 +17,13 @@
     #warning "FDF_EXTENDED_NO_COMMENT_IDENTIFIERS has no effect unless FDF_NO_COMMENTS is enabled"
 #endif
 
+// For tests only
+#if FDF_USE_CPP_MODULES && defined(FDF_TESTING)
+    #define FDF_EXPORT_INTERNAL export
+#else
+    #define FDF_EXPORT_INTERNAL
+#endif
+
 
 
 
@@ -161,8 +168,6 @@ FDF_EXPORT namespace fdf
 
 namespace fdf::detail
 {
-    struct Test;
-
     template<auto DIAGNOSTIC_CALLBACK = nullptr>
     struct Utils;
     
@@ -172,18 +177,18 @@ namespace fdf::detail
     template<typename Callable>
     constexpr bool IsValidDiagnosticCallback = std::is_invocable_v<Callable, const Diagnostic&>;
 
-    constexpr size_t MAX_IDENTIFIER_LENGTH = FDF_NO_COMMENTS && FDF_EXTENDED_NO_COMMENT_IDENTIFIERS? 38 : 30;
+    inline constexpr size_t MAX_IDENTIFIER_LENGTH = FDF_NO_COMMENTS && FDF_EXTENDED_NO_COMMENT_IDENTIFIERS? 38 : 30;
     
     struct EntryDeleter { static constexpr void operator()(Entry* e) noexcept; };
 
-    constexpr auto SIZE_T_MAX_VALUE = std::numeric_limits<  size_t>::max();
-    constexpr auto INT64_MAX_VALUE  = std::numeric_limits< int64_t>::max();
-    constexpr auto DOUBLE_MAX_VALUE = std::numeric_limits<  double>::max();
+    inline constexpr auto SIZE_T_MAX_VALUE = std::numeric_limits<  size_t>::max();
+    inline constexpr auto INT64_MAX_VALUE  = std::numeric_limits< int64_t>::max();
+    inline constexpr auto DOUBLE_MAX_VALUE = std::numeric_limits<  double>::max();
 
-    constexpr auto UINT8_MAX_VALUE  = std::numeric_limits< uint8_t>::max();
-    constexpr auto UINT16_MAX_VALUE = std::numeric_limits<uint16_t>::max();
-    constexpr auto UINT32_MAX_VALUE = std::numeric_limits<uint32_t>::max();
-    constexpr auto UINT64_MAX_VALUE = std::numeric_limits<uint64_t>::max();
+    inline constexpr auto UINT8_MAX_VALUE  = std::numeric_limits< uint8_t>::max();
+    inline constexpr auto UINT16_MAX_VALUE = std::numeric_limits<uint16_t>::max();
+    inline constexpr auto UINT32_MAX_VALUE = std::numeric_limits<uint32_t>::max();
+    inline constexpr auto UINT64_MAX_VALUE = std::numeric_limits<uint64_t>::max();
 }
 
 
@@ -563,7 +568,6 @@ FDF_EXPORT namespace fdf
     private:
         constexpr ~Entry() noexcept;
 
-        friend struct detail::Test;
         friend constexpr UniqueEntryPtr NewEntry() noexcept;
 
         template<auto DIAGNOSTIC_CALLBACK>
@@ -868,26 +872,26 @@ FDF_EXPORT namespace fdf
 
 namespace fdf::detail
 {
-    constexpr std::string_view UNEXPECTED_TEXT = "<UNEXPECTED-ERROR>";
-    constexpr std::string_view ARRAY_TEXT   = "<ARRAY>";
-    constexpr std::string_view MAP_TEXT     = "<MAP>";
+    inline constexpr std::string_view UNEXPECTED_TEXT = "<UNEXPECTED-ERROR>";
+    inline constexpr std::string_view ARRAY_TEXT   = "<ARRAY>";
+    inline constexpr std::string_view MAP_TEXT     = "<MAP>";
 
     #if FDF_NO_COMMENTS
-        constexpr size_t DATA_OVERHEAD_SIZE = sizeof(size_t);
+        inline constexpr size_t DATA_OVERHEAD_SIZE = sizeof(size_t);
     #else
-        constexpr size_t DATA_OVERHEAD_SIZE = sizeof(size_t) + sizeof(void*);
+        inline constexpr size_t DATA_OVERHEAD_SIZE = sizeof(size_t) + sizeof(void*);
     #endif
 
-    constexpr size_t INITIAL_PARENT_DATA_SIZE = DATA_OVERHEAD_SIZE + (4 * sizeof(void*));
+    inline constexpr size_t INITIAL_PARENT_DATA_SIZE = DATA_OVERHEAD_SIZE + (4 * sizeof(void*));
 
 
-    constexpr auto KEYWORDS = std::to_array<std::string_view>(
+    inline constexpr auto KEYWORDS = std::to_array<std::string_view>(
     {
         "null", "nil",
         "true", "false", " MD_BOOL_PLACEHOLDER "
     });
 
-    enum class TokenType : uint8_t
+    FDF_EXPORT_INTERNAL enum class TokenType : uint8_t
     {
         NonExisting,  // Means the requested token doesn't exist/cannot be accessed, not necessarily an error
         Invalid,      // Means there is an error in the file content
@@ -916,7 +920,7 @@ namespace fdf::detail
         ValueLiteral_End = TimestampLiteral,
     };
 
-    struct Token
+    FDF_EXPORT_INTERNAL struct Token
     {
         constexpr Token() noexcept = default;
         constexpr Token(TokenType type_, uint32_t startPosition_ = 0, uint32_t count_ = 0) noexcept
@@ -930,7 +934,7 @@ namespace fdf::detail
         uint32_t line = 0;
     };
 
-    struct Tokenizer
+    FDF_EXPORT_INTERNAL struct Tokenizer
     {
         explicit constexpr Tokenizer(std::string_view content_) noexcept
             : content(content_), index(0), line(1), lastNewLineIndex(0), currentToken(GetNextToken())  { }
@@ -978,7 +982,7 @@ namespace fdf::detail
 
 namespace fdf::detail
 {
-    constexpr void constexpr_memcpy(char* dest, const char* src, size_t size) noexcept
+    FDF_EXPORT_INTERNAL constexpr void constexpr_memcpy(char* dest, const char* src, size_t size) noexcept
     {
         for(size_t i = 0; i < size; i++)
             dest[i] = src[i];
@@ -1256,7 +1260,7 @@ namespace fdf::detail
 
     // Shortest round-trip text for any finite double (and inf/nan sentinels). Always emits a '.' or
     // 'e' so the tokenizer classifies the result as a FloatLiteral, never an int
-    constexpr void AppendDouble(std::string& s, double v) noexcept
+    FDF_EXPORT_INTERNAL constexpr void AppendDouble(std::string& s, double v) noexcept
     {
         const uint64_t bits = std::bit_cast<uint64_t>(v);
         const bool bNeg = (bits >> 63) != 0;
@@ -1491,7 +1495,7 @@ namespace fdf::detail
 
     // Parse one number from [s, end). Accepts: [-] digits [. digits] [(e|E)[+|-]digits].
     // Sets *bOk false on malformed input; overflow yields +/-inf with *bOk true
-    [[nodiscard]] constexpr double ParseDouble(const char* s, const char* end, bool* bOk) noexcept
+    FDF_EXPORT_INTERNAL [[nodiscard]] constexpr double ParseDouble(const char* s, const char* end, bool* bOk) noexcept
     {
         *bOk = true;
         bool bNeg = false;
@@ -1665,7 +1669,7 @@ namespace fdf::detail
     // Validates ISO-8601 timestamps (structure AND value ranges). Defers to Timestamp::FromText, the
     // single parse/validate implementation. Accepts: YYYY-MM-DD, YYYY-DDD (ordinal), YYYY-Www-D
     // (week), an optional Thh:mm:ss after a date, a bare hh:mm:ss, fractional seconds, Z / +-hh:mm
-    [[nodiscard]] constexpr bool IsValidTimestamp(std::string_view ts) noexcept
+    FDF_EXPORT_INTERNAL [[nodiscard]] constexpr bool IsValidTimestamp(std::string_view ts) noexcept
     {
         return Timestamp::FromText(ts).IsValid();
     }
@@ -4028,7 +4032,7 @@ namespace fdf
     {
         ReleaseData();
         type = Type::Bool;
-        size = static_cast<uint32_t>(std::max(0ULL, value.size()));
+        size = static_cast<uint32_t>(value.size());
         if consteval
         {
             data.boolArray = new (std::nothrow) bool[size];
@@ -4049,7 +4053,7 @@ namespace fdf
     {
         ReleaseData();
         type = Type::Int;
-        size = static_cast<uint32_t>(std::max(0ULL, value.size()));
+        size = static_cast<uint32_t>(value.size());
         if(size <= 0U)
             return;
         if consteval
@@ -4073,7 +4077,7 @@ namespace fdf
     {
         ReleaseData();
         type = Type::UInt;
-        size = static_cast<uint32_t>(std::max(0ULL, value.size()));
+        size = static_cast<uint32_t>(value.size());
         if(size <= 0U)
             return;
         if consteval
@@ -4098,7 +4102,7 @@ namespace fdf
         assert((value.size() == 3 || value.size() == 4) && "Version must include 3 or 4 elements!");
         ReleaseData();
         type = Type::UInt;
-        size = static_cast<uint32_t>(std::max(0ULL, value.size()));
+        size = static_cast<uint32_t>(value.size());
         if consteval
         {
             data.vUInt = new (std::nothrow) std::vector<uint64_t>();
@@ -4124,7 +4128,7 @@ namespace fdf
     {
         ReleaseData();
         type = Type::Float;
-        size = static_cast<uint32_t>(std::max(0ull, value.size()));
+        size = static_cast<uint32_t>(value.size());
         if(size <= 0u)
             return;
         if consteval
@@ -6007,6 +6011,7 @@ namespace fdf::detail
 
 
 #undef FDF_EXPORT
+#undef FDF_EXPORT_INTERNAL
 #undef FDF_CHECK_TOKEN
 #undef FDF_CHECK_TOKEN_FOR_EOF
 #undef FDF_FORWARD_ERROR
