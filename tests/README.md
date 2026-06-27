@@ -1,2 +1,5 @@
-# Test
-Any `.txt` or `.fdf` file within this folder is tested and outputs are written to `tests/output`
+# Tests
+
+`cases/` holds stress and edge-case `.fdf` inputs. Every `.fdf` here, plus the reference
+files in `examples/`, gets parsed and round-tripped by the suite. Generated dumps are
+written to the build tree under `tests/output`.

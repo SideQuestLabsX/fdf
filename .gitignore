@@ -4,7 +4,6 @@ _GEN/
 _PROJ/
 out/
 build/
-tests/output/
 cmake-build-*/
 
 

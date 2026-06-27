@@ -1,21 +1,21 @@
-var00[ ${ENV:PATH}, 1, 2, 3, 5.1.2, 5.1.2.4, "Test", 1920x1080, 1.0x1.0x1.0, false, 2024-12-24, 15:30:00, true ]
+var00[ 1, 2, 3, 5.1.2, 5.1.2.4, "Test", 1920x1080, 1.0x1.0x1.0, false, 2024-12-24, 15:30:00, true ]
 
 var01  // Some comment
 {
     foo=true
     bar=false
 }
-var02=
+var02
 {
     foo=true,
     bar=false,
 }
-var03 =
+var03
 {
     foo=true,
     bar=false,
 }
-var04 =  // Some comment
+var04  // Some comment
 {
     foo=true,
     bar=false,
@@ -24,9 +24,9 @@ var04 =  // Some comment
 var05{ foo=true, bar=false, }
 var06 { foo=true, bar=false }
 var07 {foo=true, bar=false}
-var08={ foo=true, bar=false }
-var09 = { foo=true, bar=false }
-var10 = {foo=true, bar=false}
+var08{ foo=true, bar=false }
+var09 { foo=true, bar=false }
+var10 {foo=true, bar=false}
 
 
 var11=2.4.6
