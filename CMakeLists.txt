@@ -9,6 +9,8 @@ endif()
 option(FDF_USE_CPP_MODULES                 "Enable C++ modules" OFF)
 option(FDF_NO_COMMENTS                     "Disable comment processing" OFF)
 option(FDF_EXTENDED_NO_COMMENT_IDENTIFIERS "Use extended identifier size limit when comments are disabled (otherwise keep standard limit)" OFF)
+option(FDF_ENABLE_ASAN                     "Enable AddressSanitizer (bundles LeakSanitizer on Linux)" OFF)
+option(FDF_ENABLE_LSAN                     "Enable standalone LeakSanitizer (non-MSVC)" OFF)
 
 
 project(fdf VERSION 0.1.0 LANGUAGES CXX)
