@@ -724,6 +724,108 @@ namespace fdf::detail
 
 
 
+        // Multi-dim numbers across the matrix: Int/UInt/Float, 2..N dims, signs in every position,
+        // widening, and malformed-input recovery
+        static void MultiDimTest()
+        {
+            auto checkInt = [](std::string_view src, std::initializer_list<int64_t> exp)
+            {
+                UniqueEntryPtr root = ParseBuffer(std::format("v = {}\n", src));
+                Entry* e = root? root->GetChild("v") : nullptr;
+                if(!CHECK_MSG(e && e->GetType() == Type::Int, src))
+                    return;
+                auto s = e->GetValue<int64_t>();
+                if(!CHECK_MSG(s.size() == exp.size(), src))
+                    return;
+                size_t i = 0;
+                for(int64_t x : exp)
+                    CHECK_MSG(s[i++] == x, src);
+            };
+            auto checkFloat = [](std::string_view src, std::initializer_list<double> exp)
+            {
+                UniqueEntryPtr root = ParseBuffer(std::format("v = {}\n", src));
+                Entry* e = root? root->GetChild("v") : nullptr;
+                if(!CHECK_MSG(e && e->GetType() == Type::Float, src))
+                    return;
+                auto s = e->GetValue<double>();
+                if(!CHECK_MSG(s.size() == exp.size(), src))
+                    return;
+                size_t i = 0;
+                for(double x : exp)
+                    CHECK_MSG(s[i++] == x, src);
+            };
+
+            // Int: dimensions 2..5, negatives in leading / middle / trailing / all positions
+            checkInt("1x2",         { 1, 2 });
+            checkInt("1x2x3",       { 1, 2, 3 });
+            checkInt("1x2x3x4",     { 1, 2, 3, 4 });
+            checkInt("1x2x3x4x5",   { 1, 2, 3, 4, 5 });
+            checkInt("-1x2",        { -1, 2 });
+            checkInt("1x-2",        { 1, -2 });
+            checkInt("1x2x-3",      { 1, 2, -3 });
+            checkInt("-1x-2x-3",    { -1, -2, -3 });
+
+            // no fixed dimension cap
+            checkInt("1x2x3x4x5x6", { 1, 2, 3, 4, 5, 6 });
+
+            // float, incl exponents and mixed signs
+            checkFloat("1.0x2.0",             { 1.0, 2.0 });
+            checkFloat("0.5x-0.5x1.0",        { 0.5, -0.5, 1.0 });
+            checkFloat("-1.5x2.5x-3.5x4.5",   { -1.5, 2.5, -3.5, 4.5 });
+            checkFloat("1.5e3x-2.5",          { 1.5e3, -2.5 });
+
+            // one float component widens the whole vector to float
+            checkFloat("1x2.0",       { 1.0, 2.0 });
+            checkFloat("1x2.5x3",     { 1.0, 2.5, 3.0 });
+            checkFloat("-1x2.5",      { -1.0, 2.5 });
+            checkFloat("1x-2.5x3",    { 1.0, -2.5, 3.0 });
+
+            // UInt component beyond INT64_MAX keeps the whole vector unsigned
+            if(UniqueEntryPtr root = ParseBuffer(std::string("v = 18446744073709551615x1\n")))
+            {
+                Entry* e = root->GetChild("v");
+                if(CHECK(e && e->GetType() == Type::UInt))
+                {
+                    auto s = e->GetValue<uint64_t>();
+                    CHECK(s.size() == 2 && s[0] == 18446744073709551615ull && s[1] == 1);
+                }
+            }
+
+            // parser-level rejects recover: bad entry skipped, sibling survives. also the heap-corruption
+            // regression, a mid-parse failure must not leave a Map-typed entry pointing at an int buffer
+            constexpr std::string_view recover[] =
+            {
+                "bad = 1x99999999999999999999999\nok = 7\n",   // component overflows u64
+                "bad = -1x99999999999999999999999\nok = 7\n",  // negative then unsigned-overflow
+                "bad = 1..0\nok = 7\n",                         // empty version component
+                "bad = -x1\nok = 7\n",                          // empty leading component
+            };
+            for(std::string_view src : recover)
+            {
+                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(src);
+                if(CHECK_MSG(static_cast<bool>(root), src))
+                {
+                    CHECK_MSG(root->GetChild("bad") == nullptr, src);   // malformed entry skipped
+                    Entry* ok = root->GetChild("ok");
+                    if(CHECK_MSG(ok && ok->GetType() == Type::Int, src))
+                        CHECK_MSG(ok->GetValue<int64_t>()[0] == 7, src);
+                }
+            }
+
+            // lexer-level rejects are fatal, an Invalid token can't be resumed past, so root is null
+            constexpr std::string_view fatal[] =
+            {
+                "bad = 1x\nok = 7\n",     // empty trailing component
+                "bad = 1xx2\nok = 7\n",   // empty middle component
+                "bad = 1.0x.\nok = 7\n",  // empty trailing float component
+            };
+            for(std::string_view src : fatal)
+                CHECK_MSG(ParseBuffer<&CountDiagnostics>(src) == nullptr, src);
+        }
+
+
+
+
         // Strings with embedded quotes survive write -> reparse. The writer picks a quote style that
         // needs no escaping where it can, and escapes embedded double quotes otherwise
         static void StringRoundTripTest()
@@ -843,6 +945,32 @@ namespace fdf::detail
                     CHECK(s.size() == 3 && s[0] == 1.5 && s[1] == 2.0e3 && s[2] == 0.001);
                 }
             }
+
+            // Multi-dimensional float with negative components
+            if(UniqueEntryPtr root = ParseBuffer(std::string("d = 0.5x-0.5x1.0\n")))
+            {
+                Entry* e = root->GetChild("d");
+                if(CHECK(e && e->GetType() == Type::Float))
+                {
+                    auto s = e->GetValue<double>();
+                    CHECK(s.size() == 3 && s[0] == 0.5 && s[1] == -0.5 && s[2] == 1.0);
+                }
+            }
+
+            // Negative component alongside an exponent
+            if(UniqueEntryPtr root = ParseBuffer(std::string("d = 1.5e3x-2.5\n")))
+            {
+                Entry* e = root->GetChild("d");
+                if(CHECK(e && e->GetType() == Type::Float))
+                {
+                    auto s = e->GetValue<double>();
+                    CHECK(s.size() == 2 && s[0] == 1.5e3 && s[1] == -2.5);
+                }
+            }
+
+            // A dash not immediately after 'x' is not a valid float component
+            if(UniqueEntryPtr root = ParseBuffer(std::string("d = 1.0-2.0\n")))
+                CHECK(!root->GetChild("d") || root->GetChild("d")->GetType() != Type::Float);
 
             // Randomized fuzz: normals + subnormals through the full write/parse pipeline
             std::mt19937_64 rng(0xF0F0CABA);
@@ -1283,6 +1411,28 @@ static_assert(ExtractValue<int64_t>("value = 25x50") == 25, "consteval multidim 
 static_assert(ExtractValue<bool>("value = truexfalsextrue") == true, "consteval multidim bool parse");
 static_assert(ExtractValue<double>("value = 3.5") > 3.4 && ExtractValue<double>("value = 3.5") < 3.6, "consteval float parse");
 
+consteval bool MultiDimNegFloatProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 0.5x-0.5x1.0\n");
+    const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
+    if(!e || e->GetType() != fdf::Type::Float)
+        return false;
+    auto s = e->GetValue<double>();
+    return s.size() == 3 && s[0] == 0.5 && s[1] == -0.5 && s[2] == 1.0;
+}
+static_assert(MultiDimNegFloatProbe(), "consteval multidim negative float parse");
+
+consteval bool MultiDimWidenProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 1x2.0x3\n");
+    const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
+    if(!e || e->GetType() != fdf::Type::Float)
+        return false;
+    auto s = e->GetValue<double>();
+    return s.size() == 3 && s[0] == 1.0 && s[1] == 2.0 && s[2] == 3.0;
+}
+static_assert(MultiDimWidenProbe(), "consteval multidim int->float widening");
+
 // Every scalar type parsed at compile time. One self-contained probe per type so a failure points
 // at the exact case. Each verifies the value parses to a single leaf child of the expected type
 consteval bool IntProbe()
@@ -1656,6 +1806,9 @@ int main()
 
     std::print("{0}\n\nNegative test\n{0}", separator);
     Test::NegativeTest();
+
+    std::print("{0}\n\nMulti-dimensional number test\n{0}", separator);
+    Test::MultiDimTest();
 
     std::print("{0}\n\nString round-trip test\n{0}", separator);
     Test::StringRoundTripTest();

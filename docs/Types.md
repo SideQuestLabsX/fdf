@@ -16,13 +16,16 @@
 
 ## Multi-dimensional numbers
 
-Numbers joined with `x` form a 2D to 5D vector, int or float
+Numbers joined with `x` form a vector. Two or more components, no fixed upper bound. The only
+restriction is all elements must be of same type. If not, we try to widen some elements to
+reach that uniformity, if we can't it's an error.
 
 ```fdf
 resolution = 1920x1080      // 2D
 scale      = 1.0x1.0x1.0    // 3D
 gradient   = 1x50x10x1      // 4D
 five       = 1x2x3x4x5      // 5D
+offset     = 0.5x-0.5x1.0   // mixing is fine
 ```
 
 ## Strings

@@ -2221,12 +2221,12 @@ namespace fdf::detail
 
                 uint8_t dotCount = 0;
                 size_t temp = firstNonDigit;
-                char lastChar = '.';
+                char prevChar = '.';  // previous char, a dash is only allowed right after 'x'
                 bool bContainsDash = false;
 
                 auto calculateResult = [&]() -> void
                 {
-                    if(lastChar == '.' || lastChar == 'x')
+                    if(prevChar == '.' || prevChar == 'x' || prevChar == '-')
                     {
                         token.type = TokenType::Invalid;  // Must end with a digit
                         return;
@@ -2250,37 +2250,40 @@ namespace fdf::detail
 
                 while(temp < content.size())
                 {
-                    lastChar = content[temp];
-                    if(constexpr_isdigit(content[temp]) || (content[temp] == '-' && lastChar == 'x'))
+                    const char cur = content[temp];
+                    if(constexpr_isdigit(cur) || (cur == '-' && prevChar == 'x'))
                     {
-                        if(content[temp] == '-')
+                        if(cur == '-')
                             bContainsDash = true;
 
+                        prevChar = cur;
                         temp++;
                         continue;
                     }
 
-                    if(content[temp] == '.')
+                    if(cur == '.')
                     {
                         if(dotCount == 1 && token.extra8 > 1)
                             return MakeInvalid(DiagnosticType::InvalidNumber);  // Float can't have more than 1 dot
                         if(dotCount > 2)
                             return MakeInvalid(DiagnosticType::InvalidNumber);  // Version can have 3 dots maximum
-                        
+
                         dotCount++;
+                        prevChar = cur;
                         temp++;
                         continue;
                     }
 
-                    if(content[temp] == 'x')
+                    if(cur == 'x')
                     {
                         dotCount = 0;
                         token.extra8++;
+                        prevChar = cur;
                         temp++;
                         continue;
                     }
 
-                    if((content[temp] == 'e' || content[temp] == 'E') && dotCount <= 1)
+                    if((cur == 'e' || cur == 'E') && dotCount <= 1)
                     {
                         // Scientific exponent: optional sign then at least one digit
                         size_t j = temp + 1;
@@ -2289,11 +2292,12 @@ namespace fdf::detail
                         if(j >= content.size() || !constexpr_isdigit(content[j]))
                             return MakeInvalid(DiagnosticType::InvalidNumber);  // Exponent needs a digit
 
-                        temp = j;  // loop consumes the exponent digits
+                        prevChar = content[j];  // exponent digit
+                        temp = j;
                         continue;
                     }
 
-                    if(constexpr_isspace(content[temp]) || content[temp] == ',')
+                    if(constexpr_isspace(cur) || cur == ',')
                     {
                         calculateResult();
                         index = static_cast<uint32_t>(temp);
@@ -2347,6 +2351,7 @@ namespace fdf::detail
 
                     if(content[firstNonDigit] == '.')
                     {
+                        token.type = TokenType::FloatLiteral;  // a dotted component makes the vector float
                         dotCount++;
                         if(dotCount > 1)
                             return MakeInvalid(DiagnosticType::InvalidNumber);  // Multidimensional numbers can't contain more than 1 dot (for each number)
@@ -4894,11 +4899,16 @@ namespace fdf::detail
             {
                 entry.data.raw = GlobalAllocator::Allocate(entry.size * sizeof(int64_t));
             }
-            
+
+            // match type to the buffer now, else an early error return leaves a Map pointing at an
+            // int buffer and ReleaseData walks it as children. Flips to UInt with the buffer below
+            entry.type = Type::Int;
+
             bool bIsUnsigned = false;
             bool bContainsAnyNegative = false;
             bool bIsFirstChar = true;
             bool bIsNegative = false;
+            bool bComponentHasDigit = false;  // rejects empty components like -x1
 
             uint64_t result = 0;
             uint8_t currentDimension = 0;
@@ -4955,6 +4965,8 @@ namespace fdf::detail
                             }
                         }
 
+                        entry.type = Type::UInt;  // keep type matched to the promoted buffer
+
                         if consteval
                             { (*entry.GetDataVector<uint64_t>())[currentDimension] = result; }
                         else
@@ -4993,22 +5005,22 @@ namespace fdf::detail
                         return false; // Overflow
 
                     result += digit;
-                }
-                else if(c == '.')
-                {
-                    while(i < view.size() && (view[i] == '.' || constexpr_isdigit(view[i])))
-                        i++;
+                    bComponentHasDigit = true;
                 }
                 else if(c == 'x')
                 {
                     if(currentDimension >= dimensionCount - 1)
                         return false;  // Too much dimensions
 
+                    if(!bComponentHasDigit)
+                        return false;  // empty component
+
                     if(!finishDimension())
                         return false;
 
                     bIsFirstChar = true;
                     bIsNegative = false;
+                    bComponentHasDigit = false;
 
                     result = 0;
                     currentDimension++;
@@ -5020,6 +5032,9 @@ namespace fdf::detail
 
                 bIsFirstChar = false;
             }
+
+            if(!bComponentHasDigit)
+                return false;  // trailing empty component
 
             if(!finishDimension())
                 return false;
@@ -5101,39 +5116,48 @@ namespace fdf::detail
     
             uint8_t currentDimension = 0;
             const uint8_t dimensionCount = static_cast<uint8_t>(entry.size);
-    
+
             uint64_t result = 0;
+            bool bComponentHasDigit = false;  // rejects empty components like "1..0"
             for(char c : view)
             {
                 if(constexpr_isdigit(c))
                 {
                     if(result > UINT64_MAX_VALUE / 10)
                         return false;  // Overflow
-    
+
                     result *= 10;
-    
+
                     const uint64_t digit = static_cast<uint64_t>(c - '0');
                     if(result > UINT64_MAX_VALUE - digit)
                         return false; // Overflow
-    
+
                     result += digit;
+                    bComponentHasDigit = true;
                 }
                 else if(c == '.')
                 {
                     if(currentDimension >= dimensionCount - 1)
                         return false;  // Too much dimensions
 
+                    if(!bComponentHasDigit)
+                        return false;  // empty component
+
                     if consteval
                         { (*entry.GetDataVector<uint64_t>())[currentDimension] = result; }
                     else
                         { static_cast<uint64_t*>(entry.data.raw)[currentDimension] = result; }
-    
+
                     result = 0;
                     currentDimension++;
+                    bComponentHasDigit = false;
                 }
                 else
                     return false;  // unknown character
             }
+
+            if(!bComponentHasDigit)
+                return false;  // trailing empty component
 
             if consteval
                 { (*entry.GetDataVector<uint64_t>())[currentDimension] = result; }
