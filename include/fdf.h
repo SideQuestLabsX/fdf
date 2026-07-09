@@ -51,9 +51,9 @@
 
 
 
-#define FDF_CHECK_TOKEN(TOKEN)         do { if(TOKEN.type == TokenType::Invalid  ) return false; } while (false)
-#define FDF_CHECK_TOKEN_FOR_EOF(TOKEN) do { if(TOKEN.type == TokenType::EndOfFile) return false; } while (false)
-#define FDF_FORWARD_ERROR(Cond)        do { if(!(Cond))                            return false; } while (false)
+#define FDF_CHECK_TOKEN(TOKEN)         do { if(TOKEN.type == TokenType::Invalid  ) return false; } while(false)
+#define FDF_CHECK_TOKEN_FOR_EOF(TOKEN) do { if(TOKEN.type == TokenType::EndOfFile) return false; } while(false)
+#define FDF_FORWARD_ERROR(Cond)        do { if(!(Cond))                            return false; } while(false)
 
 #if FDF_NO_COMMENTS
     #define FDF_COMMENT_SWITCH(...)
@@ -124,7 +124,7 @@ FDF_EXPORT namespace fdf
         Merge,
         Clear
     };
-    
+
     enum class DiagnosticSeverity : uint8_t
     {
         None,
@@ -170,15 +170,15 @@ namespace fdf::detail
 {
     template<auto DIAGNOSTIC_CALLBACK = nullptr>
     struct Utils;
-    
+
     template<typename T>
     concept IsValidIDType = std::integral<std::remove_cvref_t<T>> || std::convertible_to<std::remove_cvref_t<T>, std::string_view>;
-    
+
     template<typename Callable>
     constexpr bool IsValidDiagnosticCallback = std::is_invocable_v<Callable, const Diagnostic&>;
 
     inline constexpr size_t MAX_IDENTIFIER_LENGTH = FDF_NO_COMMENTS && FDF_EXTENDED_NO_COMMENT_IDENTIFIERS? 38 : 30;
-    
+
     struct EntryDeleter { static constexpr void operator()(Entry* e) noexcept; };
 
     inline constexpr auto SIZE_T_MAX_VALUE = std::numeric_limits<  size_t>::max();
@@ -557,7 +557,7 @@ FDF_EXPORT namespace fdf
     public:
         Entry(const Entry&) = delete;
         Entry& operator=(const Entry&) = delete;
-        
+
         constexpr Entry(Entry&& other) noexcept;
         constexpr Entry& operator=(Entry&& other) noexcept;
 
@@ -654,7 +654,7 @@ FDF_EXPORT namespace fdf
             }
         }
 
-        
+
     #if !FDF_NO_COMMENTS
         [[nodiscard]] constexpr       CommentControlBlock* GetCommentControlBlock()       noexcept  { return comment.block; }
         [[nodiscard]] constexpr const CommentControlBlock* GetCommentControlBlock() const noexcept  { return comment.block; }
@@ -723,7 +723,7 @@ FDF_EXPORT namespace fdf
                 {
                     temp = std::format("{}.{}", cur->GetIdentifier(), temp);
                 }
-                
+
                 prev = cur;
                 cur = cur->parent;
             }
@@ -746,7 +746,7 @@ FDF_EXPORT namespace fdf
             #endif
                 return {};
         }
-        
+
     private:
         constexpr void SetIdentifier_INTERNAL(std::string_view newIdentifier) noexcept;
 
@@ -766,12 +766,12 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr bool   RemoveChild(std::string_view _identifier) noexcept;
         [[nodiscard]] constexpr bool   RemoveChild(uint32_t index) noexcept;
         [[nodiscard]] constexpr bool   ClearChildren() noexcept;
-        
+
         [[nodiscard]] constexpr UniqueEntryPtr OrphanChild(Entry& e) noexcept;
         [[nodiscard]] constexpr UniqueEntryPtr OrphanChild(std::string_view _identifier) noexcept;
         [[nodiscard]] constexpr UniqueEntryPtr OrphanChild(uint32_t index) noexcept;
         [[nodiscard]] constexpr std::vector<UniqueEntryPtr> OrphanChildren() noexcept;
-        
+
     private:
         [[nodiscard]] constexpr Entry* OrphanChild_INTERNAL(Entry& e) noexcept;
         [[nodiscard]] constexpr Entry* OrphanChild_INTERNAL(std::string_view _identifier) noexcept;
@@ -788,13 +788,13 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr const Entry* GetDirectChild(std::string_view _identifier) const noexcept;
         [[nodiscard]] constexpr       Entry* GetDirectChild(uint32_t index) noexcept;
         [[nodiscard]] constexpr const Entry* GetDirectChild(uint32_t index) const noexcept;
-        
+
         [[nodiscard]] constexpr std::span<Entry*>         GetChildren() noexcept;
         [[nodiscard]] constexpr std::span<const Entry*>   GetChildren() const noexcept;
         [[nodiscard]] constexpr std::vector<Entry*>       GetChildrenRecursive() noexcept;
         [[nodiscard]] constexpr std::vector<const Entry*> GetChildrenRecursive() const noexcept;
         [[nodiscard]] constexpr size_t                    GetChildCountRecursive() const noexcept;
-    
+
     private:
         [[nodiscard]] constexpr std::span<Entry*>         GetChildren_INTERNAL() noexcept;
         [[nodiscard]] constexpr std::span<const Entry*>   GetChildren_INTERNAL() const noexcept;
@@ -811,10 +811,10 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr auto GetValue()       noexcept       { static_assert(false, "Invalid type"); }
         template<typename T>
         [[nodiscard]] constexpr auto GetValue() const noexcept       { static_assert(false, "Invalid type"); }
-        
+
         constexpr void SetType(Type _type) noexcept;
         constexpr void Resize(uint32_t _size) noexcept;
-        
+
         constexpr void SetValue(NullType) noexcept;
         constexpr void SetValue(NilType) noexcept;
         constexpr void SetValue(ArrayType) noexcept;
@@ -828,7 +828,7 @@ FDF_EXPORT namespace fdf
         constexpr void SetValue(const char* value) noexcept;
         constexpr void SetValue(const Timestamp& value) noexcept;
         constexpr void SetValue(auto* value) = delete; // no pointer types (except char*)
-        
+
         constexpr void SetValue(std::span<bool> value) noexcept;
         template<std::signed_integral T>
         constexpr void SetValue(std::span<T> value) noexcept;
@@ -849,21 +849,21 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr bool ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty) noexcept;
         [[nodiscard]] constexpr bool Combine(UniqueEntryPtr& other, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty) noexcept;
     };
-    
-    
-    
-    
-    
+
+
+
+
+
     template<auto DIAGNOSTIC_CALLBACK = nullptr>
     [[nodiscard]] UniqueEntryPtr ParseFile(const std::filesystem::path& filepath) noexcept;
     template<auto DIAGNOSTIC_CALLBACK = nullptr>
     [[nodiscard]] constexpr UniqueEntryPtr ParseBuffer(std::string_view content) noexcept;
-        
+
     template<Style STYLE = {}>
     [[nodiscard]] bool WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists = true) noexcept;
     template<Style STYLE = {}>
     constexpr void WriteBuffer(const Entry& root, std::string& buffer) noexcept;
-    
+
     [[nodiscard]] constexpr UniqueEntryPtr NewEntry() noexcept;
 }
 
@@ -1637,7 +1637,7 @@ namespace fdf::detail
     {
         return c >= '0' && c <= '9';
     }
-    
+
     [[nodiscard]] constexpr bool IsKeyword(std::string_view view) noexcept
     {
         for(const auto keyword : KEYWORDS)
@@ -1647,19 +1647,19 @@ namespace fdf::detail
         }
         return false;
     }
-    
+
     [[nodiscard]] constexpr bool IsValidIdentifier(std::string_view identifier) noexcept
     {
         if(identifier.empty() || identifier.size() > MAX_IDENTIFIER_LENGTH || (!constexpr_isalpha(identifier[0]) && identifier[0] != '_'))
             return false;
-        
+
         size_t firstNonID = 1;
         while(firstNonID < identifier.size() && (constexpr_isalpha(identifier[firstNonID]) || constexpr_isdigit(identifier[firstNonID]) || identifier[firstNonID] == '_'))
             firstNonID++;
-        
+
         return firstNonID >= identifier.size()? !IsKeyword(identifier) : false;
     }
-    
+
     [[nodiscard]] constexpr bool IsOpenBrace(const char c)   noexcept  { return c == '{' || c == '['; }
     [[nodiscard]] constexpr bool IsCloseBrace(const char c)  noexcept  { return c == '}' || c == ']'; }
     [[nodiscard]] constexpr bool IsCurlyBrace(const char c)  noexcept  { return c == '{' || c == '}'; }
@@ -1709,7 +1709,7 @@ namespace fdf::detail
                 U* cur = freeList;
                 U* nex = cur + 1;
                 U* end = data + ELEMENT_COUNT;
-                
+
                 while(nex < end)
                 {
                     cur->p = nex;
@@ -1852,7 +1852,7 @@ namespace fdf::detail
     {
         template<auto DIAGNOSTIC_CALLBACK>
         friend struct detail::Utils;
-        
+
         inline static constinit SlabAllocator<8U>  B8;
         inline static constinit SlabAllocator<16U> B16;
         inline static constinit SlabAllocator<32U> B32;
@@ -1870,7 +1870,7 @@ namespace fdf::detail
                 return B32.Allocate();
             if(size <= 64)
                 return B64.Allocate();
-            
+
             void* p = ::operator new(size, std::nothrow);
             assert(p && "Allocation shouldn't fail");
             return p;
@@ -1886,7 +1886,7 @@ namespace fdf::detail
                 return B32.Deallocate(p);
             if(size <= 64U)
                 return B64.Deallocate(p);
-            
+
             ::operator delete(p);
             return true;
         }
@@ -2512,13 +2512,13 @@ namespace fdf
         other.comment.str = nullptr;
 #endif
     }
-    
+
     constexpr Entry& Entry::operator=(Entry&& other) noexcept
     {
         if(parent)
             (void)parent->OrphanChild_INTERNAL(*this);
         ReleaseEverything();
-        
+
         type = other.type;
         size = other.size;
         capacity = other.capacity;
@@ -2541,8 +2541,8 @@ namespace fdf
 
         return *this;
     }
-    
-    
+
+
     constexpr Entry::Entry() noexcept
     {
         SetIdentifierSize(0);
@@ -2554,15 +2554,15 @@ namespace fdf
             (void)parent->OrphanChild_INTERNAL(*this);
         ReleaseEverything();
     }
-    
-    
+
+
     constexpr void Entry::SetIdentifier_INTERNAL(std::string_view newIdentifier) noexcept
     {
         SetIdentifierSize(static_cast<uint8_t>(std::min(newIdentifier.size(), detail::MAX_IDENTIFIER_LENGTH)));
         detail::constexpr_memcpy(identifier, newIdentifier.data(), GetIdentifierSize());
         identifier[GetIdentifierSize()] = '\0';
     }
-    
+
     constexpr bool Entry::SetIdentifier(std::string_view newIdentifier) noexcept
     {
         if(!detail::IsValidIdentifier(newIdentifier))
@@ -2608,7 +2608,7 @@ namespace fdf
                 GetCommentControlBlock()->capacity = static_cast<uint32_t>(newComment.size());
                 GetCommentControlBlock()->size = GetCommentControlBlock()->capacity;
             }
-            
+
             size_t i = 0, j = 0;
             while(i < newComment.size() && detail::constexpr_isspace(newComment[i]))
                 i++;
@@ -2719,7 +2719,7 @@ namespace fdf
         }
     #endif
     }
-    
+
     constexpr void Entry::ReleaseEverything() noexcept
     {
         ReleaseData();
@@ -2728,7 +2728,7 @@ namespace fdf
 
 
 
-    
+
     constexpr uint32_t Entry::FindChildIndex(const Entry& e) const noexcept
     {
         assert(IsContainer() && "You can only find index, if it's a container!");
@@ -2747,7 +2747,7 @@ namespace fdf
         }
         return detail::UINT32_MAX_VALUE;
     }
-    
+
     constexpr uint32_t Entry::FindChildIndex(const std::string_view _identifier) const noexcept
     {
         assert(IsContainer() && "You can only find index, if it's a container!");
@@ -2766,30 +2766,30 @@ namespace fdf
         }
         return detail::UINT32_MAX_VALUE;
     }
-    
+
     constexpr Entry* Entry::Emplace(std::string_view _identifier) noexcept
     {
         assert(IsContainer() && "Sanity check!");
-        
+
         if(type == Type::Map && !detail::IsValidIdentifier(_identifier))
             return nullptr;
-        
+
         UniqueEntryPtr e = detail::Utils<>::Create();
         if(!e)
             return nullptr;
         if(type == Type::Map)
             e->SetIdentifier_INTERNAL(_identifier);
-        
+
         return AddChild(e);
     }
-    
+
     constexpr Entry* Entry::AddChild(UniqueEntryPtr& e) noexcept
     {
         if(!e || !IsContainer() || e->parent)
             return nullptr;
-        
+
         e->parent = this;
-        
+
         //TODO: In this case, we always prefer new one silently. We should allow customizing that behaviour
         if(type == Type::Map)
         {
@@ -2851,7 +2851,7 @@ namespace fdf
     {
         if(size == 0 || !IsContainer())
             return false;
-        
+
         const uint32_t index = FindChildIndex(e);
         return index != detail::UINT32_MAX_VALUE? RemoveChild(index) : false;
     }
@@ -2895,7 +2895,7 @@ namespace fdf
         size--;
         return true;
     }
-    
+
     constexpr bool Entry::ClearChildren() noexcept
     {
         if(!IsContainer() || !data.vEntry)
@@ -2918,14 +2918,14 @@ namespace fdf
                 detail::Utils<>::Destroy(static_cast<Entry**>(data.raw)[i]);
             }
         }
-        
+
         size = 0;
         return true;
     }
 
 
 
-    
+
     constexpr UniqueEntryPtr Entry::OrphanChild(Entry& e) noexcept
     {
         return UniqueEntryPtr(OrphanChild_INTERNAL(e));
@@ -2940,7 +2940,7 @@ namespace fdf
     {
         return UniqueEntryPtr(OrphanChild_INTERNAL(index));
     }
-    
+
     constexpr std::vector<UniqueEntryPtr> Entry::OrphanChildren() noexcept
     {
         std::vector<UniqueEntryPtr> vec;
@@ -2949,29 +2949,29 @@ namespace fdf
             vec.emplace_back(e);
         return vec;
     }
-    
-    
-    
-    
+
+
+
+
     // ReSharper disable once CppParameterMayBeConstPtrOrRef (technically we don't modify provided object, but it's modified through another mechanism)
     constexpr Entry* Entry::OrphanChild_INTERNAL(Entry& e) noexcept
     {
         if(size == 0 || !IsContainer())
             return nullptr;
-        
+
         const uint32_t index = FindChildIndex(e);
         return index != detail::UINT32_MAX_VALUE? OrphanChild_INTERNAL(index) : nullptr;
     }
-    
+
     constexpr Entry* Entry::OrphanChild_INTERNAL(std::string_view _identifier) noexcept
     {
         if(size == 0 || !IsContainer())
             return nullptr;
-        
+
         const uint32_t index = FindChildIndex(_identifier);
         return index != detail::UINT32_MAX_VALUE? OrphanChild_INTERNAL(index) : nullptr;
     }
-    
+
     constexpr Entry* Entry::OrphanChild_INTERNAL(uint32_t index) noexcept
     {
         if(index >= size || !IsContainer())
@@ -2999,16 +2999,16 @@ namespace fdf
         size--;
         return original;
     }
-    
+
     constexpr std::span<Entry*> Entry::OrphanChildren_INTERNAL() noexcept
     {
         if(!IsContainer() || !data.vEntry)
             return {};
-        
+
         const auto children = GetChildren();
         for(Entry* e : children)
             e->parent = nullptr;
-        
+
         size = 0;
         return children;
     }
@@ -3029,7 +3029,7 @@ namespace fdf
             return nullptr;
 
         const Entry* currentEntry = this;
-        
+
         if constexpr(std::integral<std::remove_cvref_t<T>>)
             currentEntry = GetDirectChild(static_cast<uint32_t>(param));
         else
@@ -3059,7 +3059,7 @@ namespace fdf
                     currentEntry = currentEntry->GetDirectChild(cur);
             }
         }
-        
+
         if constexpr(sizeof...(args) > 0)
             return currentEntry? currentEntry->GetChild(std::forward<Args>(args)...) : nullptr;
         return currentEntry == this? nullptr : currentEntry;
@@ -3067,7 +3067,7 @@ namespace fdf
 
 
 
-    
+
     constexpr Entry* Entry::GetDirectChild(std::string_view _identifier) noexcept
     {
         if(size == 0 || type != Type::Map)
@@ -3080,12 +3080,12 @@ namespace fdf
             return nullptr;
         return GetDirectChild(FindChildIndex(_identifier));
     }
-    
+
     constexpr Entry* Entry::GetDirectChild(uint32_t index) noexcept
     {
         if(index >= size || !IsContainer())
             return nullptr;
-        
+
         if consteval
             { return (*GetDataVector<Entry*>())[index]; }
         return static_cast<Entry**>(data.raw)[index];
@@ -3094,15 +3094,15 @@ namespace fdf
     {
         if(index >= size || !IsContainer())
             return nullptr;
-        
+
         if consteval
             { return (*GetDataVector<Entry*>())[index]; }
         return static_cast<Entry**>(data.raw)[index];
     }
 
-    
-    
-    
+
+
+
     constexpr std::span<Entry*> Entry::GetChildren() noexcept
     {
         if(size == 0 || !IsContainer())
@@ -3125,11 +3125,11 @@ namespace fdf
         }
         return {static_cast<const Entry**>(data.raw), size};
     }
-    
+
     constexpr std::span<Entry*> Entry::GetChildren_INTERNAL() noexcept
     {
         assert((size != 0 || IsContainer()) && "If we opt into this version which doesn't checks these, it should be already in a known good state!");
-        
+
         if consteval
         {
             return *GetDataVector<Entry*>();
@@ -3139,7 +3139,7 @@ namespace fdf
     constexpr std::span<const Entry*> Entry::GetChildren_INTERNAL() const noexcept
     {
         assert((size != 0 || IsContainer()) && "If we opt into this version which doesn't checks these, it should be already in a known good state!");
-        
+
         if consteval
         {
             return {const_cast<const Entry**>(const_cast<Entry*>(this)->GetDataVector<Entry*>()->data()), size};
@@ -3160,7 +3160,7 @@ namespace fdf
     {
         if(size == 0 || !IsContainer())
             return 0;
-        
+
         size_t total = 0;
         std::vector<const Entry*> stack;
         stack.push_back(this);
@@ -3180,7 +3180,7 @@ namespace fdf
                 }
             }
         }
-        
+
         return total;
     }
 
@@ -3188,7 +3188,7 @@ namespace fdf
     {
         if(size == 0 || !IsContainer())
             return {};
-        
+
         std::vector<Entry*> stack;
         std::vector<Entry*> result;
         stack.push_back(this);
@@ -3208,7 +3208,7 @@ namespace fdf
                 }
             }
         }
-        
+
         return result;
     }
 
@@ -3216,7 +3216,7 @@ namespace fdf
     {
         if(size == 0 || !IsContainer())
             return {};
-        
+
         std::vector<const Entry*> stack;
         std::vector<const Entry*> result;
         stack.push_back(this);
@@ -3236,7 +3236,7 @@ namespace fdf
                 }
             }
         }
-        
+
         return result;
     }
 
@@ -3293,7 +3293,7 @@ namespace fdf
                     callback(*this);
                 return;
             }
-            
+
             std::vector<Entry*> stack;
             if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
             {
@@ -3330,13 +3330,13 @@ namespace fdf
                     callback(*this);
                 return;
             }
-            
+
             enum class Phase : uint8_t { Pre, InOrder, Leaf, Array, Map };
             struct Frame { Entry* e; Phase phase; uint32_t idx;};
-        
+
             std::vector<Frame> stack;
             stack.push_back(Frame{ this, Phase::Pre, 0 });
-        
+
             while(!stack.empty())
             {
                 Frame& f = stack.back();
@@ -3353,7 +3353,7 @@ namespace fdf
                             if(f.e != this)
                                 callback(*f.e);
                         }
-            
+
                         // Arrays are positional: emit children in order. Maps group by type
                         f.phase = f.e->type == Type::Array? Phase::InOrder : Phase::Leaf;
                         break;
@@ -3385,7 +3385,7 @@ namespace fdf
                             if(!c->IsContainer())
                                 callback(*c);
                         }
-                        
+
                         f.phase = Phase::Array;
                         break;
                     }
@@ -3485,7 +3485,7 @@ namespace fdf
                     callback(*this);
                 return;
             }
-            
+
             std::vector<const Entry*> stack;
             if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
             {
@@ -3522,13 +3522,13 @@ namespace fdf
                     callback(*this);
                 return;
             }
-            
+
             enum class Phase : uint8_t { Pre, InOrder, Leaf, Array, Map };
             struct Frame { const Entry* e; Phase phase; uint32_t idx;};
-        
+
             std::vector<Frame> stack;
             stack.push_back(Frame{ this, Phase::Pre, 0 });
-        
+
             while(!stack.empty())
             {
                 Frame& f = stack.back();
@@ -3545,7 +3545,7 @@ namespace fdf
                             if(f.e != this)
                                 callback(*f.e);
                         }
-            
+
                         // Arrays are positional: emit children in order. Maps group by type
                         f.phase = f.e->type == Type::Array? Phase::InOrder : Phase::Leaf;
                         break;
@@ -3577,7 +3577,7 @@ namespace fdf
                             if(!c->IsContainer())
                                 callback(*c);
                         }
-                        
+
                         f.phase = Phase::Array;
                         break;
                     }
@@ -3657,7 +3657,7 @@ namespace fdf
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<int>() noexcept  { return GetValue<int64_t>(); }
-    
+
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<uint64_t>() noexcept
     {
@@ -3730,7 +3730,7 @@ namespace fdf
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<int>() const noexcept  { return GetValue<int64_t>(); }
-    
+
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<uint64_t>() const noexcept
     {
@@ -3781,13 +3781,13 @@ namespace fdf
 
 
 
-    
-    
-    
-    
-    
-    
-    
+
+
+
+
+
+
+
     constexpr void Entry::SetType(Type _type) noexcept
     {
         if(_type == type)
@@ -3795,7 +3795,7 @@ namespace fdf
         ReleaseData();
         type = _type;
     }
-    
+
     // Resize only applies to numeric scalar arrays. Existing elements are preserved, new ones zero-filled
     constexpr void Entry::Resize(const uint32_t _size) noexcept
     {
@@ -3876,11 +3876,11 @@ namespace fdf
 
         size = _size;
     }
-    
-    
-    
-    
-    
+
+
+
+
+
     constexpr void Entry::SetValue(NullType) noexcept
     {
         ReleaseData();
@@ -3891,7 +3891,7 @@ namespace fdf
         ReleaseData();
         type = Type::Null;
     }
-    
+
     constexpr void Entry::SetValue(ArrayType) noexcept
     {
         ReleaseData();
@@ -3902,7 +3902,7 @@ namespace fdf
         ReleaseData();
         type = Type::Map;
     }
-    
+
     constexpr void Entry::SetValue(const bool value) noexcept
     {
         ReleaseData();
@@ -3920,7 +3920,7 @@ namespace fdf
             static_cast<bool*>(data.raw)[0] = value;
         }
     }
-    
+
     constexpr void Entry::SetValue(const std::signed_integral auto value) noexcept
     {
         ReleaseData();
@@ -3939,7 +3939,7 @@ namespace fdf
             static_cast<int64_t*>(data.raw)[0] = static_cast<int64_t>(value);
         }
     }
-    
+
     constexpr void Entry::SetValue(const std::unsigned_integral auto value) noexcept
     {
         ReleaseData();
@@ -3958,7 +3958,7 @@ namespace fdf
             static_cast<uint64_t*>(data.raw)[0] = static_cast<uint64_t>(value);
         }
     }
-    
+
     constexpr void Entry::SetValue(const std::floating_point auto value) noexcept
     {
         ReleaseData();
@@ -3977,7 +3977,7 @@ namespace fdf
             static_cast<double*>(data.raw)[0] = static_cast<double>(value);
         }
     }
-    
+
     constexpr void Entry::SetValue(const std::string_view value) noexcept
     {
         ReleaseData();
@@ -3997,12 +3997,12 @@ namespace fdf
             (static_cast<char*>(data.raw) + sizeof(uint32_t))[value.size()] = '\0';
         }
     }
-    
+
     constexpr void Entry::SetValue(const char value) noexcept
     {
         SetValue(std::string_view(&value, 1));
     }
-    
+
     constexpr void Entry::SetValue(const char* value) noexcept
     {
         SetValue(std::string_view(value));
@@ -4028,11 +4028,11 @@ namespace fdf
             (static_cast<char*>(data.raw) + sizeof(uint32_t))[size] = '\0';
         }
     }
-    
-    
-    
-    
-    
+
+
+
+
+
     constexpr void Entry::SetValue(std::span<bool> value) noexcept
     {
         ReleaseData();
@@ -4052,7 +4052,7 @@ namespace fdf
                 static_cast<bool*>(data.raw)[i] = value[i];
         }
     }
-    
+
     template <std::signed_integral T>
     constexpr void Entry::SetValue(std::span<T> value) noexcept
     {
@@ -4076,7 +4076,7 @@ namespace fdf
                 static_cast<int64_t*>(data.raw)[i] = static_cast<int64_t>(value[i]);
         }
     }
-    
+
     template <std::unsigned_integral T>
     constexpr void Entry::SetValue(std::span<T> value) noexcept
     {
@@ -4100,7 +4100,7 @@ namespace fdf
                 static_cast<uint64_t*>(data.raw)[i] = static_cast<uint64_t>(value[i]);
         }
     }
-    
+
     template <std::unsigned_integral T>
     constexpr void Entry::SetValue(std::span<T> value, VersionType) noexcept
     {
@@ -4127,7 +4127,7 @@ namespace fdf
                 static_cast<uint64_t*>(data.raw)[i] = static_cast<uint64_t>(value[i]);
         }
     }
-    
+
     template <std::floating_point T>
     constexpr void Entry::SetValue(std::span<T> value) noexcept
     {
@@ -4177,7 +4177,7 @@ namespace fdf
             case Type::String:
             case Type::Timestamp:
                 return GetValue<char>();
-            
+
             case Type::Hex:
             {
                 // Stored as "0x" + digits, no terminator. Keep the "0x" prefix lowercase (the lexer only
@@ -4300,22 +4300,22 @@ namespace fdf
         std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
         return ParseCombineBuffer<DIAGNOSTIC_CALLBACK>(content, fileCommentCombineStrategy);
     }
-    
+
     template <auto DIAGNOSTIC_CALLBACK>
     constexpr bool Entry::ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy) noexcept
     {
         if(type != Type::Map)
             return false;
-        
+
         UniqueEntryPtr other = detail::Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(content);
         return Combine(other, fileCommentCombineStrategy);
     }
-    
+
     constexpr bool Entry::Combine(UniqueEntryPtr& other, [[maybe_unused]] CommentCombineStrategy fileCommentCombineStrategy) noexcept
     {
         if(!IsContainer() || type != other->type)
             return false;
-        
+
     #if !FDF_NO_COMMENTS
         switch(fileCommentCombineStrategy)
         {
@@ -4342,14 +4342,14 @@ namespace fdf
         default: std::unreachable();
         }
     #endif
-        
+
         return AddChild(other);
     }
-    
-    
-    
-    
-    
+
+
+
+
+
     template<auto DIAGNOSTIC_CALLBACK>
     UniqueEntryPtr ParseFile(const std::filesystem::path& filepath) noexcept
     {
@@ -4396,14 +4396,14 @@ namespace fdf
     {
         detail::Utils<>::WriteBuffer<STYLE>(root, buffer);
     }
-    
-    
+
+
     constexpr UniqueEntryPtr NewEntry() noexcept
     {
         UniqueEntryPtr e = detail::Utils<>::Create();
         if(!e)
             return nullptr;
-        
+
         e->type = Type::Map;
         return e;
     }
@@ -4443,7 +4443,7 @@ namespace fdf::detail
             }
         }
     }
-    
+
     constexpr void EntryDeleter::operator()(Entry* e) noexcept
     {
         Utils<>::Destroy(e);
@@ -4524,7 +4524,7 @@ namespace fdf::detail
         if(!root)
             return nullptr;
         root->type = Type::Map;
-        
+
         while(true)
         {
             #if !FDF_NO_COMMENTS
@@ -4561,7 +4561,7 @@ namespace fdf::detail
                                 currentToken.count--;
                             }
                         }
-        
+
                         if(fileCommentToken.type != TokenType::NonExisting)
                             Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
                         fileCommentToken = currentToken;
@@ -4574,10 +4574,10 @@ namespace fdf::detail
                     }
                 }
             #endif
-        
+
                 currentToken = tokenizer.Advance();
             }
-        
+
             if(currentToken.type == TokenType::Identifier)
             {
                 const uint32_t childCountBefore = root->GetChildCount();
@@ -4616,7 +4616,7 @@ namespace fdf::detail
                     root->comment.str = new (std::nothrow) std::string();
                     assert(root->comment.str && "Allocation shouldn't fail");
                     root->GetCommentString()->reserve(view.size());
-                    
+
                     bool bAfterNewLine = true;
                     for(char c : view)
                     {
@@ -4664,7 +4664,7 @@ namespace fdf::detail
                 }
             }
         #endif
-        
+
         return root;
     }
 
@@ -4716,7 +4716,7 @@ namespace fdf::detail
             FDF_CHECK_TOKEN(currentToken);
             FDF_CHECK_TOKEN_FOR_EOF(currentToken);
         }
-        
+
         if(IsValueLiteral(currentToken.type) && (bHasEqual || parent.type == Type::Array))
             return ParseSimpleValue(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
 
@@ -4738,7 +4738,7 @@ namespace fdf::detail
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseSimpleValue(Tokenizer& tokenizer, Entry& entry    FDF_COMMENT_SWITCH(, Token comment)) noexcept
     {
         assert(IsValueLiteral(tokenizer.Current().type) && "Sanity check!");
-        
+
         Token currentToken = tokenizer.Current();
         const std::string_view view = tokenizer.ToView(currentToken);
 
@@ -4751,7 +4751,7 @@ namespace fdf::detail
                 FDF_CHECK_TOKEN(currentToken);
                 FDF_CHECK_TOKEN_FOR_EOF(currentToken);
             }
-            
+
             if(currentToken.type == TokenType::Comment)
             {
             #if !FDF_NO_COMMENTS
@@ -4800,7 +4800,7 @@ namespace fdf::detail
             if(currentToken.extra8 == 4)
             {
                 std::string_view mdBool = view;
-                
+
                 entry.type = Type::Bool;
                 entry.size = static_cast<uint32_t>(std::ranges::count(mdBool, 'x')) + 1;
                 if consteval
@@ -4812,7 +4812,7 @@ namespace fdf::detail
                 {
                     entry.data.raw = GlobalAllocator::Allocate(entry.size * sizeof(bool));
                 }
-                
+
                 size_t cur = 0;
                 bool bLastWasBoolLiteral = false;
                 while(!mdBool.empty())
@@ -4948,7 +4948,7 @@ namespace fdf::detail
                                 assert(temp && "Allocation shouldn't fail");
                                 auto& oldVec = *entry.GetDataVector<int64_t>();
                                 temp->resize(oldVec.size());
-                                
+
                                 for(size_t i = 0; i < oldVec.size(); ++i)
                                     (*temp)[i] = static_cast<uint64_t>(oldVec[i]);
 
@@ -5045,7 +5045,7 @@ namespace fdf::detail
 
 
 
-        
+
         if(currentToken.type == TokenType::FloatLiteral)
         {
             entry.type = Type::Float;
@@ -5093,10 +5093,10 @@ namespace fdf::detail
 
             return postProcess();
         }
-    
-    
-    
-    
+
+
+
+
         if(currentToken.type == TokenType::VersionLiteral)
         {
             entry.type = Type::Version;
@@ -5113,7 +5113,7 @@ namespace fdf::detail
             {
                 entry.data.raw = GlobalAllocator::Allocate(entry.size * sizeof(uint64_t));
             }
-    
+
             uint8_t currentDimension = 0;
             const uint8_t dimensionCount = static_cast<uint8_t>(entry.size);
 
@@ -5189,7 +5189,7 @@ namespace fdf::detail
             entry.data.raw = GlobalAllocator::Allocate(entry.size + 1 + sizeof(uint32_t));
             *static_cast<uint32_t*>(entry.data.raw) = entry.size;
         }
-        
+
         size_t size = 0;
         auto writeCharacter = [&](char c)
         {
@@ -5280,9 +5280,9 @@ namespace fdf::detail
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseArray      (Tokenizer& tokenizer, Entry& array   FDF_COMMENT_SWITCH(, Token comment)) noexcept
     {
         assert(tokenizer.Current().type == TokenType::SquareBraceOpen && "Sanity check!");
-        
+
         array.type = Type::Array;
-        
+
         Token currentToken = tokenizer.Advance();
         FDF_CHECK_TOKEN(currentToken);
         FDF_CHECK_TOKEN_FOR_EOF(currentToken);
@@ -5332,7 +5332,7 @@ namespace fdf::detail
             {
                 currentToken = tokenizer.Advance();
                 FDF_CHECK_TOKEN(currentToken);
-                
+
                 if(currentToken.type == TokenType::Comma)
                 {
                     currentToken = tokenizer.Advance();
@@ -5387,7 +5387,7 @@ namespace fdf::detail
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseMap        (Tokenizer& tokenizer, Entry& map   FDF_COMMENT_SWITCH(, Token comment)) noexcept
     {
         assert(tokenizer.Current().type == TokenType::CurlyBraceOpen && "Sanity check!");
-        
+
         map.type = Type::Map;
 
         Token currentToken = tokenizer.Advance();
@@ -5439,7 +5439,7 @@ namespace fdf::detail
             {
                 currentToken = tokenizer.Advance();
                 FDF_CHECK_TOKEN(currentToken);
-                
+
                 if(currentToken.type == TokenType::Comma)
                 {
                     currentToken = tokenizer.Advance();
@@ -5506,8 +5506,8 @@ namespace fdf::detail
     struct ScopePositions<true> { size_t begin = 0, end = 0, textBegin = 0, spaces = 0; };
     template<>
     struct ScopePositions<false>{ size_t begin = 0; };
-    
-    
+
+
     template<auto DIAGNOSTIC_CALLBACK>
     template<Style STYLE>
     constexpr void Utils<DIAGNOSTIC_CALLBACK>::WriteBuffer(const Entry& root, std::string& buffer, const bool bOverwrite) noexcept
@@ -5613,14 +5613,14 @@ namespace fdf::detail
                         addTabFn(lastDepth - 1 - static_cast<size_t>(i));
                         buffer.push_back(bWasMap? '}' : ']');
                         scopes[j].end = buffer.size() - 1;
-                        
+
                         if constexpr(STYLE.bCommas)
                         {
                             if(bNested)
                                 buffer.push_back(',');
                         }
                         buffer.push_back('\n');
-                        
+
                         for(size_t pos = scopes[j].end; pos - 2 > scopes[j].begin; pos--)
                         {
                             if(buffer[pos] == '/' && buffer[pos - 1] == '/')
@@ -5729,7 +5729,7 @@ namespace fdf::detail
                             }
                             buffer.append("\n");
                         }
-                        
+
                         if(bMultiLine)
                             buffer.insert(start, 1, '\n');
                     }
@@ -5795,7 +5795,7 @@ namespace fdf::detail
                 auto& scope = scopes.emplace_back();
                 if constexpr(CHECK_SINGLE_LINE)
                     { scope.textBegin = buffer.size(); }
-                
+
                 if(!e.parent || e.parent->type != Type::Array)
                 {
                     writeEntryNameFn(e);
@@ -5805,7 +5805,7 @@ namespace fdf::detail
                         addTabFn(depth);
                     }
                 }
-                
+
                 buffer.push_back(bIsMap? '{' : '[');
                 scope.begin = buffer.size() - 1;
                 buffer.push_back('\n');
@@ -5888,8 +5888,8 @@ namespace fdf::detail
 
                 if(found != detail::SIZE_T_MAX_VALUE)
                     i = found;
-                
-                
+
+
                 // Delete blank lines between multiple new lines
                 size_t newLinePos = detail::SIZE_T_MAX_VALUE;
                 for(found = scopes[i].end + 1; found < buffer.size(); found++)
@@ -5925,8 +5925,8 @@ namespace fdf::detail
                     if(!detail::constexpr_isspace(buffer[found]))
                         break;
                 }
-                
-                
+
+
                 for(size_t pos = scopes[i].end; pos > scopes[i].begin; pos--)
                 {
                     if(buffer[pos] == '\n')
@@ -5953,11 +5953,11 @@ namespace fdf::detail
                             buffer.erase(pos + 1, 1);
                         if(bIncremented)
                             --pos;
-                        
+
                         // Eliminate multiple new lines
                         while(pos - 1 > scopes[i].begin && buffer[pos - 1] == '\n')
                             buffer.erase(--pos, 1);
-                        
+
                         // If it contains nested single line, add some spaces to make it more clear
                         if(pos - 1 >= scopes[i].begin)
                         {
@@ -5966,7 +5966,7 @@ namespace fdf::detail
                         }
                     }
                 }
-                
+
                 for(size_t pos = scopes[i].begin; pos > scopes[i].textBegin; pos--)
                 {
                     if(buffer[pos] == '\n')
