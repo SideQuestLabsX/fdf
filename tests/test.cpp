@@ -53,15 +53,8 @@ namespace fdf::detail
         "SquareBraceOpen ",
         "SquareBraceClose",
 
-        "Identifier      ",
-
-        "Keyword         ",
-        "IntLiteral      ",
-        "FloatLiteral    ",
         "StringLiteral   ",
-        "HexLiteral      ",
-        "VersionLiteral  ",
-        "TimestampLiteral"
+        "Atom            ",
     };
 
     // Order must match Type in fdf.h

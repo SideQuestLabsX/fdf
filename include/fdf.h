@@ -910,14 +910,6 @@ namespace fdf::detail
 
         StringLiteral,  // Quoted "Foo" or 'Foo'
         Atom,           // Any unquoted character sequence, key or value. 'IsValidIdentifier()' and 'ClassifyAtom()' adds required context in the parser
-
-        // Concrete value types produced by ClassifyAtom, NOT emitted by the lexer
-        Keyword,  // null / nil / true / false / truexfalsextrue...
-        IntLiteral,
-        FloatLiteral,
-        HexLiteral,
-        VersionLiteral,
-        TimestampLiteral,
     };
 
     FDF_EXPORT_INTERNAL struct Token
@@ -1259,7 +1251,7 @@ namespace fdf::detail
     }
 
     // Shortest round-trip text for any finite double (and inf/nan sentinels). Always emits a '.' or
-    // 'e' so the tokenizer classifies the result as a FloatLiteral, never an int
+    // 'e' so the value re-parses as a Float, never an Int
     FDF_EXPORT_INTERNAL constexpr void AppendDouble(std::string& s, double v) noexcept
     {
         const uint64_t bits = std::bit_cast<uint64_t>(v);
@@ -1638,12 +1630,12 @@ namespace fdf::detail
     }
 
     // Resolve a Atom's text into a concrete value type, and count components for Int/Float/Version
-    // Only structurally impossible input returns Invalid, content is validated by the per-type parse
-    [[nodiscard]] constexpr TokenType ClassifyAtom(std::string_view view, uint8_t& components) noexcept
+    // Only structurally impossible input returns false, content is validated by the per-type parse
+    [[nodiscard]] constexpr bool ClassifyAtom(std::string_view view, Type& outType, uint8_t& components) noexcept
     {
         components = 1;
         if(view.empty())
-            return TokenType::Invalid;
+            return false;
 
         // keyword literals, resolved here now that the lexer no longer classifies them. extra8 = the
         // KEYWORDS index, 4 marks an x-joined bool vector
@@ -1652,13 +1644,15 @@ namespace fdf::detail
             if(view == KEYWORDS[i])
             {
                 components = static_cast<uint8_t>(i);
-                return TokenType::Keyword;
+                outType = i <= 1? Type::Null : Type::Bool;
+                return true;
             }
         }
         if(view.starts_with(KEYWORDS[2]) || view.starts_with(KEYWORDS[3]))
         {
             components = 4;
-            return TokenType::Keyword;
+            outType = Type::Bool;
+            return true;
         }
 
         // the trailing '#' makes 0x..# unambiguously hex, so a non-hex digit here is malformed
@@ -1668,9 +1662,10 @@ namespace fdf::detail
             {
                 const char c = view[i];
                 if(!constexpr_isdigit(c) && !(c >= 'a' && c <= 'f') && !(c >= 'A' && c <= 'F'))
-                    return TokenType::Invalid;
+                    return false;
             }
-            return TokenType::HexLiteral;
+            outType = Type::Hex;
+            return true;
         }
 
         const bool bHasX = view.find('x') != std::string_view::npos;
@@ -1687,7 +1682,10 @@ namespace fdf::detail
         }
 
         if(view.find(':') != std::string_view::npos || (!bHasX && bDateDash))
-            return TokenType::TimestampLiteral;  // validated by the parse below
+        {
+            outType = Type::Timestamp;  // validated by the parse below
+            return true;
+        }
 
         uint8_t dotCount = 0;
         bool bAnyFloat = false;
@@ -1712,13 +1710,15 @@ namespace fdf::detail
             if(dotCount == 2 || dotCount == 3)  // 3-4 dotted components is a version
             {
                 components = static_cast<uint8_t>(dotCount + 1);
-                return TokenType::VersionLiteral;
+                outType = Type::Version;
+                return true;
             }
             if(dotCount > 3)
-                return TokenType::Invalid;
+                return false;
         }
 
-        return bAnyFloat? TokenType::FloatLiteral : TokenType::IntLiteral;
+        outType = bAnyFloat? Type::Float : Type::Int;
+        return true;
     }
 
     [[nodiscard]] constexpr bool IsKeyword(std::string_view view) noexcept
@@ -4577,28 +4577,29 @@ namespace fdf::detail
             return true;
         };
 
-        // The lexer emits every unquoted value as a Atom, resolve it to a concrete type first
-        // Structural rejects are recoverable here, content errors surface in the per-type parse below
+        // The lexer emits a StringLiteral or a bare Atom. A StringLiteral is already a String; an Atom
+        // gets resolved to its value Type here. Structural rejects recover, content errors surface below
+        Type valueType = Type::String;
         if(currentToken.type == TokenType::Atom)
         {
-            currentToken.type = ClassifyAtom(view, currentToken.extra8);
-            if(currentToken.type == TokenType::Invalid)
+            if(!ClassifyAtom(view, valueType, currentToken.extra8))
             {
                 Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, currentToken);
                 return false;
             }
 
-            if(currentToken.type == TokenType::HexLiteral)
+            if(valueType == Type::Hex)
                 view.remove_suffix(1);  // drop the '#' terminator, the writer re-appends it
         }
 
-        if(currentToken.type == TokenType::Keyword)
+        if(valueType == Type::Null)
         {
-            if(currentToken.extra8 == 0 || currentToken.extra8 == 1)
-            {
-                entry.type = Type::Null;
-                return postProcess();
-            }
+            entry.type = Type::Null;
+            return postProcess();
+        }
+
+        if(valueType == Type::Bool)
+        {
             if(currentToken.extra8 == 2 || currentToken.extra8 == 3)
             {
                 entry.type = Type::Bool;
@@ -4695,9 +4696,9 @@ namespace fdf::detail
 
 
         // Dimension count (Int/Float/Version, always small) or byte length (String/Hex/Timestamp)
-        if(currentToken.type == TokenType::StringLiteral)
+        if(valueType == Type::String)
             entry.size = static_cast<uint32_t>(view.size() - 2);
-        else if(currentToken.type == TokenType::HexLiteral || currentToken.type == TokenType::TimestampLiteral)
+        else if(valueType == Type::Hex || valueType == Type::Timestamp)
             entry.size = static_cast<uint32_t>(view.size());
         else
             entry.size = currentToken.extra8;
@@ -4705,7 +4706,7 @@ namespace fdf::detail
 
 
 
-        if(currentToken.type == TokenType::IntLiteral)
+        if(valueType == Type::Int)
         {
             if consteval
             {
@@ -4864,7 +4865,7 @@ namespace fdf::detail
 
 
 
-        if(currentToken.type == TokenType::FloatLiteral)
+        if(valueType == Type::Float)
         {
             entry.type = Type::Float;
             if consteval
@@ -4915,7 +4916,7 @@ namespace fdf::detail
 
 
 
-        if(currentToken.type == TokenType::VersionLiteral)
+        if(valueType == Type::Version)
         {
             entry.type = Type::Version;
 
@@ -4989,7 +4990,7 @@ namespace fdf::detail
         // Validate the timestamp before allocating below. Returning after the allocation would leave
         // a String-shaped buffer attached to a still-default (Map) entry, which ReleaseData would
         // later misread as a child array, corrupting recovery cleanup
-        if(currentToken.type == TokenType::TimestampLiteral && !IsValidTimestamp(view))
+        if(valueType == Type::Timestamp && !IsValidTimestamp(view))
         {
             Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidTimestamp, tokenizer, currentToken);
             return false;
@@ -5017,7 +5018,7 @@ namespace fdf::detail
                 { (static_cast<char*>(entry.data.raw) + sizeof(uint32_t))[size++] = c; }
         };
 
-        if(currentToken.type == TokenType::StringLiteral)
+        if(valueType == Type::String)
         {
             entry.type = Type::String;
 
@@ -5075,9 +5076,9 @@ namespace fdf::detail
 
 
 
-        if(currentToken.type == TokenType::HexLiteral || currentToken.type == TokenType::TimestampLiteral)
+        if(valueType == Type::Hex || valueType == Type::Timestamp)
         {
-            entry.type = currentToken.type == TokenType::HexLiteral? Type::Hex : Type::Timestamp;
+            entry.type = valueType;
 
             if consteval
             {
