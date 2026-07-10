@@ -146,6 +146,7 @@ FDF_EXPORT namespace fdf
         InvalidNumber,
         InvalidTimestamp,
         InvalidToken,        // generic lexer failure with no more specific reason
+        InputTooLarge,       // buffer would overflow the 32-bit offsets, refused before parsing
     };
 
     // Passed to a DIAGNOSTIC_CALLBACK for every issue found while parsing
@@ -155,7 +156,7 @@ FDF_EXPORT namespace fdf
         DiagnosticType     type     = DiagnosticType::UnexpectedToken;
         std::string_view   message;     // offending text, or a short description
         uint32_t           line   = 0;  // 1-based line number
-        uint32_t           column = 0;  // column within the line
+        uint32_t           column = 0;
         uint32_t           offset = 0;  // byte offset into the source buffer
     };
 
@@ -893,8 +894,8 @@ namespace fdf::detail
 
     FDF_EXPORT_INTERNAL enum class TokenType : uint8_t
     {
-        NonExisting,  // Means the requested token doesn't exist/cannot be accessed, not necessarily an error
-        Invalid,      // Means there is an error in the file content
+        NonExisting,  // Requested token doesn't exist/cannot be accessed, not necessarily an error
+        Invalid,      // There is an error in the file content
         NewLine,
         EndOfFile,
         Comment,
@@ -907,17 +908,16 @@ namespace fdf::detail
         SquareBraceOpen,
         SquareBraceClose,
 
-        Identifier,
+        StringLiteral,  // Quoted "Foo" or 'Foo'
+        Atom,           // Any unquoted character sequence, key or value. 'IsValidIdentifier()' and 'ClassifyAtom()' adds required context in the parser
 
-        Keyword,
-        ValueLiteral_Begin = Keyword,
+        // Concrete value types produced by ClassifyAtom, NOT emitted by the lexer
+        Keyword,  // null / nil / true / false / truexfalsextrue...
         IntLiteral,
         FloatLiteral,
-        StringLiteral,
         HexLiteral,
         VersionLiteral,
         TimestampLiteral,
-        ValueLiteral_End = TimestampLiteral,
     };
 
     FDF_EXPORT_INTERNAL struct Token
@@ -928,7 +928,7 @@ namespace fdf::detail
 
         TokenType type = TokenType::NonExisting;
         uint8_t  extra8  = 0; // Token specific data
-        uint16_t column = 0;
+        uint32_t column = 0;
         uint32_t count = 0;
         uint32_t startPosition = 0;
         uint32_t line = 0;
@@ -952,7 +952,7 @@ namespace fdf::detail
         {
             Token token = Token(type, index, count);
             token.line = line;
-            token.column = static_cast<uint16_t>(index - lastNewLineIndex);
+            token.column = static_cast<uint32_t>(index - lastNewLineIndex);
             index += count;
             return token;
         }
@@ -963,7 +963,7 @@ namespace fdf::detail
         {
             Token token = Token(TokenType::Invalid, index);
             token.line = line;
-            token.column = static_cast<uint16_t>(index - lastNewLineIndex);
+            token.column = static_cast<uint32_t>(index - lastNewLineIndex);
             token.extra8 = static_cast<uint8_t>(reason);
             return token;
         }
@@ -1493,7 +1493,7 @@ namespace fdf::detail
         return Pack(mant, lsbExp, bNeg);
     }
 
-    // Parse one number from [s, end). Accepts: [-] digits [. digits] [(e|E)[+|-]digits].
+    // Parse one number from [s, end). Accepts: [-] digits [. digits] [(e|E)[+|-]digits]
     // Sets *bOk false on malformed input; overflow yields +/-inf with *bOk true
     FDF_EXPORT_INTERNAL [[nodiscard]] constexpr double ParseDouble(const char* s, const char* end, bool* bOk) noexcept
     {
@@ -1618,9 +1618,8 @@ namespace fdf::detail
     }
 
     [[nodiscard]] constexpr bool IsValueLiteral(TokenType type) noexcept
-    { 
-        return static_cast<uint8_t>(type) >= static_cast<uint8_t>(TokenType::ValueLiteral_Begin) &&
-               static_cast<uint8_t>(type) <= static_cast<uint8_t>(TokenType::ValueLiteral_End);
+    {
+        return type == TokenType::StringLiteral || type == TokenType::Atom;
     }
 
     [[nodiscard]] constexpr bool constexpr_isspace(char c) noexcept
@@ -1636,6 +1635,90 @@ namespace fdf::detail
     [[nodiscard]] constexpr bool constexpr_isdigit(char c) noexcept
     {
         return c >= '0' && c <= '9';
+    }
+
+    // Resolve a Atom's text into a concrete value type, and count components for Int/Float/Version
+    // Only structurally impossible input returns Invalid, content is validated by the per-type parse
+    [[nodiscard]] constexpr TokenType ClassifyAtom(std::string_view view, uint8_t& components) noexcept
+    {
+        components = 1;
+        if(view.empty())
+            return TokenType::Invalid;
+
+        // keyword literals, resolved here now that the lexer no longer classifies them. extra8 = the
+        // KEYWORDS index, 4 marks an x-joined bool vector
+        for(size_t i = 0; i < KEYWORDS.size(); i++)
+        {
+            if(view == KEYWORDS[i])
+            {
+                components = static_cast<uint8_t>(i);
+                return TokenType::Keyword;
+            }
+        }
+        if(view.starts_with(KEYWORDS[2]) || view.starts_with(KEYWORDS[3]))
+        {
+            components = 4;
+            return TokenType::Keyword;
+        }
+
+        // the trailing '#' makes 0x..# unambiguously hex, so a non-hex digit here is malformed
+        if(view.size() >= 4 && view[0] == '0' && (view[1] == 'x' || view[1] == 'X') && view.back() == '#')
+        {
+            for(size_t i = 2; i + 1 < view.size(); i++)
+            {
+                const char c = view[i];
+                if(!constexpr_isdigit(c) && !(c >= 'a' && c <= 'f') && !(c >= 'A' && c <= 'F'))
+                    return TokenType::Invalid;
+            }
+            return TokenType::HexLiteral;
+        }
+
+        const bool bHasX = view.find('x') != std::string_view::npos;
+
+        // a date '-' sits between digits (2024-12-24), an exponent '-' follows an 'e'/'E' (1.0e-05)
+        bool bDateDash = false;
+        for(size_t i = 1; i < view.size(); i++)
+        {
+            if(view[i] == '-' && constexpr_isdigit(view[i - 1]))
+            {
+                bDateDash = true;
+                break;
+            }
+        }
+
+        if(view.find(':') != std::string_view::npos || (!bHasX && bDateDash))
+            return TokenType::TimestampLiteral;  // validated by the parse below
+
+        uint8_t dotCount = 0;
+        bool bAnyFloat = false;
+        for(char c : view)
+        {
+            if(c == 'x')
+            {
+                dotCount = 0;
+                components++;
+            }
+            else if(c == '.')
+            {
+                dotCount++;
+                bAnyFloat = true;
+            }
+            else if(c == 'e' || c == 'E')
+                bAnyFloat = true;
+        }
+
+        if(!bHasX)
+        {
+            if(dotCount == 2 || dotCount == 3)  // 3-4 dotted components is a version
+            {
+                components = static_cast<uint8_t>(dotCount + 1);
+                return TokenType::VersionLiteral;
+            }
+            if(dotCount > 3)
+                return TokenType::Invalid;
+        }
+
+        return bAnyFloat? TokenType::FloatLiteral : TokenType::IntLiteral;
     }
 
     [[nodiscard]] constexpr bool IsKeyword(std::string_view view) noexcept
@@ -1995,7 +2078,7 @@ namespace fdf::detail
             {
                 Token token = Token(TokenType::NewLine, index);
                 token.line = line;
-                token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
+                token.column = static_cast<uint32_t>(token.startPosition - lastNewLineIndex);
                 while(index < content.size() && constexpr_isspace(content[index]))
                 {
                     if(content[index] == '\n')
@@ -2035,7 +2118,7 @@ namespace fdf::detail
             Token token = Token(TokenType::StringLiteral, index, static_cast<uint32_t>(nextQuote) + 1 - index);
             index = static_cast<uint32_t>(nextQuote + 1);
             token.line = line;
-            token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
+            token.column = static_cast<uint32_t>(token.startPosition - lastNewLineIndex);
             token.extra8 = static_cast<uint8_t>(token.count - 2);
             return token;
         }
@@ -2052,7 +2135,7 @@ namespace fdf::detail
                 size_t newLinePos = content.find_first_of('\n', index + 2);
                 Token token = Token(TokenType::Comment, content[index + 2] == ' '? index + 3 : index + 2);
                 token.line = line;
-                token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
+                token.column = static_cast<uint32_t>(token.startPosition - lastNewLineIndex);
 
                 if(newLinePos != std::string_view::npos)
                 {
@@ -2061,7 +2144,7 @@ namespace fdf::detail
                     return token;
                 }
 
-                // There is no new lines left (comment is at the end of the file)
+                // Comment runs to the end of the file
                 token.count = static_cast<uint32_t>(content.size() - token.startPosition);
                 index = detail::UINT32_MAX_VALUE;
                 return token;
@@ -2079,7 +2162,7 @@ namespace fdf::detail
                     {
                         Token token = Token(TokenType::Comment, index + 2);
                         token.line = line;
-                        token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
+                        token.column = static_cast<uint32_t>(token.startPosition - lastNewLineIndex);
                         token.extra8 = 1;  // Means multi line
                         token.count = static_cast<uint32_t>(slashPos - 2 - token.startPosition);
 
@@ -2127,328 +2210,30 @@ namespace fdf::detail
 
 
 
-        if(constexpr_isalpha(content[index]) || content[index] == '_') // identifier, keyword
+        if(constexpr_isalpha(content[index]) || content[index] == '_' || constexpr_isdigit(content[index]) || content[index] == '-')
         {
-            Token token = Token(TokenType::Identifier, index);
+            // any unquoted character sequence (identifier or value) up to the next structural delimiter. The parser
+            // decides: a key is validated as an identifier, a value is typed by ClassifyAtom
+            Token token = Token(TokenType::Atom, index);
             token.line = line;
-            token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
-            auto checkKeywords = [&](std::string_view view) -> void
+            token.column = static_cast<uint32_t>(token.startPosition - lastNewLineIndex);
+
+            size_t end = index + 1;
+            while(end < content.size())
             {
-                for(size_t i = 0; i < KEYWORDS.size(); i++)
-                {
-                    if(view == KEYWORDS[i])
-                    {
-                        token.type = TokenType::Keyword;
-                        token.extra8 = static_cast<uint8_t>(i);  // Used as keyword index
-                        return;
-                    }
-                }
+                const char c = content[end];
+                if(constexpr_isspace(c) || c == ',' || c == '=' || c == '/' || c == '"' || c == '\''
+                   || c == '{' || c == '}' || c == '[' || c == ']')
+                    break;
+                end++;
+            }
 
-                if(view.starts_with(KEYWORDS[2]) || view.starts_with(KEYWORDS[3]))
-                {
-                    token.type = TokenType::Keyword;
-                    token.extra8 = 4;  // Used as keyword index
-                }
-            };
-
-            size_t firstNonAlpha = index + 1;
-            while(firstNonAlpha < content.size() && (constexpr_isalpha(content[firstNonAlpha]) || constexpr_isdigit(content[firstNonAlpha]) || content[firstNonAlpha] == '_'))
-                firstNonAlpha++;
-
-            token.count = static_cast<uint32_t>(firstNonAlpha) - token.startPosition;
-            checkKeywords(ToView(token));
-            index = firstNonAlpha >= content.size()? detail::UINT32_MAX_VALUE : static_cast<uint32_t>(firstNonAlpha);
+            token.count = static_cast<uint32_t>(end) - token.startPosition;
+            index = end >= content.size()? detail::UINT32_MAX_VALUE : static_cast<uint32_t>(end);
             return token;
         }
 
-
-
-        if(constexpr_isdigit(content[index]) || content[index] == '-')
-        {
-            if(content[index] == '0' && index + 3 < content.size() && content[index + 1] == 'x')  // Hex
-            {
-                const size_t firstNonHex = content.find_first_not_of("0123456789abcdefABCDEF", index + 2);
-                const size_t firstChar = content.find_first_of("abcdefABCDEF", index + 2);
-                const size_t firstHash = content.find_first_of('#', index + 2);
-                if(firstNonHex == firstHash && firstNonHex != std::string_view::npos) // First non-hex character is "#"
-                {
-                    Token token = Token(TokenType::HexLiteral, index, static_cast<uint32_t>(firstNonHex) - index);
-                    token.line = line;
-                    token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
-                    index = static_cast<uint32_t>(firstNonHex + 1);
-                    token.extra8 = static_cast<uint8_t>(token.count);
-                    return token;
-                }
-
-                if(firstNonHex == std::string_view::npos) // eof before any separator
-                    return MakeInvalid(DiagnosticType::InvalidNumber);
-
-                if(firstChar < firstNonHex) // has hex chars, not a number
-                    return MakeInvalid(DiagnosticType::InvalidNumber);
-
-                // falls through as a multidimensional int
-            }
-
-
-
-            size_t firstNonDigit = content.find_first_not_of("0123456789", index + 1);
-            if(firstNonDigit == std::string_view::npos)  // eof before any separator
-            {
-                Token token = Token(TokenType::IntLiteral, index, static_cast<uint32_t>(content.size()) - index);
-                token.line = line;
-                token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
-                token.extra8 = 1;  // Used as dimension (2d, 3d, 4d, 5d, etc.)
-                index = detail::UINT32_MAX_VALUE;
-                return token;
-            }
-
-            if(constexpr_isspace(content[firstNonDigit]) || content[firstNonDigit] == ',')
-            {
-                Token token = Token(TokenType::IntLiteral, index, static_cast<uint32_t>(firstNonDigit) - index);
-                token.line = line;
-                token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
-                token.extra8 = 1;  // Used as dimension (2d, 3d, 4d, 5d, etc.)
-                index = static_cast<uint32_t>(firstNonDigit);
-                return token;
-            }
-
-            if(content[firstNonDigit] == '.')  // float, version or multi-dimensional float
-            {
-                Token token = Token(TokenType::FloatLiteral, index);
-                token.line = line;
-                token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
-                token.extra8 = 1;  // Used as dimension (2d, 3d, 4d, 5d, etc.)
-
-                uint8_t dotCount = 0;
-                size_t temp = firstNonDigit;
-                char prevChar = '.';  // previous char, a dash is only allowed right after 'x'
-                bool bContainsDash = false;
-
-                auto calculateResult = [&]() -> void
-                {
-                    if(prevChar == '.' || prevChar == 'x' || prevChar == '-')
-                    {
-                        token.type = TokenType::Invalid;  // Must end with a digit
-                        return;
-                    }
-
-                    token.count = static_cast<uint32_t>(temp) - token.startPosition;
-
-                    if(dotCount == 2 || dotCount == 3)
-                    {
-                        if(bContainsDash)
-                        {
-                            token.type = TokenType::Invalid;  // Version cannot contain dash
-                            return;
-                        }
-
-                        token.type = TokenType::VersionLiteral;
-                        token.extra8 = dotCount + 1;
-                        return;
-                    }
-                };
-
-                while(temp < content.size())
-                {
-                    const char cur = content[temp];
-                    if(constexpr_isdigit(cur) || (cur == '-' && prevChar == 'x'))
-                    {
-                        if(cur == '-')
-                            bContainsDash = true;
-
-                        prevChar = cur;
-                        temp++;
-                        continue;
-                    }
-
-                    if(cur == '.')
-                    {
-                        if(dotCount == 1 && token.extra8 > 1)
-                            return MakeInvalid(DiagnosticType::InvalidNumber);  // Float can't have more than 1 dot
-                        if(dotCount > 2)
-                            return MakeInvalid(DiagnosticType::InvalidNumber);  // Version can have 3 dots maximum
-
-                        dotCount++;
-                        prevChar = cur;
-                        temp++;
-                        continue;
-                    }
-
-                    if(cur == 'x')
-                    {
-                        dotCount = 0;
-                        token.extra8++;
-                        prevChar = cur;
-                        temp++;
-                        continue;
-                    }
-
-                    if((cur == 'e' || cur == 'E') && dotCount <= 1)
-                    {
-                        // Scientific exponent: optional sign then at least one digit
-                        size_t j = temp + 1;
-                        if(j < content.size() && (content[j] == '+' || content[j] == '-'))
-                            j++;
-                        if(j >= content.size() || !constexpr_isdigit(content[j]))
-                            return MakeInvalid(DiagnosticType::InvalidNumber);  // Exponent needs a digit
-
-                        prevChar = content[j];  // exponent digit
-                        temp = j;
-                        continue;
-                    }
-
-                    if(constexpr_isspace(cur) || cur == ',')
-                    {
-                        calculateResult();
-                        index = static_cast<uint32_t>(temp);
-                        return token;
-                    }
-
-                    return MakeInvalid(DiagnosticType::InvalidNumber); // Non allowed character
-                }
-
-                calculateResult();
-                index = detail::UINT32_MAX_VALUE;
-                return token;
-            }
-
-            if(content[firstNonDigit] == 'x')  // multi-dimensional int
-            {
-                Token token = Token(TokenType::IntLiteral, index);
-                token.line = line;
-                token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
-                token.extra8 = 2;  // Used as dimension (2d, 3d, 4d, 5d, etc.)
-
-                size_t dotCount = 0;
-                while(true)
-                {
-                    const size_t previous = firstNonDigit;
-                    firstNonDigit = content.find_first_not_of("0123456789", firstNonDigit + 1);
-
-                    if(firstNonDigit == std::string_view::npos) // we reached eof before any space or any other token
-                    {
-                        token.count = static_cast<uint32_t>(content.size()) - token.startPosition;
-                        index = detail::UINT32_MAX_VALUE;
-                        return token;
-                    }
-
-                    if(previous + 1 == firstNonDigit && (content[previous] != ',' || !constexpr_isspace(content[firstNonDigit])) && (content[previous] != 'x' || content[firstNonDigit] != '-'))
-                        return MakeInvalid(DiagnosticType::InvalidNumber);  // It must have number(s) in between
-
-                    if(constexpr_isspace(content[firstNonDigit]) || content[firstNonDigit] == ',')
-                    {
-                        token.count = static_cast<uint32_t>(firstNonDigit - token.startPosition);
-                        index = static_cast<uint32_t>(firstNonDigit);
-                        return token;
-                    }
-
-                    if(content[firstNonDigit] == 'x')
-                    {
-                        token.extra8++;
-                        dotCount = 0;
-                        continue;
-                    }
-
-                    if(content[firstNonDigit] == '.')
-                    {
-                        token.type = TokenType::FloatLiteral;  // a dotted component makes the vector float
-                        dotCount++;
-                        if(dotCount > 1)
-                            return MakeInvalid(DiagnosticType::InvalidNumber);  // Multidimensional numbers can't contain more than 1 dot (for each number)
-
-                        continue;
-                    }
-                }
-            }
-
-
-
-
-
-            /* Possible datetime formats (ISO 8601)
-            *  2024-12-24T15:30:00       -> Date + Time without timezone info (Usually interpreted as local time)
-            *  2024-12-24T15:30:00Z      -> Date + Time with timezone info (Z means utc/zulu time)
-            *  2024-12-24T15:30:00+05:30 -> Date + Time with timezone info (5 hours and 30 minutes ahead of UTC)
-            *  2024-12-24                -> Date
-            *  15:30:00                  -> Time
-            *  2024-12-24T15:30:00.123Z  -> Date + Time with timezone info (Z means utc/zulu time) and milliseconds (123ms)
-            *  2024-W52-2                -> Year + Week + Weekday (52nd week of 2024, tuesday)
-            *  2024-359                  -> Year + Day of Year (359th day of 2024)
-            */
-
-            /* ISO-8601 durations, not supported (they start with a letter, so not handled here)
-            *  P3D              -> 3 days
-            *  P2W              -> 2 weeks (14 days)
-            *  P1Y2M3D          -> 1 year, 2 months, 3 days
-            *  P2WT3H           -> 2 weeks and 3 hours
-            *  P5DT4H30M        -> 5 days, 4 hours, and 30 minutes
-            *  PT1H45M          -> 1 hour and 45 minutes
-            *  P1Y2M3DT4H30M10S -> 1 year, 2 months, 3 days, 4 hours, 30 minutes, and 10 seconds
-            *  P10M             -> 10 minutes
-            *  PT10M            -> 10 minutes (alternative representation for time)
-            *  PT1.5S           -> 1.5 seconds (1 second and 500 milliseconds)
-            *  PT0.000001S      -> 1 microsecond (0.000001 seconds)
-            *  P1.5Y            -> 1.5 years (1 year and 6 months)
-            *  P3DT5H30M        -> 3 days, 5 hours, and 30 minutes
-            *  PT0.5H           -> 30 minutes (0.5 hours)
-            *  P2Y3M4DT5H6M7S   -> 2 years, 3 months, 4 days, 5 hours, 6 minutes, and 7 seconds
-            */
-
-
-            if(content[firstNonDigit] == '-')  // date or datetime
-            {
-                Token token = Token(TokenType::TimestampLiteral, index);
-                token.line = line;
-                token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
-                const size_t firstNonDate = content.find_first_not_of("0123456789TZW-+:.", index);
-                if(firstNonDate == std::string_view::npos)
-                {
-                    token.count = static_cast<uint32_t>(content.size()) - token.startPosition;
-                    token.extra8 = static_cast<uint8_t>(token.count);
-                    index = detail::UINT32_MAX_VALUE;
-                    return token;
-                }
-
-                if(constexpr_isspace(content[firstNonDate]) || content[firstNonDate] == ',')
-                {
-                    token.count = static_cast<uint32_t>(firstNonDate - token.startPosition);
-                    token.extra8 = static_cast<uint8_t>(token.count);
-                    index = static_cast<uint32_t>(firstNonDate);
-                    return token;
-                }
-
-                return MakeInvalid(DiagnosticType::InvalidTimestamp);  // Invalid character after timestamp
-            }
-
-            if(content[firstNonDigit] == ':')  // time
-            {
-                Token token = Token(TokenType::TimestampLiteral, index);
-                token.line = line;
-                token.column = static_cast<uint16_t>(token.startPosition - lastNewLineIndex);
-                const size_t firstNonDate = content.find_first_not_of("0123456789+-:.Z", index);  // time may carry a Z or +-hh:mm timezone
-                if(firstNonDate == std::string_view::npos)
-                {
-                    token.count = static_cast<uint32_t>(content.size()) - token.startPosition;
-                    index = detail::UINT32_MAX_VALUE;
-                    token.extra8 = static_cast<uint8_t>(token.count);
-                    return token;
-                }
-
-                if(constexpr_isspace(content[firstNonDate]) || content[firstNonDate] == ',')
-                {
-                    token.count = static_cast<uint32_t>(firstNonDate - token.startPosition);
-                    index = static_cast<uint32_t>(firstNonDate);
-                    token.extra8 = static_cast<uint8_t>(token.count);
-                    return token;
-                }
-
-                return MakeInvalid(DiagnosticType::InvalidTimestamp);  // Invalid character after timestamp
-            }
-
-            return MakeInvalid(DiagnosticType::InvalidToken);  // unhandled token
-        }
-
-        return MakeInvalid(DiagnosticType::InvalidToken);  // unhandled token
+        return MakeInvalid(DiagnosticType::InvalidToken);
     }
 }
 
@@ -4357,6 +4142,17 @@ namespace fdf
         if(!std::filesystem::exists(filepath, ec) || ec || !std::filesystem::is_regular_file(filepath, ec) || ec)
             return nullptr;
 
+        // Reject an oversized file before reading it into memory, offsets are 32-bit
+        const auto fileSize = std::filesystem::file_size(filepath, ec);
+        if(ec)
+            return nullptr;
+        if(fileSize >= detail::UINT32_MAX_VALUE)
+        {
+            if constexpr(!std::is_null_pointer_v<std::remove_cvref_t<decltype(DIAGNOSTIC_CALLBACK)>>)
+                DIAGNOSTIC_CALLBACK(Diagnostic{ DiagnosticSeverity::Fatal, DiagnosticType::InputTooLarge, {}, 0, 0, 0 });
+            return nullptr;
+        }
+
         std::ifstream file(filepath);
         if(!file)
             return nullptr;
@@ -4508,6 +4304,15 @@ namespace fdf::detail
     template<auto DIAGNOSTIC_CALLBACK>
     constexpr UniqueEntryPtr Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(std::string_view content) noexcept
     {
+        // Offsets into the buffer are 32-bit and UINT32_MAX_VALUE is the eof sentinel, so a size at or
+        // above it would collide or overflow. Refuse rather than silently corrupt positions
+        if(content.size() >= detail::UINT32_MAX_VALUE)
+        {
+            if constexpr(!std::is_null_pointer_v<std::remove_cvref_t<decltype(DIAGNOSTIC_CALLBACK)>>)
+                DIAGNOSTIC_CALLBACK(Diagnostic{ DiagnosticSeverity::Fatal, DiagnosticType::InputTooLarge, {}, 0, 0, 0 });
+            return nullptr;
+        }
+
         // Strip UTF-8 BOM if present
         if(content.size() >= 3 &&
            static_cast<uint8_t>(content[0]) == 0xEF &&
@@ -4578,7 +4383,7 @@ namespace fdf::detail
                 currentToken = tokenizer.Advance();
             }
 
-            if(currentToken.type == TokenType::Identifier)
+            if(currentToken.type == TokenType::Atom)
             {
                 const uint32_t childCountBefore = root->GetChildCount();
                 if(!ParseVariable(tokenizer, *root   FDF_COMMENT_SWITCH(,comment)))
@@ -4679,7 +4484,7 @@ namespace fdf::detail
 
         if(parent.type == Type::Map)
         {
-            assert(tokenizer.Current().type == TokenType::Identifier && "Sanity check!");
+            assert(tokenizer.Current().type == TokenType::Atom && "Sanity check!");
             if(!entry->SetIdentifier(tokenizer.ToView(currentToken)))
             {
                 Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidIdentifier, tokenizer, currentToken);
@@ -4740,7 +4545,7 @@ namespace fdf::detail
         assert(IsValueLiteral(tokenizer.Current().type) && "Sanity check!");
 
         Token currentToken = tokenizer.Current();
-        const std::string_view view = tokenizer.ToView(currentToken);
+        std::string_view view = tokenizer.ToView(currentToken);
 
         auto postProcess = [&]()
         {
@@ -4771,6 +4576,21 @@ namespace fdf::detail
         #endif
             return true;
         };
+
+        // The lexer emits every unquoted value as a Atom, resolve it to a concrete type first
+        // Structural rejects are recoverable here, content errors surface in the per-type parse below
+        if(currentToken.type == TokenType::Atom)
+        {
+            currentToken.type = ClassifyAtom(view, currentToken.extra8);
+            if(currentToken.type == TokenType::Invalid)
+            {
+                Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, currentToken);
+                return false;
+            }
+
+            if(currentToken.type == TokenType::HexLiteral)
+                view.remove_suffix(1);  // drop the '#' terminator, the writer re-appends it
+        }
 
         if(currentToken.type == TokenType::Keyword)
         {
@@ -4875,14 +4695,12 @@ namespace fdf::detail
 
 
         // Dimension count (Int/Float/Version, always small) or byte length (String/Hex/Timestamp)
-        // Length comes from the view, not extra8 (uint8) which truncates strings over 255 bytes,
-        // common with UTF-8 content, and would under-allocate then overflow on write
-        switch(currentToken.type)
-        {
-            case TokenType::StringLiteral:                            entry.size = static_cast<uint32_t>(view.size() - 2); break;
-            case TokenType::HexLiteral: case TokenType::TimestampLiteral: entry.size = static_cast<uint32_t>(view.size()); break;
-            default:                                                  entry.size = currentToken.extra8; break;
-        }
+        if(currentToken.type == TokenType::StringLiteral)
+            entry.size = static_cast<uint32_t>(view.size() - 2);
+        else if(currentToken.type == TokenType::HexLiteral || currentToken.type == TokenType::TimestampLiteral)
+            entry.size = static_cast<uint32_t>(view.size());
+        else
+            entry.size = currentToken.extra8;
 
 
 
@@ -5416,7 +5234,7 @@ namespace fdf::detail
             }
 
 
-            if(currentToken.type == TokenType::Identifier)
+            if(currentToken.type == TokenType::Atom)
             {
                 const uint32_t childCountBefore = map.GetChildCount();
                 if(!ParseVariable(tokenizer, map   FDF_COMMENT_SWITCH(,childComment)))

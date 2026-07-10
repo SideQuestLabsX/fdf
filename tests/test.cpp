@@ -684,7 +684,10 @@ namespace fdf::detail
                 { DiagnosticType::InvalidTimestamp,    "ts = 2024-13-45\nok = 1\n",                          false },
                 { DiagnosticType::InvalidTimestamp,    "ts = 25:99:00\nok = 1\n",                            false },
                 { DiagnosticType::InvalidIdentifier,   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa = 1\nok = 1\n", false },  // > 30 chars
-                { DiagnosticType::InvalidNumber,       "n = 0xGG#\n",                                        true  },
+                { DiagnosticType::InvalidIdentifier,   "true = 1\nok = 1\n",                                 false },  // keyword can't be a key
+                { DiagnosticType::InvalidIdentifier,   "ts-x = 1\nok = 1\n",                                 false },  // '-' not allowed in identifier
+                { DiagnosticType::InvalidIdentifier,   "1ts = 1\nok = 1\n",                                  false },  // identifier can't start with a digit
+                { DiagnosticType::InvalidNumber,       "ts = 0xGG#\nok = 1\n",                               false },  // malformed value, recoverable
                 { DiagnosticType::UnterminatedString,  "s = \"oops\n",                                       true  },
                 { DiagnosticType::UnterminatedComment, "x = 1 /* never closed",                              true  },
                 { DiagnosticType::InvalidToken,        "v = $\n",                                            true  },
@@ -718,6 +721,16 @@ namespace fdf::detail
                 UniqueEntryPtr root = ParseBuffer(std::format("t = {}\n", ts));
                 if(Entry* e = root? root->GetChild("t") : nullptr; CHECK_MSG(e && e->GetType() == Type::Timestamp, ts))
                     CHECK(e->GetValue<std::string_view>() == ts);
+            }
+
+            // A buffer at/above the 32-bit offset limit is refused before parsing. The guard reads only
+            // size(), so a view that lies about its length over a tiny buffer exercises it without a 4GB alloc
+            {
+                test::g_lastDiagnostic = {};
+                static constexpr char oneByte[1] = { 'x' };
+                const std::string_view oversized(oneByte, static_cast<size_t>(std::numeric_limits<uint32_t>::max()));
+                CHECK(ParseBuffer<&CountDiagnostics>(oversized) == nullptr);
+                CHECK(test::g_lastDiagnostic.type == DiagnosticType::InputTooLarge);
             }
         }
 
@@ -791,14 +804,18 @@ namespace fdf::detail
                 }
             }
 
-            // parser-level rejects recover: bad entry skipped, sibling survives. also the heap-corruption
-            // regression, a mid-parse failure must not leave a Map-typed entry pointing at an int buffer
+            // malformed multi-dim values are rejected but recoverable: bad entry skipped, sibling
+            // survives. also the heap-corruption regression, a mid-parse failure must not leave a
+            // Map-typed entry pointing at an int buffer
             constexpr std::string_view recover[] =
             {
                 "bad = 1x99999999999999999999999\nok = 7\n",   // component overflows u64
                 "bad = -1x99999999999999999999999\nok = 7\n",  // negative then unsigned-overflow
                 "bad = 1..0\nok = 7\n",                         // empty version component
                 "bad = -x1\nok = 7\n",                          // empty leading component
+                "bad = 1x\nok = 7\n",                           // empty trailing component
+                "bad = 1xx2\nok = 7\n",                         // empty middle component
+                "bad = 1.0x.\nok = 7\n",                        // empty trailing float component
             };
             for(std::string_view src : recover)
             {
@@ -811,16 +828,6 @@ namespace fdf::detail
                         CHECK_MSG(ok->GetValue<int64_t>()[0] == 7, src);
                 }
             }
-
-            // lexer-level rejects are fatal, an Invalid token can't be resumed past, so root is null
-            constexpr std::string_view fatal[] =
-            {
-                "bad = 1x\nok = 7\n",     // empty trailing component
-                "bad = 1xx2\nok = 7\n",   // empty middle component
-                "bad = 1.0x.\nok = 7\n",  // empty trailing float component
-            };
-            for(std::string_view src : fatal)
-                CHECK_MSG(ParseBuffer<&CountDiagnostics>(src) == nullptr, src);
         }
 
 
