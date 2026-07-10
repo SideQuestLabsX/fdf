@@ -6,7 +6,7 @@ format and the C++ API around it.
 ### The format
 
 - [Syntax](Syntax.md) entries, comments, the overall shape of a document
-- [Types](Types.md) scalars, multi-dimensional numbers, strings
+- [Types](Types.md) scalars, packs, strings
 - [Containers](Containers.md) maps, arrays, nesting
 
 ### The library

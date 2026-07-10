@@ -5,11 +5,11 @@ optional when entries sit on their own lines, and required between entries on th
 line. A trailing comma is fine
 
 ```fdf
-single{ resolution = 1920x1080, fullscreen = true, volume = 75 }
+single{ resolution = 1920|1080, fullscreen = true, volume = 75 }
 
 multi
 {
-    resolution = 1920x1080
+    resolution = 1920|1080
     fullscreen = true
     volume     = 75
 }

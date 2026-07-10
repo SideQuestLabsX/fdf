@@ -49,12 +49,12 @@ uint32_t     GetChildCount()      const;
 ```
 
 `GetValue<T>()` reads the scalar payload. Numbers and bools come back as a `std::span<T>`
-(one element for a plain scalar, more for a multi-dimensional value), strings come back
-as a `std::string_view`, a timestamp is decoded into a `Timestamp` struct.
+(one element for a plain scalar, more for a pack), strings come back as a `std::string_view`,
+a timestamp is decoded into a `Timestamp` struct.
 
 ```cpp
 auto name = e->GetChild("name")->GetValue<std::string_view>();   // "MyGame"
-auto px   = e->GetChild("pos")->GetValue<int64_t>();             // span: [100, 100]
+auto px   = e->GetChild("pos")->GetValue<int64_t>();             // pack span: [100, 100]
 auto flag = e->GetChild("fullscreen")->GetValue<bool>()[0];      // true
 auto when = e->GetChild("created")->GetValue<Timestamp>();       // decoded fields
 ```
@@ -91,7 +91,7 @@ Entry* Emplace(std::string_view key);    // add a child, returns it ("" for arra
 Entry* AddChild(UniqueEntryPtr& e);      // adopt an existing node
 
 void SetValue(value);                    // bool, integer, float, string, Timestamp,
-                                         // a std::span for multi-dimensional numbers,
+                                         // a std::span for a numeric/bool pack,
                                          // or NullType/NilType/ArrayType/MapType
 bool SetIdentifier(std::string_view);
 void SetComment(std::string_view);

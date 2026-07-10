@@ -680,7 +680,7 @@ namespace fdf::detail
                 { DiagnosticType::InvalidIdentifier,   "true = 1\nok = 1\n",                                 false },  // keyword can't be a key
                 { DiagnosticType::InvalidIdentifier,   "ts-x = 1\nok = 1\n",                                 false },  // '-' not allowed in identifier
                 { DiagnosticType::InvalidIdentifier,   "1ts = 1\nok = 1\n",                                  false },  // identifier can't start with a digit
-                { DiagnosticType::InvalidNumber,       "ts = 0xGG#\nok = 1\n",                               false },  // malformed value, recoverable
+                { DiagnosticType::InvalidNumber,       "ts = 0xGG\nok = 1\n",                                false },  // malformed value, recoverable
                 { DiagnosticType::UnterminatedString,  "s = \"oops\n",                                       true  },
                 { DiagnosticType::UnterminatedComment, "x = 1 /* never closed",                              true  },
                 { DiagnosticType::InvalidToken,        "v = $\n",                                            true  },
@@ -762,32 +762,32 @@ namespace fdf::detail
             };
 
             // Int: dimensions 2..5, negatives in leading / middle / trailing / all positions
-            checkInt("1x2",         { 1, 2 });
-            checkInt("1x2x3",       { 1, 2, 3 });
-            checkInt("1x2x3x4",     { 1, 2, 3, 4 });
-            checkInt("1x2x3x4x5",   { 1, 2, 3, 4, 5 });
-            checkInt("-1x2",        { -1, 2 });
-            checkInt("1x-2",        { 1, -2 });
-            checkInt("1x2x-3",      { 1, 2, -3 });
-            checkInt("-1x-2x-3",    { -1, -2, -3 });
+            checkInt("1|2",         { 1, 2 });
+            checkInt("1|2|3",       { 1, 2, 3 });
+            checkInt("1|2|3|4",     { 1, 2, 3, 4 });
+            checkInt("1|2|3|4|5",   { 1, 2, 3, 4, 5 });
+            checkInt("-1|2",        { -1, 2 });
+            checkInt("1|-2",        { 1, -2 });
+            checkInt("1|2|-3",      { 1, 2, -3 });
+            checkInt("-1|-2|-3",    { -1, -2, -3 });
 
             // no fixed dimension cap
-            checkInt("1x2x3x4x5x6", { 1, 2, 3, 4, 5, 6 });
+            checkInt("1|2|3|4|5|6", { 1, 2, 3, 4, 5, 6 });
 
             // float, incl exponents and mixed signs
-            checkFloat("1.0x2.0",             { 1.0, 2.0 });
-            checkFloat("0.5x-0.5x1.0",        { 0.5, -0.5, 1.0 });
-            checkFloat("-1.5x2.5x-3.5x4.5",   { -1.5, 2.5, -3.5, 4.5 });
-            checkFloat("1.5e3x-2.5",          { 1.5e3, -2.5 });
+            checkFloat("1.0|2.0",             { 1.0, 2.0 });
+            checkFloat("0.5|-0.5|1.0",        { 0.5, -0.5, 1.0 });
+            checkFloat("-1.5|2.5|-3.5|4.5",   { -1.5, 2.5, -3.5, 4.5 });
+            checkFloat("1.5e3|-2.5",          { 1.5e3, -2.5 });
 
             // one float component widens the whole vector to float
-            checkFloat("1x2.0",       { 1.0, 2.0 });
-            checkFloat("1x2.5x3",     { 1.0, 2.5, 3.0 });
-            checkFloat("-1x2.5",      { -1.0, 2.5 });
-            checkFloat("1x-2.5x3",    { 1.0, -2.5, 3.0 });
+            checkFloat("1|2.0",       { 1.0, 2.0 });
+            checkFloat("1|2.5|3",     { 1.0, 2.5, 3.0 });
+            checkFloat("-1|2.5",      { -1.0, 2.5 });
+            checkFloat("1|-2.5|3",    { 1.0, -2.5, 3.0 });
 
             // UInt component beyond INT64_MAX keeps the whole vector unsigned
-            if(UniqueEntryPtr root = ParseBuffer(std::string("v = 18446744073709551615x1\n")))
+            if(UniqueEntryPtr root = ParseBuffer(std::string("v = 18446744073709551615|1\n")))
             {
                 Entry* e = root->GetChild("v");
                 if(CHECK(e && e->GetType() == Type::UInt))
@@ -802,13 +802,13 @@ namespace fdf::detail
             // Map-typed entry pointing at an int buffer
             constexpr std::string_view recover[] =
             {
-                "bad = 1x99999999999999999999999\nok = 7\n",   // component overflows u64
-                "bad = -1x99999999999999999999999\nok = 7\n",  // negative then unsigned-overflow
+                "bad = 1|99999999999999999999999\nok = 7\n",   // component overflows u64
+                "bad = -1|99999999999999999999999\nok = 7\n",  // negative then unsigned-overflow
                 "bad = 1..0\nok = 7\n",                         // empty version component
-                "bad = -x1\nok = 7\n",                          // empty leading component
-                "bad = 1x\nok = 7\n",                           // empty trailing component
-                "bad = 1xx2\nok = 7\n",                         // empty middle component
-                "bad = 1.0x.\nok = 7\n",                        // empty trailing float component
+                "bad = -|1\nok = 7\n",                          // empty leading component
+                "bad = 1|\nok = 7\n",                           // empty trailing component
+                "bad = 1||2\nok = 7\n",                         // empty middle component
+                "bad = 1.0|.\nok = 7\n",                        // empty trailing float component
             };
             for(std::string_view src : recover)
             {
@@ -936,7 +936,7 @@ namespace fdf::detail
                 CHECK(!root->GetChild("v") || root->GetChild("v")->GetType() != Type::Float);
 
             // Multi-dimensional float with an exponent component
-            if(UniqueEntryPtr root = ParseBuffer(std::string("d = 1.5x2.0e3x0.001\n")))
+            if(UniqueEntryPtr root = ParseBuffer(std::string("d = 1.5|2.0e3|0.001\n")))
             {
                 Entry* e = root->GetChild("d");
                 if(CHECK(e && e->GetType() == Type::Float))
@@ -947,7 +947,7 @@ namespace fdf::detail
             }
 
             // Multi-dimensional float with negative components
-            if(UniqueEntryPtr root = ParseBuffer(std::string("d = 0.5x-0.5x1.0\n")))
+            if(UniqueEntryPtr root = ParseBuffer(std::string("d = 0.5|-0.5|1.0\n")))
             {
                 Entry* e = root->GetChild("d");
                 if(CHECK(e && e->GetType() == Type::Float))
@@ -958,7 +958,7 @@ namespace fdf::detail
             }
 
             // Negative component alongside an exponent
-            if(UniqueEntryPtr root = ParseBuffer(std::string("d = 1.5e3x-2.5\n")))
+            if(UniqueEntryPtr root = ParseBuffer(std::string("d = 1.5e3|-2.5\n")))
             {
                 Entry* e = root->GetChild("d");
                 if(CHECK(e && e->GetType() == Type::Float))
@@ -968,7 +968,7 @@ namespace fdf::detail
                 }
             }
 
-            // A dash not immediately after 'x' is not a valid float component
+            // A dash not immediately after '|' is not a valid float component
             if(UniqueEntryPtr root = ParseBuffer(std::string("d = 1.0-2.0\n")))
                 CHECK(!root->GetChild("d") || root->GetChild("d")->GetType() != Type::Float);
 
@@ -1192,21 +1192,21 @@ namespace fdf::detail
         {
             constexpr std::string_view source =
                 "b1 = true\n"
-                "bmd = truexfalsextrue\n"
+                "bmd = true|false|true\n"
                 "i1 = -42\n"
-                "imd = -1x2x-3\n"
+                "imd = -1|2|-3\n"
                 "umax = 18446744073709551615\n"
                 "f1 = 3.14\n"
                 "fWhole = 100.0\n"
                 "fNeg = -2.5\n"
-                "fmd = 1.0x2.5x3.0\n"
+                "fmd = 1.0|2.5|3.0\n"
                 "s1 = \"hello\"\n"
                 "sEmpty = \"\"\n"
                 "sQuote = \"say \\\"hi\\\"\"\n"
                 "sApos = \"it's\"\n"
                 "sBack = \"a\\\\b\"\n"
                 "sCtrl = \"tab\\there\"\n"
-                "hexv = 0xFF00AA#\n"
+                "hexv = 0xFF00AA\n"
                 "ver3 = 1.2.3\n"
                 "ver4 = 1.2.3.4\n"
                 "tsDate = 2024-12-24\n"
@@ -1407,13 +1407,13 @@ consteval bool TimestampInjectProbe()
 }
 static_assert(TimestampInjectProbe(), "consteval timestamp inject + read back");
 
-static_assert(ExtractValue<int64_t>("value = 25x50") == 25, "consteval multidim int parse");
-static_assert(ExtractValue<bool>("value = truexfalsextrue") == true, "consteval multidim bool parse");
+static_assert(ExtractValue<int64_t>("value = 25|50") == 25, "consteval multidim int parse");
+static_assert(ExtractValue<bool>("value = true|false|true") == true, "consteval multidim bool parse");
 static_assert(ExtractValue<double>("value = 3.5") > 3.4 && ExtractValue<double>("value = 3.5") < 3.6, "consteval float parse");
 
 consteval bool MultiDimNegFloatProbe()
 {
-    fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 0.5x-0.5x1.0\n");
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 0.5|-0.5|1.0\n");
     const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
     if(!e || e->GetType() != fdf::Type::Float)
         return false;
@@ -1424,7 +1424,7 @@ static_assert(MultiDimNegFloatProbe(), "consteval multidim negative float parse"
 
 consteval bool MultiDimWidenProbe()
 {
-    fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 1x2.0x3\n");
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 1|2.0|3\n");
     const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
     if(!e || e->GetType() != fdf::Type::Float)
         return false;
@@ -1473,7 +1473,7 @@ consteval bool NullProbe()
 }
 consteval bool MultiDimProbe()
 {
-    fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 1920x1080\n");
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 1920|1080\n");
     const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
     if(!e || e->GetType() != fdf::Type::Int)
         return false;
@@ -1598,7 +1598,7 @@ consteval bool WriteCompositeProbe()
 
     std::string out;
     fdf::WriteBuffer<fdf::Style{}>(*root, out);
-    return ContainsAt(out, "res=1920x1080") && ContainsAt(out, "pos=1.0x2.5x3.0");
+    return ContainsAt(out, "res=1920|1080") && ContainsAt(out, "pos=1.0|2.5|3.0");
 }
 static_assert(WriteCompositeProbe(), "consteval write multidim int/float");
 

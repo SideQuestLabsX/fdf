@@ -1638,7 +1638,7 @@ namespace fdf::detail
             return false;
 
         // keyword literals, resolved here now that the lexer no longer classifies them. extra8 = the
-        // KEYWORDS index, 4 marks an x-joined bool vector
+        // KEYWORDS index, 4 marks a '|'-joined bool vector
         for(size_t i = 0; i < KEYWORDS.size(); i++)
         {
             if(view == KEYWORDS[i])
@@ -1655,10 +1655,9 @@ namespace fdf::detail
             return true;
         }
 
-        // the trailing '#' makes 0x..# unambiguously hex, so a non-hex digit here is malformed
-        if(view.size() >= 4 && view[0] == '0' && (view[1] == 'x' || view[1] == 'X') && view.back() == '#')
+        if(view.size() >= 3 && view[0] == '0' && (view[1] == 'x' || view[1] == 'X'))
         {
-            for(size_t i = 2; i + 1 < view.size(); i++)
+            for(size_t i = 2; i < view.size(); i++)
             {
                 const char c = view[i];
                 if(!constexpr_isdigit(c) && !(c >= 'a' && c <= 'f') && !(c >= 'A' && c <= 'F'))
@@ -1668,7 +1667,7 @@ namespace fdf::detail
             return true;
         }
 
-        const bool bHasX = view.find('x') != std::string_view::npos;
+        const bool bHasPipe = view.find('|') != std::string_view::npos;
 
         // a date '-' sits between digits (2024-12-24), an exponent '-' follows an 'e'/'E' (1.0e-05)
         bool bDateDash = false;
@@ -1681,7 +1680,7 @@ namespace fdf::detail
             }
         }
 
-        if(view.find(':') != std::string_view::npos || (!bHasX && bDateDash))
+        if(view.find(':') != std::string_view::npos || (!bHasPipe && bDateDash))
         {
             outType = Type::Timestamp;  // validated by the parse below
             return true;
@@ -1691,7 +1690,7 @@ namespace fdf::detail
         bool bAnyFloat = false;
         for(char c : view)
         {
-            if(c == 'x')
+            if(c == '|')
             {
                 dotCount = 0;
                 components++;
@@ -1705,7 +1704,7 @@ namespace fdf::detail
                 bAnyFloat = true;
         }
 
-        if(!bHasX)
+        if(!bHasPipe)
         {
             if(dotCount == 2 || dotCount == 3)  // 3-4 dotted components is a version
             {
@@ -2575,7 +2574,7 @@ namespace fdf
 
         e->parent = this;
 
-        //TODO: In this case, we always prefer new one silently. We should allow customizing that behaviour
+        //TODO: In this case, we always prefer new one silently. We should allow customizing that behavior
         if(type == Type::Map)
         {
             if(Entry* found = GetDirectChild(e->GetIdentifier()))
@@ -3966,7 +3965,7 @@ namespace fdf
             case Type::Hex:
             {
                 // Stored as "0x" + digits, no terminator. Keep the "0x" prefix lowercase (the lexer only
-                // accepts a lowercase x), case the digits per style, and re-append the '#' terminator
+                // accepts a lowercase x), case the digits per style
                 temp = GetValue<char>();
                 for(size_t i = 2; i < temp.size(); i++)
                 {
@@ -3976,7 +3975,6 @@ namespace fdf
                     else
                         { if(c >= 'A' && c <= 'F') temp[i] = static_cast<char>(c + 32); }
                 }
-                temp.push_back('#');
                 return temp;
             }
 
@@ -4002,7 +4000,7 @@ namespace fdf
                 temp.clear();
                 for(size_t i = 0; i < span.size(); i++)
                 {
-                    if(i) temp.push_back('x');
+                    if(i) temp.push_back('|');
                     temp.append(span[i]? detail::KEYWORDS[2] : detail::KEYWORDS[3]);
                 }
                 return temp;
@@ -4016,7 +4014,7 @@ namespace fdf
                 temp.clear();
                 for(size_t i = 0; i < span.size(); i++)
                 {
-                    if(i) temp.push_back('x');
+                    if(i) temp.push_back('|');
                     detail::AppendInt(temp, span[i]);
                 }
                 return temp;
@@ -4030,7 +4028,7 @@ namespace fdf
                 temp.clear();
                 for(size_t i = 0; i < span.size(); i++)
                 {
-                    if(i) temp.push_back('x');
+                    if(i) temp.push_back('|');
                     detail::AppendUInt(temp, span[i]);
                 }
                 return temp;
@@ -4044,7 +4042,7 @@ namespace fdf
                 temp.clear();
                 for(size_t i = 0; i < span.size(); i++)
                 {
-                    if(i) temp.push_back('x');
+                    if(i) temp.push_back('|');
                     detail::AppendDouble(temp, span[i]);
                 }
                 return temp;
@@ -4587,9 +4585,6 @@ namespace fdf::detail
                 Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, currentToken);
                 return false;
             }
-
-            if(valueType == Type::Hex)
-                view.remove_suffix(1);  // drop the '#' terminator, the writer re-appends it
         }
 
         if(valueType == Type::Null)
@@ -4623,7 +4618,7 @@ namespace fdf::detail
                 std::string_view mdBool = view;
 
                 entry.type = Type::Bool;
-                entry.size = static_cast<uint32_t>(std::ranges::count(mdBool, 'x')) + 1;
+                entry.size = static_cast<uint32_t>(std::ranges::count(mdBool, '|')) + 1;
                 if consteval
                 {
                     entry.data.boolArray = new (std::nothrow) bool[entry.size];
@@ -4668,7 +4663,7 @@ namespace fdf::detail
                             { static_cast<bool*>(entry.data.raw)[cur++] = false; }
                         mdBool = mdBool.substr(5);
                     }
-                    else if(mdBool.starts_with('x'))
+                    else if(mdBool.starts_with('|'))
                     {
                         if(!bLastWasBoolLiteral)
                         {
@@ -4727,7 +4722,7 @@ namespace fdf::detail
             bool bContainsAnyNegative = false;
             bool bIsFirstChar = true;
             bool bIsNegative = false;
-            bool bComponentHasDigit = false;  // rejects empty components like -x1
+            bool bComponentHasDigit = false;  // rejects empty components like -|1
 
             uint64_t result = 0;
             uint8_t currentDimension = 0;
@@ -4826,7 +4821,7 @@ namespace fdf::detail
                     result += digit;
                     bComponentHasDigit = true;
                 }
-                else if(c == 'x')
+                else if(c == '|')
                 {
                     if(currentDimension >= dimensionCount - 1)
                         return false;  // Too much dimensions
@@ -4882,11 +4877,11 @@ namespace fdf::detail
             uint8_t currentDimension = 0;
             const uint8_t dimensionCount = static_cast<uint8_t>(entry.size);
 
-            // Split on 'x' (multi-dimensional) and round-trip-parse each component
+            // Split on '|' (multi-dimensional) and round-trip-parse each component
             size_t segStart = 0;
             for(size_t i = 0; i <= view.size(); i++)
             {
-                if(i != view.size() && view[i] != 'x')
+                if(i != view.size() && view[i] != '|')
                     continue;
 
                 if(currentDimension >= dimensionCount)

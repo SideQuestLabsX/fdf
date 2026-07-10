@@ -6,13 +6,13 @@ config, asset metadata, and so on. Designed to be frequently read and modified b
 ```fdf
 name       = "MyGame"
 version    = 1.0.0.0
-resolution = 1920x1080
+resolution = 1920|1080
 fullscreen = true
 
 window
 {
     title = "Main"
-    pos   = 100x100
+    pos   = 100|100
     flags[ "resizable", "vsync" ]
 }
 

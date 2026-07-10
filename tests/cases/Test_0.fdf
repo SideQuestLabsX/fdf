@@ -1,4 +1,4 @@
-var00[ 1, 2, 3, 5.1.2, 5.1.2.4, "Test", 1920x1080, 1.0x1.0x1.0, false, 2024-12-24, 15:30:00, true ]
+var00[ 1, 2, 3, 5.1.2, 5.1.2.4, "Test", 1920|1080, 1.0|1.0|1.0, false, 2024-12-24, 15:30:00, true ]
 
 var01  // Some comment
 {
@@ -36,13 +36,13 @@ var14="Test0test1test2test3test4test5test6test7"
 var15='"Test"'
 var16=3.14
 var17=18446744073709551615  // Max u64 value
-var18=-15x-20x30
+var18=-15|-20|30
 
 var19{ health=15 }
 var20
 {
     foo = true
-    resolution = 1920x1080  // Bar Comment
+    resolution = 1920|1080  // Bar Comment
 }
 
 var21
