@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -20,6 +21,12 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+    #include <io.h>
+#else
+    #include <unistd.h>
+#endif
 
 #if FDF_USE_CPP_MODULES
     import fdf;
@@ -81,6 +88,18 @@ namespace fdf::test
 {
     inline int g_checks = 0;
     inline int g_failed = 0;
+    inline int g_caseChecks = 0;
+    inline int g_caseFailed = 0;
+    inline std::vector<std::string> g_failedCases;
+
+    // On a tty the RUN line is rewritten in place; captured logs get the completion line only
+#if defined(_WIN32)
+    inline const bool g_bIsTty = _isatty(_fileno(stdout)) != 0;
+#else
+    inline const bool g_bIsTty = isatty(fileno(stdout)) != 0;
+#endif
+    inline bool g_bCaseLineOpen = false;
+
     inline int g_diagnostics = 0;
     inline fdf::Diagnostic g_lastDiagnostic = {};
     inline bool g_sawInvalidIdentifier = false;
@@ -100,18 +119,68 @@ inline void CountDiagnostics(const fdf::Diagnostic& diagnostic) noexcept
 namespace fdf::test
 {
 
+    // cases that print their own output call this first so the open RUN line is closed
+    inline void CloseCaseLine() noexcept
+    {
+        if(!g_bCaseLineOpen)
+            return;
+        std::println();
+        g_bCaseLineOpen = false;
+    }
+
     inline bool ReportCheck(bool bCond, const char* expr, const char* file, int line, std::string_view msg = {}) noexcept
     {
         g_checks++;
+        g_caseChecks++;
         if(bCond)
             return true;
 
         g_failed++;
+        g_caseFailed++;
+        CloseCaseLine();
         if(msg.empty())
             std::println("  [FAIL] {}:{}  {}", file, line, expr);
         else
             std::println("  [FAIL] {}:{}  {}  --  {}", file, line, expr, msg);
+        std::fflush(stdout);
         return false;
+    }
+
+    inline void RunCase(std::string_view name, void (*caseFn)()) noexcept
+    {
+        g_caseChecks = 0;
+        g_caseFailed = 0;
+        if(g_bIsTty)
+        {
+            std::print("[ RUN  ] {}", name);
+            std::fflush(stdout);   // std::print does not flush, the RUN line must show while the case runs
+            g_bCaseLineOpen = true;
+        }
+        const auto startTime = std::chrono::steady_clock::now();
+        caseFn();
+        const double tookMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - startTime).count();
+
+        std::string result;
+        if(g_caseFailed == 0)
+            result = std::format("[ PASS ] {} ({} checks) -- {:.2f}ms", name, g_caseChecks, tookMs);
+        else
+        {
+            result = std::format("[ FAIL ] {} ({}/{} checks failed) -- {:.2f}ms", name, g_caseFailed, g_caseChecks, tookMs);
+            g_failedCases.emplace_back(name);
+        }
+
+        if(g_bCaseLineOpen)
+        {
+            g_bCaseLineOpen = false;
+            // pad so the overwrite leaves no leftover characters from the RUN line
+            const size_t runLineLength = 9 + name.size();
+            if(result.size() < runLineLength)
+                result.append(runLineLength - result.size(), ' ');
+            std::println("\r{}", result);
+        }
+        else
+            std::println("{}", result);
+        std::fflush(stdout);   // pipes are fully buffered, flush so each case streams live
     }
 }
 
@@ -237,6 +306,7 @@ namespace fdf::detail
 
         static void ParseTest()
         {
+            fdf::test::CloseCaseLine();
             for(size_t i = 0; i < filesToTest.size(); i++)
             {
                 const TestDirectories& directories = filesToTest[i];
@@ -271,17 +341,42 @@ namespace fdf::detail
 
 
 
-        // Asserts concrete values from examples/example.fdf
+        // Structure + value assertions against an embedded document. The literal and its expected
+        // counts live side by side, so editing one forces editing the other (no coupling to a far
+        // external file). Exercises the same breadth as examples/example.fdf: every scalar type,
+        // packs, nested maps/arrays, and string escapes
+        static constexpr std::string_view READ_DOC =
+            "appVersion = 1.0.0.0\n"
+            "name = \"MyGame\"\n"
+            "enabled1 = true\n"
+            "id = 12345\n"
+            "uuid = \"a123-xyz\"\n"
+            "pi = 3.14\n"
+            "value = null\n"
+            "value2 = nil\n"
+            "escaped5 = \"asd\\tasd\\p\"\n"
+            "escaped6 = \"\\\\asd\\\\\"\n"
+            "gameSettings1 {\n"
+            "    resolution = 1920|1080\n"
+            "    fullscreen = false\n"
+            "    tags [ \"a\", \"b\", \"c\" ]\n"
+            "}\n"
+            "players [\n"
+            "    { name = \"p1\", score = 10 },\n"
+            "    { name = \"p2\", score = 20 }\n"
+            "]\n";
+
         static void ReadTest()
         {
-            UniqueEntryPtr e = ParseFile(std::filesystem::path(filesToTest[0].inputFile));
-            CHECK_MSG(static_cast<bool>(e), "Failed to parse the design file");
+            UniqueEntryPtr e = ParseBuffer(READ_DOC);
+            CHECK_MSG(static_cast<bool>(e), "Failed to parse the embedded read document");
             if(!e)
                 return;
 
-            // Structural smoke check, tied to examples/example.fdf (update when editing it)
-            CHECK_MSG(e->GetChildCountRecursive() == 125, std::format("recursive count = {}", e->GetChildCountRecursive()));
-            CHECK_MSG(e->GetChildCount() == 47, std::format("top level count = {}", e->GetChildCount()));
+            // Derived from READ_DOC: 12 top-level entries; recursive adds gameSettings1's 3 children
+            // + 3 tag elements, and players' 2 maps + their 4 leaves = 24
+            CHECK_MSG(e->GetChildCountRecursive() == 24, std::format("recursive count = {}", e->GetChildCountRecursive()));
+            CHECK_MSG(e->GetChildCount() == 12, std::format("top level count = {}", e->GetChildCount()));
 
             if(Entry* entry = e->GetChild("appVersion"); CHECK(entry && entry->GetType() == Type::Version))
             {
@@ -1752,7 +1847,7 @@ int main()
 
     std::filesystem::create_directories(outputDir);
 
-    // example.fdf goes first so ReadTest can rely on filesToTest[0]
+    // example.fdf goes first so RoundTripTest can round-trip filesToTest[0]
     if(std::filesystem::exists(currentDesignFile))
         filesToTest.emplace_back(currentDesignFile);
 
@@ -1786,47 +1881,35 @@ int main()
 
     constexpr std::string_view separator = "--------------------------------------------------\n";
 
-    std::print("Parse test -- Found {} files\n{}", filesToTest.size(), separator);
-    Test::ParseTest();
+    using fdf::test::RunCase;
+    std::print("Running suite -- Found {} files\n{}", filesToTest.size(), separator);
 
-    std::print("{0}\n\nRead test -- file: {1}\n{0}", separator, filesToTest[0].inputFile);
-    Test::ReadTest();
-
-    std::print("{0}\n\nWrite test -- file: {1}\n{0}", separator, FDF_OUTPUT_DIRECTORY "/WriteTest.fdf");
-    Test::WriteTest();
-
-    std::print("{0}\n\nValue test\n{0}", separator);
-    Test::ValueTest();
-
-    std::print("{0}\n\nMutate test\n{0}", separator);
-    Test::MutateTest();
-
-    std::print("{0}\n\nRecovery test\n{0}", separator);
-    Test::RecoveryTest();
-
-    std::print("{0}\n\nNegative test\n{0}", separator);
-    Test::NegativeTest();
-
-    std::print("{0}\n\nMulti-dimensional number test\n{0}", separator);
-    Test::MultiDimTest();
-
-    std::print("{0}\n\nString round-trip test\n{0}", separator);
-    Test::StringRoundTripTest();
-
-    std::print("{0}\n\nFloat round-trip test\n{0}", separator);
-    Test::FloatRoundTripTest();
-
-    std::print("{0}\n\nTimestamp test\n{0}", separator);
-    Test::TimestampTest();
-
-    std::print("{0}\n\nRound-trip test\n{0}", separator);
-    Test::RoundTripTest();
-
+    RunCase("ParseTest",           Test::ParseTest);
+    RunCase("ReadTest",            Test::ReadTest);
+    RunCase("WriteTest",           Test::WriteTest);
+    RunCase("ValueTest",           Test::ValueTest);
+    RunCase("MutateTest",          Test::MutateTest);
+    RunCase("RecoveryTest",        Test::RecoveryTest);
+    RunCase("NegativeTest",        Test::NegativeTest);
+    RunCase("MultiDimTest",        Test::MultiDimTest);
+    RunCase("StringRoundTripTest", Test::StringRoundTripTest);
+    RunCase("FloatRoundTripTest",  Test::FloatRoundTripTest);
+    RunCase("TimestampTest",       Test::TimestampTest);
+    RunCase("RoundTripTest",       Test::RoundTripTest);
 #if !FDF_NO_COMMENTS
-    std::print("{0}\n\nWriter comment test\n{0}", separator);
-    Test::WriterCommentTest();
+    RunCase("WriterCommentTest",   Test::WriterCommentTest);
 #endif
 
-    std::print("{0}\nChecks: {1} run, {2} failed\n{0}", separator, fdf::test::g_checks, fdf::test::g_failed);
-    return fdf::test::g_failed == 0? 0 : -1;
+    std::print("{}", separator);
+    if(fdf::test::g_failedCases.empty())
+    {
+        std::println("PASSED -- {} checks across all cases", fdf::test::g_checks);
+        return 0;
+    }
+
+    std::println("FAILED -- {} of {} checks failed in {} case(s):",
+                 fdf::test::g_failed, fdf::test::g_checks, fdf::test::g_failedCases.size());
+    for(const std::string& name : fdf::test::g_failedCases)
+        std::println("  - {}", name);
+    return 1;
 }
