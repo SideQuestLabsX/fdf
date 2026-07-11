@@ -38,6 +38,7 @@
     #include <limits>
     #include <format>
     #include <fstream>
+    #include <memory>
     #include <ranges>
     #include <span>
     #include <string>
@@ -553,6 +554,81 @@ FDF_EXPORT namespace fdf
 
 
     using UniqueEntryPtr = std::unique_ptr<Entry, detail::EntryDeleter>;
+
+    // 8-byte slab-backed mutable string, no SSO: [u32 size][u32 capacity][chars...]
+    class String
+    {
+    public:
+        constexpr String() noexcept = default;
+        constexpr String(std::string_view value) noexcept  { Assign(value); }
+        constexpr String(const String& other) noexcept  { Assign(other.View()); }
+        constexpr String(String&& other) noexcept
+            : ptr(other.ptr)
+        {
+            other.ptr = nullptr;
+        }
+        constexpr ~String() noexcept  { Free(); }
+
+        constexpr String& operator=(std::string_view value) noexcept  { Assign(value); return *this; }
+        constexpr String& operator=(const String& other) noexcept
+        {
+            if(this != &other)
+                Assign(other.View());
+            return *this;
+        }
+        constexpr String& operator=(String&& other) noexcept
+        {
+            if(this != &other)
+            {
+                Free();
+                ptr = other.ptr;
+                other.ptr = nullptr;
+            }
+            return *this;
+        }
+
+        [[nodiscard]] constexpr operator std::string_view() const noexcept  { return View(); }
+        [[nodiscard]] constexpr std::string_view View()     const noexcept  { return ptr? std::string_view{ptr + HEADER_SIZE, LoadU32(0)} : std::string_view{}; }
+        [[nodiscard]] constexpr uint32_t         Size()     const noexcept  { return ptr? LoadU32(0) : 0; }
+        [[nodiscard]] constexpr bool             IsEmpty()  const noexcept  { return Size() == 0; }
+        [[nodiscard]] constexpr bool operator==(std::string_view value) const noexcept  { return View() == value; }
+
+    private:
+        static constexpr uint32_t HEADER_SIZE = 2 * sizeof(uint32_t);
+
+        [[nodiscard]] constexpr uint32_t LoadU32(uint32_t offset) const noexcept
+        {
+            return  static_cast<uint32_t>(static_cast<unsigned char>(ptr[offset]))
+                 | (static_cast<uint32_t>(static_cast<unsigned char>(ptr[offset + 1])) << 8)
+                 | (static_cast<uint32_t>(static_cast<unsigned char>(ptr[offset + 2])) << 16)
+                 | (static_cast<uint32_t>(static_cast<unsigned char>(ptr[offset + 3])) << 24);
+        }
+        constexpr void StoreU32(uint32_t offset, uint32_t value) noexcept
+        {
+            ptr[offset]     = static_cast<char>(value & 0xFFu);
+            ptr[offset + 1] = static_cast<char>((value >> 8) & 0xFFu);
+            ptr[offset + 2] = static_cast<char>((value >> 16) & 0xFFu);
+            ptr[offset + 3] = static_cast<char>((value >> 24) & 0xFFu);
+        }
+
+        [[nodiscard]] constexpr uint32_t Capacity() const noexcept  { return ptr? LoadU32(sizeof(uint32_t)) : 0; }
+
+        constexpr void Assign(std::string_view value) noexcept
+        {
+            const uint32_t newSize = static_cast<uint32_t>(value.size());
+            if(newSize > Capacity())
+                Grow(newSize);
+            for(uint32_t i = 0; i < newSize; i++)
+                ptr[HEADER_SIZE + i] = value[i];
+            if(ptr)
+                StoreU32(0, newSize);
+        }
+        constexpr void Grow(uint32_t minCapacity) noexcept;
+        constexpr void Free() noexcept;
+
+        char* ptr = nullptr;
+    };
+
     class Entry
     {
     public:
@@ -574,8 +650,6 @@ FDF_EXPORT namespace fdf
         template<auto DIAGNOSTIC_CALLBACK>
         friend struct detail::Utils;
 
-        struct CommentControlBlock { uint32_t capacity, size; };
-
     private:
         char identifier[detail::MAX_IDENTIFIER_LENGTH + 1] = {};
         Type type = Type::Map;
@@ -583,14 +657,13 @@ FDF_EXPORT namespace fdf
         uint32_t capacity = 0;  // container child-buffer capacity (containers only)
         Entry* parent = nullptr;
 
-        // Union of typed pointers, not a bare void*: constexpr can't cast void*->T* (MSVC). Consteval
-        // reads the member matching `type`; runtime uses `raw` (all members alias). Active member == type
+        // Union of typed pointers, constexpr can't cast void*->T* (MSVC)
         // TODO: collapse to `void* data` once MSVC allows void*->T* in constant expressions
         union DataPtr
         {
             void* raw = nullptr;
             bool* boolArray;
-            std::string* str;
+            String* strArray;
             std::vector<int64_t>* vInt;
             std::vector<uint64_t>* vUInt;
             std::vector<double>* vFloat;
@@ -598,13 +671,7 @@ FDF_EXPORT namespace fdf
         };
         DataPtr data;
     #if !FDF_NO_COMMENTS
-        union CommentPtr
-        {
-            std::string* str = nullptr;   // default-active member: at consteval comment is always a std::string
-            void* raw;
-            CommentControlBlock* block;
-        };
-        CommentPtr comment;
+        String comment;
     #endif
 
     private:
@@ -625,19 +692,18 @@ FDF_EXPORT namespace fdf
             else                                           return data.vEntry;
         }
 
-        // Consteval-only typed pointers (std::string / bool[]). Runtime raw-byte access casts
-        // data.raw directly at the call site
+        // consteval-only; runtime casts data.raw at the call site
         template<typename T>
         [[nodiscard]] constexpr T*& GetDataAs() noexcept
         {
-            if constexpr(std::is_same_v<T, bool>) return data.boolArray;
-            else                                  return data.str;   // std::string
+            static_assert(std::is_same_v<T, bool>, "GetDataAs is bool-only");
+            return data.boolArray;
         }
         template<typename T>
         [[nodiscard]] constexpr const T* GetDataAs() const noexcept
         {
-            if constexpr(std::is_same_v<T, bool>) return data.boolArray;
-            else                                  return data.str;
+            static_assert(std::is_same_v<T, bool>, "GetDataAs is bool-only");
+            return data.boolArray;
         }
 
         // Null-check the data union through the member matching `type` (the active one at constexpr)
@@ -649,22 +715,12 @@ FDF_EXPORT namespace fdf
                 case Type::Int:                                           return !data.vInt;
                 case Type::UInt:   case Type::Version:                    return !data.vUInt;
                 case Type::Float:                                         return !data.vFloat;
-                case Type::String: case Type::Hex: case Type::Timestamp:  return !data.str;
+                case Type::String: case Type::Hex: case Type::Timestamp:  return !data.strArray;
                 case Type::Array:  case Type::Map:                        return !data.vEntry;
                 default:                                                  return true;   // Null / Nil hold no data
             }
         }
 
-
-    #if !FDF_NO_COMMENTS
-        [[nodiscard]] constexpr       CommentControlBlock* GetCommentControlBlock()       noexcept  { return comment.block; }
-        [[nodiscard]] constexpr const CommentControlBlock* GetCommentControlBlock() const noexcept  { return comment.block; }
-        [[nodiscard]] constexpr       char*                GetCommentData()               noexcept  { return static_cast<      char*>(comment.raw) + sizeof(CommentControlBlock); }
-        [[nodiscard]] constexpr const char*                GetCommentData()         const noexcept  { return static_cast<const char*>(comment.raw) + sizeof(CommentControlBlock); }
-
-        [[nodiscard]] constexpr       std::string* GetCommentString()       noexcept  { return comment.str; }
-        [[nodiscard]] constexpr const std::string* GetCommentString() const noexcept  { return comment.str; }
-    #endif
 
         [[nodiscard]] constexpr uint8_t GetIdentifierSize()                    const noexcept  { return static_cast<uint8_t>(detail::MAX_IDENTIFIER_LENGTH) - static_cast<uint8_t>(identifier[detail::MAX_IDENTIFIER_LENGTH]); }
                       constexpr void    SetIdentifierSize(const uint8_t value)       noexcept  { identifier[detail::MAX_IDENTIFIER_LENGTH] = static_cast<char>(detail::MAX_IDENTIFIER_LENGTH - value); }
@@ -731,25 +787,11 @@ FDF_EXPORT namespace fdf
             return temp;
         }
 
-        [[nodiscard]] constexpr std::string_view GetComment() const noexcept
-        {
-            #if !FDF_NO_COMMENTS
-                if consteval
-                {
-                    if(comment.str)
-                        return *GetCommentString();
-                }
-                else
-                {
-                    if(comment.raw)
-                        return {GetCommentData(), GetCommentControlBlock()->size};
-                }
-            #endif
-                return {};
-        }
+        [[nodiscard]] constexpr const String& GetComment() const noexcept;
 
     private:
         constexpr void SetIdentifier_INTERNAL(std::string_view newIdentifier) noexcept;
+        constexpr void AllocateStringArray(uint32_t count) noexcept;
 
     public:
         [[nodiscard]] constexpr bool SetIdentifier(std::string_view newIdentifier) noexcept;
@@ -850,6 +892,15 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr bool ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty) noexcept;
         [[nodiscard]] constexpr bool Combine(UniqueEntryPtr& other, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty) noexcept;
     };
+
+    static_assert(sizeof(String) == 8, "String is a single block pointer, size/capacity live in the block header");
+#if !FDF_NO_COMMENTS
+    static_assert(sizeof(Entry) == 64, "Entry must stay one cache line");
+#elif FDF_EXTENDED_NO_COMMENT_IDENTIFIERS
+    static_assert(sizeof(Entry) == 64, "Entry must stay one cache line (extended identifiers fill the comment slot)");
+#else
+    static_assert(sizeof(Entry) == 56, "Entry layout drifted");
+#endif
 
 
 
@@ -1614,6 +1665,46 @@ namespace fdf::detail
         return type == TokenType::StringLiteral || type == TokenType::Atom;
     }
 
+    [[nodiscard]] constexpr bool IsEscapableChar(char c) noexcept    { return c == '\"' || c == '\'' || c == '\\'; }
+    [[nodiscard]] constexpr bool IsMergeEscapeChar(char c) noexcept  { return c == 'n' || c == 'r' || c == 't' || c == 'v' || c == 'b' || c == 'f' || c == 'a'; }
+
+    [[nodiscard]] constexpr char ConvertMergedEscapeChar(char c) noexcept
+    {
+        if(c == 'n')
+            return '\n';
+        if(c == 'r')
+            return '\r';
+        if(c == 't')
+            return '\t';
+        if(c == 'v')
+            return '\v';
+        if(c == 'b')
+            return '\b';
+        if(c == 'f')
+            return '\f';
+        if(c == 'a')
+            return '\a';
+        return c;
+    }
+
+    // view includes the surrounding quotes
+    constexpr void DecodeStringLiteral(std::string_view view, auto&& writeChar) noexcept
+    {
+        const uint32_t end = static_cast<uint32_t>(view.size()) - 1U;
+        for(uint32_t i = 1; i < end; i++)
+        {
+            if(view[i] == '\\' && i + 1 < end && (IsEscapableChar(view[i + 1]) || IsMergeEscapeChar(view[i + 1])))
+            {
+                i++;
+                writeChar(IsEscapableChar(view[i])? view[i] : ConvertMergedEscapeChar(view[i]));
+            }
+            else
+            {
+                writeChar(view[i]);
+            }
+        }
+    }
+
     [[nodiscard]] constexpr bool constexpr_isspace(char c) noexcept
     {
         return (c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r');
@@ -2293,8 +2384,45 @@ namespace fdf::detail
 
 namespace fdf
 {
+    constexpr void String::Grow(uint32_t minCapacity) noexcept
+    {
+        uint32_t newCapacity = Capacity() * 2;
+        if(newCapacity < minCapacity)
+            newCapacity = minCapacity;
+
+        char* newPtr;
+        if consteval
+        {
+            newPtr = new char[HEADER_SIZE + newCapacity];
+        }
+        else
+        {
+            // capacity = usable chars in the granted bucket, so re-assignments within the slack skip the realloc
+            const auto [buffer, granted] = detail::GlobalAllocator::AllocateAtLeast(HEADER_SIZE + newCapacity);
+            newPtr = static_cast<char*>(buffer);
+            newCapacity = static_cast<uint32_t>(granted) - HEADER_SIZE;
+        }
+
+        Free();
+        ptr = newPtr;
+        StoreU32(0, 0);
+        StoreU32(sizeof(uint32_t), newCapacity);
+    }
+
+    constexpr void String::Free() noexcept
+    {
+        if(!ptr)
+            return;
+        if consteval
+            { delete[] ptr; }
+        else
+            { detail::GlobalAllocator::Deallocate(ptr, LoadU32(sizeof(uint32_t)) + HEADER_SIZE); }
+        ptr = nullptr;
+    }
+
+
     constexpr Entry::Entry(Entry&& other) noexcept
-        : type(other.type), size(other.size), capacity(other.capacity), parent(other.parent), data(other.data)   FDF_COMMENT_SWITCH(, comment(other.comment))
+        : type(other.type), size(other.size), capacity(other.capacity), parent(other.parent), data(other.data)   FDF_COMMENT_SWITCH(, comment(std::move(other.comment)))
     {
         other.type = Type::Map;
         other.size = 0;
@@ -2304,10 +2432,6 @@ namespace fdf
 
         detail::constexpr_memcpy(identifier, other.identifier, detail::MAX_IDENTIFIER_LENGTH + 1);
         other.SetIdentifierSize(0U);
-
-#if !FDF_NO_COMMENTS
-        other.comment.str = nullptr;
-#endif
     }
 
     constexpr Entry& Entry::operator=(Entry&& other) noexcept
@@ -2332,8 +2456,7 @@ namespace fdf
         other.SetIdentifierSize(0U);
 
 #if !FDF_NO_COMMENTS
-        comment = other.comment;
-        other.comment.str = nullptr;
+        comment = std::move(other.comment);
 #endif
 
         return *this;
@@ -2370,61 +2493,37 @@ namespace fdf
         return true;
     }
 
+    constexpr const String& Entry::GetComment() const noexcept
+    {
+    #if !FDF_NO_COMMENTS
+        return comment;
+    #else
+        static constexpr String EMPTY;
+        return EMPTY;
+    #endif
+    }
+
     constexpr void Entry::SetComment([[maybe_unused]] std::string_view newComment) noexcept
     {
     #if !FDF_NO_COMMENTS
-        if consteval
+        // Strip leading whitespace, collapse each newline (+ trailing whitespace) into a single space
+        std::string normalized;
+        normalized.reserve(newComment.size());
+        size_t i = 0;
+        while(i < newComment.size() && detail::constexpr_isspace(newComment[i]))
+            i++;
+        for(; i < newComment.size(); i++)
         {
-            if(comment.str)
-                *comment.str = newComment;
+            if(newComment[i] != '\n')
+                normalized.push_back(newComment[i]);
             else
             {
-                comment.str = new (std::nothrow) std::string(newComment);
-                assert(comment.str && "Allocation shouldn't fail");
+                normalized.push_back(' ');
+                while(i + 1 < newComment.size() && detail::constexpr_isspace(newComment[i + 1]))
+                    i++;
             }
         }
-        else
-        {
-            if(comment.raw)
-            {
-                if(newComment.size() > GetCommentControlBlock()->capacity)
-                {
-                    detail::GlobalAllocator::Deallocate(comment.raw, GetCommentControlBlock()->capacity + sizeof(Entry::CommentControlBlock) + 1);
-                    const auto [buffer, granted] = detail::GlobalAllocator::AllocateAtLeast(newComment.size() + sizeof(Entry::CommentControlBlock) + 1);
-                    comment.raw = buffer;
-                    GetCommentControlBlock()->capacity = static_cast<uint32_t>(granted - sizeof(Entry::CommentControlBlock) - 1);
-                    GetCommentControlBlock()->size = static_cast<uint32_t>(newComment.size());
-                }
-                else
-                {
-                    GetCommentControlBlock()->size = static_cast<uint32_t>(newComment.size());
-                }
-            }
-            else
-            {
-                const auto [buffer, granted] = detail::GlobalAllocator::AllocateAtLeast(newComment.size() + sizeof(Entry::CommentControlBlock) + 1);
-                comment.raw = buffer;
-                GetCommentControlBlock()->capacity = static_cast<uint32_t>(granted - sizeof(Entry::CommentControlBlock) - 1);
-                GetCommentControlBlock()->size = static_cast<uint32_t>(newComment.size());
-            }
-
-            size_t i = 0, j = 0;
-            while(i < newComment.size() && detail::constexpr_isspace(newComment[i]))
-                i++;
-            for(; i < newComment.size(); i++)
-            {
-                if(newComment[i] != '\n')
-                    GetCommentData()[j++] = newComment[i];
-                else
-                {
-                    GetCommentData()[j++] = ' ';
-                    while(i + 1 < newComment.size() && detail::constexpr_isspace(newComment[i + 1]))
-                        i++;
-                }
-            }
-            GetCommentControlBlock()->size = static_cast<uint32_t>(j);
-            GetCommentData()[GetCommentControlBlock()->size] = '\0';
-        }
+        comment = std::string_view(normalized);
     #endif
     }
 
@@ -2460,28 +2559,23 @@ namespace fdf
                 { detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(double)); }
             break;
         case Type::String:
-            if consteval
-                { delete GetDataAs<std::string>(); }
-            else
-                { detail::GlobalAllocator::Deallocate(data.raw, *static_cast<uint32_t*>(data.raw) + 1 + sizeof(uint32_t)); }
-            break;
         case Type::Hex:
+        case Type::Timestamp:
             if consteval
-                { delete GetDataAs<std::string>(); }
+                { delete[] data.strArray; }   // ~String frees each component's chunk
             else
-                { detail::GlobalAllocator::Deallocate(data.raw, *static_cast<uint32_t*>(data.raw) + 1 + sizeof(uint32_t)); }
+            {
+                String* arr = static_cast<String*>(data.raw);
+                for(uint32_t i = 0; i < size; i++)
+                    std::destroy_at(arr + i);
+                detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(String));
+            }
             break;
         case Type::Version:
             if consteval
                 { delete GetDataVector<uint64_t>(); }
             else
                 { detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(uint64_t)); }
-            break;
-        case Type::Timestamp:
-            if consteval
-                { delete GetDataAs<std::string>(); }
-            else
-                { detail::GlobalAllocator::Deallocate(data.raw, *static_cast<uint32_t*>(data.raw) + 1 + sizeof(uint32_t)); }
             break;
         case Type::Array:
         case Type::Map:
@@ -2504,18 +2598,7 @@ namespace fdf
     constexpr void Entry::ReleaseComment() noexcept
     {
     #if !FDF_NO_COMMENTS
-        if consteval
-        {
-            if(comment.str)
-                delete comment.str;
-            comment.str = nullptr;
-        }
-        else
-        {
-            if(comment.raw)
-                detail::GlobalAllocator::Deallocate(comment.raw, GetCommentControlBlock()->capacity + sizeof(Entry::CommentControlBlock) + 1);
-            comment.raw = nullptr;
-        }
+        comment = String();   // move-assign frees the old buffer
     #endif
     }
 
@@ -2523,6 +2606,23 @@ namespace fdf
     {
         ReleaseData();
         ReleaseComment();
+    }
+
+    constexpr void Entry::AllocateStringArray(uint32_t count) noexcept
+    {
+        type = Type::String;
+        size = count;
+        if consteval
+        {
+            data.strArray = new (std::nothrow) String[count];
+            assert(data.strArray && "Allocation shouldn't fail");
+        }
+        else
+        {
+            data.raw = detail::GlobalAllocator::Allocate(count * sizeof(String));
+            for(uint32_t i = 0; i < count; i++)
+                std::construct_at(static_cast<String*>(data.raw) + i);
+        }
     }
 
 
@@ -3482,28 +3582,24 @@ namespace fdf
     [[nodiscard]] constexpr auto Entry::GetValue<float>() noexcept  { return GetValue<double>(); }
 
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<char>() noexcept
+    [[nodiscard]] constexpr auto Entry::GetValue<String>() noexcept
     {
-        if(type != Type::String && type != Type::Hex && type != Type::Timestamp)
-            return std::string_view();
+        if(type != Type::String || IsDataNull())
+            return std::span<String>();
         if consteval
-            { return std::string_view(*GetDataAs<std::string>()); }
-        return std::string_view((static_cast<char*>(data.raw) + sizeof(uint32_t)), size);
+            { return std::span<String>(data.strArray, size); }
+        return std::span<String>(static_cast<String*>(data.raw), size);
     }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<std::string>() noexcept  { return GetValue<char>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<char>() noexcept  { return GetValue<String>(); }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<std::string_view>() noexcept  { return GetValue<char>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<std::string>() noexcept  { return GetValue<String>(); }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<char*>() noexcept  { return GetValue<char>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<std::string_view>() noexcept  { return GetValue<String>(); }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<const char*>() noexcept  { return GetValue<char>(); }
-
+    [[nodiscard]] constexpr auto Entry::GetValue<char*>() noexcept  { return GetValue<String>(); }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<Timestamp>() noexcept
-    {
-        return type == Type::Timestamp? Timestamp::FromText(GetValue<std::string_view>()) : Timestamp{};
-    }
+    [[nodiscard]] constexpr auto Entry::GetValue<const char*>() noexcept  { return GetValue<String>(); }
 
 
 
@@ -3555,28 +3651,35 @@ namespace fdf
     [[nodiscard]] constexpr auto Entry::GetValue<float>() const noexcept  { return GetValue<double>(); }
 
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<char>() const noexcept
+    [[nodiscard]] constexpr auto Entry::GetValue<String>() const noexcept
     {
-        if(type != Type::String && type != Type::Hex && type != Type::Timestamp)
-            return std::string_view();
+        if((type != Type::String && type != Type::Hex && type != Type::Timestamp) || IsDataNull())
+            return std::span<const String>();
         if consteval
-            { return std::string_view(*GetDataAs<std::string>()); }
-        return std::string_view((static_cast<const char*>(data.raw) + sizeof(uint32_t)), size);
+            { return std::span<const String>(data.strArray, size); }
+        return std::span<const String>(static_cast<const String*>(data.raw), size);
     }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<std::string>() const noexcept  { return GetValue<char>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<char>() const noexcept  { return GetValue<String>(); }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<std::string_view>() const noexcept  { return GetValue<char>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<std::string>() const noexcept  { return GetValue<String>(); }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<char*>() const noexcept  { return GetValue<char>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<std::string_view>() const noexcept  { return GetValue<String>(); }
     template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<const char*>() const noexcept  { return GetValue<char>(); }
+    [[nodiscard]] constexpr auto Entry::GetValue<char*>() const noexcept  { return GetValue<String>(); }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<const char*>() const noexcept  { return GetValue<String>(); }
 
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<Timestamp>() const noexcept
     {
-        return type == Type::Timestamp? Timestamp::FromText(GetValue<std::string_view>()) : Timestamp{};
+        if(type != Type::Timestamp)
+            return Timestamp{};
+        const std::span<const String> text = GetValue<String>();
+        return text.empty()? Timestamp{} : Timestamp::FromText(text[0]);
     }
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<Timestamp>() noexcept  { return std::as_const(*this).GetValue<Timestamp>(); }
 
 
 
@@ -3780,21 +3883,11 @@ namespace fdf
     constexpr void Entry::SetValue(const std::string_view value) noexcept
     {
         ReleaseData();
-        size = static_cast<uint32_t>(value.size());
-        type = Type::String;
+        AllocateStringArray(1);
         if consteval
-        {
-            data.str = new (std::nothrow) std::string();
-            assert(data.str && "Allocation shouldn't fail");
-            (*GetDataAs<std::string>()) = value;
-        }
+            { data.strArray[0] = value; }
         else
-        {
-            data.raw = detail::GlobalAllocator::Allocate(size + 1 + sizeof(uint32_t));
-            *static_cast<uint32_t*>(data.raw) = size;
-            detail::constexpr_memcpy((static_cast<char*>(data.raw) + sizeof(uint32_t)), value.data(), value.size() + 1);
-            (static_cast<char*>(data.raw) + sizeof(uint32_t))[value.size()] = '\0';
-        }
+            { static_cast<String*>(data.raw)[0] = value; }
     }
 
     constexpr void Entry::SetValue(const char value) noexcept
@@ -3812,20 +3905,12 @@ namespace fdf
         ReleaseData();
         std::string text;
         value.AppendTo(text);
+        AllocateStringArray(1);
         type = Type::Timestamp;
-        size = static_cast<uint32_t>(text.size());
         if consteval
-        {
-            data.str = new (std::nothrow) std::string(std::move(text));
-            assert(data.str && "Allocation shouldn't fail");
-        }
+            { data.strArray[0] = std::string_view(text); }
         else
-        {
-            data.raw = detail::GlobalAllocator::Allocate(size + 1 + sizeof(uint32_t));
-            *static_cast<uint32_t*>(data.raw) = size;
-            detail::constexpr_memcpy((static_cast<char*>(data.raw) + sizeof(uint32_t)), text.data(), size);
-            (static_cast<char*>(data.raw) + sizeof(uint32_t))[size] = '\0';
-        }
+            { static_cast<String*>(data.raw)[0] = std::string_view(text); }
     }
 
 
@@ -3975,13 +4060,17 @@ namespace fdf
 
             case Type::String:
             case Type::Timestamp:
-                return GetValue<char>();
+            {
+                const std::span<const String> text = GetValue<String>();
+                return text.empty()? std::string_view() : std::string_view(text[0]);
+            }
 
             case Type::Hex:
             {
                 // Stored as "0x" + digits, no terminator. Keep the "0x" prefix lowercase (the lexer only
                 // accepts a lowercase x), case the digits per style
-                temp = GetValue<char>();
+                const std::span<const String> text = GetValue<String>();
+                temp = text.empty()? std::string_view() : std::string_view(text[0]);
                 for(size_t i = 2; i < temp.size(); i++)
                 {
                     const char c = temp[i];
@@ -4119,14 +4208,14 @@ namespace fdf
         {
         case CommentCombineStrategy::UseExisting: break;
         case CommentCombineStrategy::UseNew: SetComment(other->GetComment()); break;
-        case CommentCombineStrategy::UseNewIfExistingIsEmpty: 
-            if(GetComment().empty())
+        case CommentCombineStrategy::UseNewIfExistingIsEmpty:
+            if(GetComment().IsEmpty())
                 SetComment(other->GetComment());
             break;
         case CommentCombineStrategy::Merge:
-            if(GetComment().empty())
+            if(GetComment().IsEmpty())
                 SetComment(other->GetComment());
-            else if(!other->GetComment().empty())
+            else if(!other->GetComment().IsEmpty())
             {
                 const std::string_view existing = GetComment();
                 const std::string_view incoming = other->GetComment();
@@ -4360,7 +4449,7 @@ namespace fdf::detail
             #if !FDF_NO_COMMENTS
                 if(currentToken.type == TokenType::Comment)
                 {
-                    if(root->size == 0 && root->comment.str == nullptr && currentToken.count > 0 && content[currentToken.startPosition] == '#')
+                    if(root->size == 0 && root->comment.IsEmpty() && currentToken.count > 0 && content[currentToken.startPosition] == '#')
                     {
                         std::string_view sv = tokenizer.ToView(currentToken);
                         size_t firstChar = sv.find_first_not_of("# ");
@@ -4425,62 +4514,23 @@ namespace fdf::detail
         }
 
         #if !FDF_NO_COMMENTS
-            // Trim the whitespace from the comment (not '\n')
+            // A file comment keeps its newlines, only stripping leading whitespace on each line
             if(fileCommentToken.type != TokenType::NonExisting)
             {
                 std::string_view view = tokenizer.ToView(fileCommentToken);
-                if consteval
+                std::string normalized;
+                normalized.reserve(view.size());
+
+                bool bAfterNewLine = true;
+                for(char c : view)
                 {
-                    root->comment.str = new (std::nothrow) std::string();
-                    assert(root->comment.str && "Allocation shouldn't fail");
-                    root->GetCommentString()->reserve(view.size());
-
-                    bool bAfterNewLine = true;
-                    for(char c : view)
-                    {
-                        if(bAfterNewLine)
-                        {
-                            if(constexpr_isspace(c))
-                                continue;
-
-                            root->GetCommentString()->push_back(c);
-                            bAfterNewLine = false;
-                        }
-                        else
-                        {
-                            root->GetCommentString()->push_back(c);
-                            bAfterNewLine = (c == '\n');
-                        }
-                    }
+                    if(bAfterNewLine && constexpr_isspace(c))
+                        continue;
+                    normalized.push_back(c);
+                    bAfterNewLine = (c == '\n');
                 }
-                else
-                {
-                    const auto [buffer, granted] = GlobalAllocator::AllocateAtLeast(view.size() + sizeof(Entry::CommentControlBlock) + 1);
-                    root->comment.raw = buffer;
-                    root->GetCommentControlBlock()->capacity = static_cast<uint32_t>(granted - sizeof(Entry::CommentControlBlock) - 1);
-                    root->GetCommentControlBlock()->size = 0;
 
-                    char* cur = root->GetCommentData();
-                    bool bAfterNewLine = true;
-                    for(char c : view)
-                    {
-                        if(bAfterNewLine)
-                        {
-                            if(constexpr_isspace(c))
-                                continue;
-
-                            cur[root->GetCommentControlBlock()->size++] = c;
-                            bAfterNewLine = false;
-                        }
-                        else
-                        {
-                            cur[root->GetCommentControlBlock()->size++] = c;
-                            bAfterNewLine = (c == '\n');
-                        }
-                    }
-
-                    cur[root->GetCommentControlBlock()->size] = '\0';
-                }
+                root->comment = std::string_view(normalized);
             }
         #endif
 
@@ -4706,12 +4756,8 @@ namespace fdf::detail
 
 
 
-        // Dimension count (Int/Float/Version, always small) or byte length (String/Hex/Timestamp)
-        if(valueType == Type::String)
-            entry.size = static_cast<uint32_t>(view.size() - 2);
-        else if(valueType == Type::Hex || valueType == Type::Timestamp)
-            entry.size = static_cast<uint32_t>(view.size());
-        else
+        // String/Hex/Timestamp get their size (1) from AllocateStringArray below
+        if(valueType != Type::String && valueType != Type::Hex && valueType != Type::Timestamp)
             entry.size = currentToken.extra8;
 
 
@@ -4998,9 +5044,7 @@ namespace fdf::detail
         }
 
 
-        // Validate the timestamp before allocating below. Returning after the allocation would leave
-        // a String-shaped buffer attached to a still-default (Map) entry, which ReleaseData would
-        // later misread as a child array, corrupting recovery cleanup
+        // Validate before allocating; a buffer left on a failed entry gets double-freed by recovery cleanup
         if(valueType == Type::Timestamp && !IsValidTimestamp(view))
         {
             Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidTimestamp, tokenizer, currentToken);
@@ -5008,98 +5052,29 @@ namespace fdf::detail
         }
 
 
-        if consteval
-        {
-            entry.data.str = new (std::nothrow) std::string();
-            assert(entry.data.str && "Allocation shouldn't fail");
-            entry.GetDataAs<std::string>()->resize(entry.size);
-        }
-        else
-        {
-            entry.data.raw = GlobalAllocator::Allocate(entry.size + 1 + sizeof(uint32_t));
-            *static_cast<uint32_t*>(entry.data.raw) = entry.size;
-        }
-
-        size_t size = 0;
-        auto writeCharacter = [&](char c)
-        {
-            if consteval
-                { (*entry.GetDataAs<std::string>())[size++] = c; }
-            else
-                { (static_cast<char*>(entry.data.raw) + sizeof(uint32_t))[size++] = c; }
-        };
-
         if(valueType == Type::String)
         {
-            entry.type = Type::String;
+            entry.AllocateStringArray(1);
 
-            static constexpr uint32_t start = 1;
-                   const     uint32_t end = static_cast<uint32_t>(view.size()) - 1U;
-
-            auto isEscapableChar     = [](char c) -> bool  { return c == '\"' || c == '\'' || c == '\\'; };
-            auto isMergeEscapeChar   = [](char c) -> bool  { return c == 'n'  || c == 'r'  || c == 't' || c == 'v' || c == 'b' || c == 'f' || c == 'a'; };
-
-            auto convertMergedEscapeChar = [](char c) -> char
-            {
-                if(c == 'n')
-                    return '\n';
-                if(c == 'r')
-                    return '\r';
-                if(c == 't')
-                    return '\t';
-                if(c == 'v')
-                    return '\v';
-                if(c == 'b')
-                    return '\b';
-                if(c == 'f')
-                    return '\f';
-                if(c == 'a')
-                    return '\a';
-                return c;
-            };
-
-            for(uint32_t i = start; i < end; i++)
-            {
-                if(view[i] == '\\' && i + 1 < end && (isEscapableChar(view[i + 1]) || isMergeEscapeChar(view[i + 1])))
-                {
-                    i++;
-                    entry.size--;
-
-                    if(isEscapableChar(view[i]))
-                        writeCharacter(view[i]);
-                    else
-                        writeCharacter(convertMergedEscapeChar(view[i]));
-                }
-                else
-                {
-                    writeCharacter(view[i]);
-                }
-            }
-
+            std::string decoded;
+            DecodeStringLiteral(view, [&](char c) { decoded.push_back(c); });
             if consteval
-                { entry.GetDataAs<std::string>()->resize(size); }  // escapes shrink the string below the pre-allocated upper bound
+                { entry.data.strArray[0] = std::string_view(decoded); }
             else
-                { writeCharacter('\0'); }
+                { static_cast<String*>(entry.data.raw)[0] = std::string_view(decoded); }
 
             return postProcess();
         }
 
-
-
-
+        // Hex/Timestamp: whole text in a single String[1]
         if(valueType == Type::Hex || valueType == Type::Timestamp)
         {
+            entry.AllocateStringArray(1);
             entry.type = valueType;
-
             if consteval
-            {
-                (*entry.GetDataAs<std::string>()) = view;
-            }
+                { entry.data.strArray[0] = view; }
             else
-            {
-                constexpr_memcpy((static_cast<char*>(entry.data.raw) + sizeof(uint32_t)), view.data(), entry.size);
-                (static_cast<char*>(entry.data.raw) + sizeof(uint32_t))[entry.size] = '\0';
-            }
+                { static_cast<String*>(entry.data.raw)[0] = view; }
 
             return postProcess();
         }
@@ -5509,7 +5484,7 @@ namespace fdf::detail
         #if !FDF_NO_COMMENTS
             // Short comments on simple entries go inline (trailing); long ones and container
             // comments stay as leading // lines because they can't share the value's line
-            const std::string_view entryComment = STYLE.bEntryComment? e.GetComment() : std::string_view{};
+            const std::string_view entryComment = STYLE.bEntryComment? e.GetComment().View() : std::string_view{};
             const bool bInlineComment = !entryComment.empty() && !e.IsContainer() && entryComment.size() <= STYLE.singleLineCommentLimit;
             if(!entryComment.empty() && !bInlineComment)
             {

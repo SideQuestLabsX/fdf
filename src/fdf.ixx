@@ -10,6 +10,7 @@ module;
 #include <format>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <ranges>
 #include <span>
 #include <string>

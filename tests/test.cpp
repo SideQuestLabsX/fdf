@@ -117,6 +117,13 @@ inline void CountDiagnostics(const fdf::Diagnostic& diagnostic) noexcept
         fdf::test::g_sawAlreadyHasComment = true;
 }
 
+// Component 0 of a string-ish entry (String/Hex/Timestamp) as a view, via the read-only span
+[[nodiscard]] constexpr std::string_view FirstString(const fdf::Entry& e) noexcept
+{
+    const std::span<const fdf::String> parts = e.GetValue<fdf::String>();
+    return parts.empty()? std::string_view{} : std::string_view(parts[0]);
+}
+
 namespace fdf::test
 {
 
@@ -288,7 +295,7 @@ namespace fdf::detail
             std::string temp;
             e->ForEach<ForEachFlags::Recursive | ForEachFlags::Group>([&](const Entry& entry)
             {
-                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}--Comment={}", "", 4 * entry.CalculateDepth(), ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.GetType())], entry.GetChildCount(), entry.GetFullIdentifier(), entry.DataToView(temp), entry.GetComment()));
+                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}--Comment={}", "", 4 * entry.CalculateDepth(), ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.GetType())], entry.GetChildCount(), entry.GetFullIdentifier(), entry.DataToView(temp), entry.GetComment().View()));
                 buffer.push_back('\n');
             });
 
@@ -386,7 +393,7 @@ namespace fdf::detail
             }
 
             if(Entry* entry = e->GetChild("name"); CHECK(entry && entry->GetType() == Type::String))
-                CHECK(entry->GetValue<std::string_view>() == "MyGame");
+                CHECK(FirstString(*entry) == "MyGame");
 
             if(Entry* entry = e->GetChild("enabled1"); CHECK(entry && entry->GetType() == Type::Bool))
             {
@@ -401,7 +408,7 @@ namespace fdf::detail
             }
 
             if(Entry* entry = e->GetChild("uuid"); CHECK(entry && entry->GetType() == Type::String))
-                CHECK(entry->GetValue<std::string_view>() == "a123-xyz");
+                CHECK(FirstString(*entry) == "a123-xyz");
 
             if(Entry* entry = e->GetChild("pi"); CHECK(entry && entry->GetType() == Type::Float))
             {
@@ -425,11 +432,11 @@ namespace fdf::detail
 
             // Escape handling: \t -> tab, unknown \p kept literally
             if(Entry* entry = e->GetChild("escaped5"); CHECK(entry && entry->GetType() == Type::String))
-                CHECK(entry->GetValue<std::string_view>() == "asd\tasd\\p");
+                CHECK(FirstString(*entry) == "asd\tasd\\p");
 
             // doubled backslash collapses to one
             if(Entry* entry = e->GetChild("escaped6"); CHECK(entry && entry->GetType() == Type::String))
-                CHECK(entry->GetValue<std::string_view>() == "\\asd\\");
+                CHECK(FirstString(*entry) == "\\asd\\");
         }
 
 
@@ -484,7 +491,7 @@ namespace fdf::detail
             if(CHECK_MSG(static_cast<bool>(reparsed), "WriteTest round-trip parse"))
             {
                 if(Entry* e = reparsed->GetChild("name"); CHECK(e && e->GetType() == Type::String))
-                    CHECK(e->GetValue<std::string_view>() == "Test");
+                    CHECK(FirstString(*e) == "Test");
                 if(Entry* e = reparsed->GetChild("results.4.value"); CHECK(e && e->GetType() == Type::Int))
                 {
                     auto val = e->GetValue<int64_t>();
@@ -534,7 +541,7 @@ namespace fdf::detail
             if(Entry* e = root->Emplace("s"); CHECK(e))
             {
                 e->SetValue("hello");
-                CHECK(e->GetType() == Type::String && e->GetValue<std::string_view>() == "hello");
+                CHECK(e->GetType() == Type::String && FirstString(*e) == "hello");
             }
 
             // Span overloads: set from an array reference, read every element back
@@ -585,7 +592,7 @@ namespace fdf::detail
             {
                 e->SetValue(123);
                 e->SetValue("now a string");
-                CHECK(e->GetType() == Type::String && e->GetValue<std::string_view>() == "now a string");
+                CHECK(e->GetType() == Type::String && FirstString(*e) == "now a string");
             }
         }
 
@@ -809,7 +816,7 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer(std::format("t = {}\n", ts));
                 if(Entry* e = root? root->GetChild("t") : nullptr; CHECK_MSG(e && e->GetType() == Type::Timestamp, ts))
-                    CHECK(e->GetValue<std::string_view>() == ts);
+                    CHECK(FirstString(*e) == ts);
             }
 
             // A buffer at/above the 32-bit offset limit is refused before parsing. The guard reads only
@@ -951,7 +958,100 @@ namespace fdf::detail
 
                 UniqueEntryPtr reparsed = ParseBuffer(out);
                 if(Entry* e = reparsed? reparsed->GetChild("s") : nullptr; CHECK_MSG(e && e->GetType() == Type::String, out))
-                    CHECK_MSG(e->GetValue<std::string_view>() == want, out);
+                    CHECK_MSG(FirstString(*e) == want, out);
+            }
+        }
+
+
+
+
+        // fdf::String storage: scalar is a String[1], mutable via span, span stable until SetValue/ReleaseData, empty holds no allocation
+        static void StringStorageTest()
+        {
+            CHECK(sizeof(fdf::String) == 8);
+
+            if(UniqueEntryPtr root = ParseBuffer(std::string("v = \"hello\"\n")))
+            {
+                Entry* e = root->GetChild("v");
+                if(CHECK(e && e->GetType() == Type::String))
+                {
+                    const std::span<String> comps = e->GetValue<String>();
+                    CHECK(comps.size() == 1 && comps[0] == "hello" && comps[0].Size() == 5);
+
+                    const Entry& ce = *e;
+                    const std::span<const String> constComps = ce.GetValue<String>();
+                    CHECK(constComps.size() == 1 && constComps[0] == "hello");
+                }
+            }
+
+            if(UniqueEntryPtr root = NewEntry())
+            {
+                Entry* e = root->Emplace("v");
+                if(CHECK(static_cast<bool>(e)))
+                {
+                    e->SetValue(std::string_view("aa"));
+                    std::span<String> comps = e->GetValue<String>();
+                    const String* before = comps.data();
+
+                    comps[0] = "much longer than it was before";
+                    CHECK(comps[0] == "much longer than it was before");
+                    CHECK(e->GetValue<String>().data() == before);
+                    CHECK(FirstString(*e) == "much longer than it was before");
+
+                    comps[0] = "";
+                    CHECK(comps[0].IsEmpty() && FirstString(*e) == "");
+                }
+            }
+
+            if(UniqueEntryPtr root = NewEntry())
+            {
+                Entry* e = root->Emplace("v");
+                if(CHECK(static_cast<bool>(e)))
+                {
+                    e->SetValue(std::string_view(""));
+                    const std::span<String> comps = e->GetValue<String>();
+                    if(CHECK(e->GetType() == Type::String && comps.size() == 1))
+                    {
+                        CHECK(comps[0].IsEmpty() && comps[0].Size() == 0);
+                        CHECK(comps[0].View().data() == nullptr);   // empty = no allocation
+                    }
+                    CHECK(FirstString(*e) == "");
+                }
+            }
+
+            if(UniqueEntryPtr root = NewEntry())
+            {
+                Entry* e = root->Emplace("v");
+                if(CHECK(static_cast<bool>(e)))
+                {
+                    e->SetValue(std::string_view("first"));
+                    e->SetValue(std::string_view("second value"));
+                    CHECK(FirstString(*e) == "second value");
+
+                    std::string out;
+                    WriteBuffer<Style{ .bCommas = false }>(*root, out);
+                    UniqueEntryPtr reparsed = ParseBuffer(out);
+                    Entry* r = reparsed? reparsed->GetChild("v") : nullptr;
+                    if(CHECK_MSG(r && r->GetType() == Type::String, out))
+                        CHECK_MSG(FirstString(*r) == "second value", out);
+                }
+            }
+
+            // Hex/Timestamp are String[1] too: readable through the const span, but the mutable
+            // span is Type::String-only (writable text could break their format invariants)
+            if(UniqueEntryPtr root = ParseBuffer(std::string("h = 0xFF5733\nt = 2024-12-24T15:30:00\n")))
+            {
+                Entry* h = root->GetChild("h");
+                Entry* t = root->GetChild("t");
+                CHECK(h && h->GetType() == Type::Hex && FirstString(*h) == "0xFF5733");
+                CHECK(t && t->GetType() == Type::Timestamp && FirstString(*t) == "2024-12-24T15:30:00");
+                if(h && t)
+                {
+                    CHECK(std::as_const(*h).GetValue<String>().size() == 1);   // const gate: readable
+                    CHECK(std::as_const(*t).GetValue<String>().size() == 1);
+                    CHECK(h->GetValue<String>().empty());                      // mutable gate: String-only
+                    CHECK(t->GetValue<String>().empty());
+                }
             }
         }
 
@@ -1155,7 +1255,7 @@ namespace fdf::detail
                 {
                     e->SetValue(Timestamp::DateTime(2024, 12, 24, 15, 30, 0));
                     CHECK(e->GetType() == Type::Timestamp);
-                    CHECK(e->GetValue<std::string_view>() == "2024-12-24T15:30:00");
+                    CHECK(FirstString(*e) == "2024-12-24T15:30:00");
                     Timestamp got = e->GetValue<Timestamp>();
                     CHECK(got.year == 2024 && got.month == 12 && got.day == 24 && got.hour == 15);
                 }
@@ -1167,7 +1267,7 @@ namespace fdf::detail
                 if(Entry* e = root->Emplace("t"); CHECK(e))
                 {
                     e->SetValue(Timestamp::FromUnixSeconds(1'000'000'000));
-                    CHECK(e->GetValue<std::string_view>() == "2001-09-09T01:46:40Z");
+                    CHECK(FirstString(*e) == "2001-09-09T01:46:40Z");
                     CHECK(e->GetValue<Timestamp>().ToUnixSeconds() == 1'000'000'000);
                 }
             }
@@ -1227,8 +1327,8 @@ namespace fdf::detail
                 case Type::Int:                       return SpanEqual(a.GetValue<int64_t>(),  b.GetValue<int64_t>());
                 case Type::UInt: case Type::Version:  return SpanEqual(a.GetValue<uint64_t>(), b.GetValue<uint64_t>());
                 case Type::Float:                     return SpanEqual(a.GetValue<double>(),   b.GetValue<double>());
-                case Type::String: case Type::Timestamp: return a.GetValue<std::string_view>() == b.GetValue<std::string_view>();
-                case Type::Hex:                       return EqualIgnoreCase(a.GetValue<std::string_view>(), b.GetValue<std::string_view>());
+                case Type::String: case Type::Timestamp: return FirstString(a) == FirstString(b);
+                case Type::Hex:                       return EqualIgnoreCase(FirstString(a), FirstString(b));
                 default:                              return false;
             }
         }
@@ -1378,6 +1478,7 @@ namespace fdf::detail
             }
             return columns;
         }
+    #endif
 
         static void AllocatorTest()
         {
@@ -1488,6 +1589,7 @@ namespace fdf::detail
 #endif
         }
 
+    #if !FDF_NO_COMMENTS
         static void WriterCommentTest()
         {
             UniqueEntryPtr root = ParseBuffer(
@@ -1605,7 +1707,7 @@ consteval bool TimestampInjectProbe()
     if(!e)
         return false;
     e->SetValue(fdf::Timestamp::FromUnixSeconds(1'000'000'000));
-    if(e->GetType() != fdf::Type::Timestamp || e->GetValue<std::string_view>() != "2001-09-09T01:46:40Z")
+    if(e->GetType() != fdf::Type::Timestamp || FirstString(*e) != "2001-09-09T01:46:40Z")
         return false;
     fdf::Timestamp got = e->GetValue<fdf::Timestamp>();
     return got.IsValid() && got.year == 2001 && got.month == 9 && got.day == 9 && got.ToUnixSeconds() == 1'000'000'000;
@@ -1638,6 +1740,48 @@ consteval bool MultiDimWidenProbe()
 }
 static_assert(MultiDimWidenProbe(), "consteval multidim int->float widening");
 
+consteval bool StringInjectProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::NewEntry();
+    fdf::Entry* e = root->Emplace("v");
+    if(!e)
+        return false;
+    e->SetValue(std::string_view("x"));
+    std::span<fdf::String> comps = e->GetValue<fdf::String>();
+    if(e->GetType() != fdf::Type::String || comps.size() != 1 || comps[0] != "x")
+        return false;
+    comps[0] = "grown at compile time";
+    return e->GetValue<fdf::String>()[0] == "grown at compile time"
+        && FirstString(*e) == "grown at compile time";
+}
+static_assert(StringInjectProbe(), "consteval string inject + mutate + read back");
+
+consteval bool StringParseMutateProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 'a\\tb'\n");
+    fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
+    if(!e || e->GetType() != fdf::Type::String)
+        return false;
+    std::span<fdf::String> comps = e->GetValue<fdf::String>();
+    if(comps.size() != 1 || comps[0] != "a\tb")
+        return false;
+    comps[0] = "rewritten";
+    return FirstString(*e) == "rewritten";
+}
+static_assert(StringParseMutateProbe(), "consteval string parse + mutate through the span");
+
+consteval bool HexTimestampStringViewProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("h = 0xFF5733\nt = 2024-12-24T15:30:00\n");
+    if(!root)
+        return false;
+    const fdf::Entry* h = root->GetDirectChild("h");
+    const fdf::Entry* t = root->GetDirectChild("t");
+    return h && h->GetType() == fdf::Type::Hex && FirstString(*h) == "0xFF5733"
+        && t && t->GetType() == fdf::Type::Timestamp && FirstString(*t) == "2024-12-24T15:30:00";
+}
+static_assert(HexTimestampStringViewProbe(), "consteval hex/timestamp String[1] round-trip");
+
 // Every scalar type parsed at compile time. One self-contained probe per type so a failure points
 // at the exact case. Each verifies the value parses to a single leaf child of the expected type
 consteval bool IntProbe()
@@ -1662,7 +1806,7 @@ consteval bool StringProbe()
 {
     fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = \"hi\"\n");
     const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
-    return e && e->GetType() == fdf::Type::String && e->GetValue<std::string_view>() == "hi";
+    return e && e->GetType() == fdf::Type::String && FirstString(*e) == "hi";
 }
 consteval bool BoolProbe()
 {
@@ -1698,7 +1842,7 @@ consteval bool TimestampProbe()
 {
     fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 2024-12-24T15:30:00Z\n");
     const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
-    return e && e->GetType() == fdf::Type::Timestamp && e->GetValue<std::string_view>() == "2024-12-24T15:30:00Z";
+    return e && e->GetType() == fdf::Type::Timestamp && FirstString(*e) == "2024-12-24T15:30:00Z";
 }
 
 static_assert(IntProbe(),       "consteval int parse");
@@ -1741,7 +1885,7 @@ consteval bool EscapeProbe()
     if(!root)
         return false;
     const fdf::Entry* v = root->GetDirectChild("value");
-    return v && v->GetValue<std::string_view>() == "a\tb\\c\"d";
+    return v && FirstString(*v) == "a\tb\\c\"d";
 }
 static_assert(EscapeProbe(), "consteval string escape decoding");
 
@@ -1835,7 +1979,7 @@ consteval bool ValueRoundTripProbe()
 
     fdf::Entry* s = root->Emplace("s");
     s->SetValue("hi");
-    if(s->GetType() != fdf::Type::String || s->GetValue<std::string_view>() != "hi")
+    if(s->GetType() != fdf::Type::String || FirstString(*s) != "hi")
         return false;
 
     int64_t ints[3] = { 10, -20, 30 };
@@ -1903,7 +2047,7 @@ consteval bool WriteRoundTripProbe()
     const fdf::Entry* y = re->GetDirectChild("y");
     const fdf::Entry* a = re->GetDirectChild("arr");
     return x && x->GetValue<int64_t>()[0] == 123
-        && y && y->GetValue<std::string_view>() == "hello"
+        && y && FirstString(*y) == "hello"
         && a && a->GetChildCount() == 2 && a->GetDirectChild(1u)->GetValue<int64_t>()[0] == 8;
 }
 static_assert(WriteRoundTripProbe(), "consteval write -> parse round-trip");
@@ -1915,7 +2059,7 @@ consteval size_t ExtractCommentSize(auto buffer)
     if(!eRoot)
         return 0;
     if(auto* eValue = eRoot->GetDirectChild("value"))
-        return eValue->GetComment().size();
+        return eValue->GetComment().Size();
     return 0;
 }
 
@@ -1927,7 +2071,7 @@ consteval auto ExtractCommentArray(auto buffer)
     if(!eRoot)
         return result;
     if(auto* eValue = eRoot->GetDirectChild("value"))
-        fdf::detail::constexpr_memcpy(result.data(), eValue->GetComment().data(), SIZE);
+        fdf::detail::constexpr_memcpy(result.data(), eValue->GetComment().View().data(), SIZE);
     return result;
 }
 
@@ -2003,6 +2147,7 @@ int main()
     RunCase("NegativeTest",        Test::NegativeTest);
     RunCase("MultiDimTest",        Test::MultiDimTest);
     RunCase("StringRoundTripTest", Test::StringRoundTripTest);
+    RunCase("StringStorageTest",   Test::StringStorageTest);
     RunCase("FloatRoundTripTest",  Test::FloatRoundTripTest);
     RunCase("TimestampTest",       Test::TimestampTest);
     RunCase("AllocatorTest",       Test::AllocatorTest);

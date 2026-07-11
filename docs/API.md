@@ -43,25 +43,30 @@ Entry*       GetChild(path...);          // "window.title", "items.0.name"
 Entry*       GetDirectChild(key);        // single level, by name or index
 std::string_view GetIdentifier()  const; // this node's key
 std::string  GetFullIdentifier()  const; // dotted path from the root
-std::string_view GetComment()     const;
+const fdf::String& GetComment()   const;  // converts to std::string_view implicitly
 Type         GetType()            const;
 uint32_t     GetChildCount()      const;
 ```
 
-`GetValue<T>()` reads the scalar payload. Numbers and bools come back as a `std::span<T>`
-(one element for a plain scalar, more for a pack), strings come back as a `std::string_view`,
-a timestamp is decoded into a `Timestamp` struct.
+`GetValue<T>()` reads the scalar payload. Every scalar type comes back as a `std::span` over its
+components (one element for a plain scalar, more for a pack); a timestamp is decoded into a
+`Timestamp` struct on demand.
 
 ```cpp
-auto name = e->GetChild("name")->GetValue<std::string_view>();   // "MyGame"
+auto name = e->GetChild("name")->GetValue<fdf::String>()[0];     // "MyGame"
 auto px   = e->GetChild("pos")->GetValue<int64_t>();             // pack span: [100, 100]
 auto flag = e->GetChild("fullscreen")->GetValue<bool>()[0];      // true
 auto when = e->GetChild("created")->GetValue<Timestamp>();       // decoded fields
 ```
 
-Valid `T`: `bool`, `int`/`int64_t`, `unsigned`/`uint64_t`, `float`/`double`,
-`std::string_view`/`std::string`, and `Timestamp`. The wrong `T` for a node's type gives
-back an empty span/view.
+A string value is stored as an array of `fdf::String`, an 8-byte slab-backed mutable string: one
+pointer to a `[size][capacity][chars…]` block.
+
+```cpp
+std::span<fdf::String> comps = e->GetChild("name")->GetValue<fdf::String>();
+comps[0] = "renamed";                            // reallocs that component only
+std::string_view view = comps[0];                // "renamed"
+```
 
 ## Walking the tree
 
