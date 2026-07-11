@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -1378,6 +1379,115 @@ namespace fdf::detail
             return columns;
         }
 
+        static void AllocatorTest()
+        {
+            using Alloc = fdf::detail::GlobalAllocator;
+
+            auto checkBucket = [](size_t request, size_t expected)
+            {
+                Alloc::AllocationResult r = Alloc::AllocateAtLeast(request);
+                if(!CHECK_MSG(r.ptr != nullptr, std::format("request {}", request)))
+                    return;
+                CHECK_MSG(r.size == expected, std::format("request {} -> granted {} (want {})", request, r.size, expected));
+                std::memset(r.ptr, 0xAB, r.size);   // whole granted extent must be writable
+                Alloc::Deallocate(r.ptr, r.size);
+            };
+
+            // bit_ceil ladder with an 8-byte floor, boundaries either side of each bucket
+            checkBucket(1, 8);
+            checkBucket(8, 8);
+            checkBucket(9, 16);
+            checkBucket(16, 16);
+            checkBucket(17, 32);
+            checkBucket(32, 32);
+            checkBucket(33, 64);
+            checkBucket(64, 64);
+            checkBucket(65, 128);
+            checkBucket(128, 128);
+            checkBucket(129, 256);
+            checkBucket(200, 256);
+            checkBucket(256, 256);
+
+            // > 256 falls back to the heap and reports the exact request
+            checkBucket(257, 257);
+            checkBucket(1000, 1000);
+
+            // Round-trip through Allocate(size)/Deallocate(size) at each bucket boundary
+            for(size_t size : { size_t(8), size_t(16), size_t(32), size_t(64), size_t(128), size_t(256), size_t(4096) })
+            {
+                void* p = Alloc::Allocate(size);
+                if(CHECK_MSG(p != nullptr, std::format("Allocate({})", size)))
+                {
+                    std::memset(p, 0xCD, size);
+                    CHECK(Alloc::Deallocate(p, size));
+                }
+            }
+
+            // Distinct live requests hand back distinct, independently writable blocks
+            {
+                void* a = Alloc::Allocate(65);
+                void* b = Alloc::Allocate(65);
+                void* c = Alloc::Allocate(200);
+                CHECK(a != b && a != c && b != c);
+                if(a && b && c)
+                {
+                    std::memset(a, 1, 65);
+                    std::memset(b, 2, 65);
+                    std::memset(c, 3, 200);
+                    CHECK(*static_cast<unsigned char*>(a) == 1);
+                    CHECK(*static_cast<unsigned char*>(b) == 2);
+                    CHECK(*static_cast<unsigned char*>(c) == 3);
+                }
+                Alloc::Deallocate(a, 65);
+                Alloc::Deallocate(b, 65);
+                Alloc::Deallocate(c, 200);
+            }
+
+            // Child vector regrowth across every bucket into the heap fallback (40 * 8B > 256)
+            {
+                UniqueEntryPtr root = NewEntry();
+                if(CHECK(static_cast<bool>(root)))
+                {
+                    constexpr uint32_t count = 40;
+                    for(uint32_t i = 0; i < count; i++)
+                    {
+                        if(Entry* e = root->Emplace(std::format("c{}", i)))
+                            e->SetValue(static_cast<int64_t>(i));
+                    }
+                    CHECK(root->GetChildCount() == count);
+                    bool bAllMatch = true;
+                    for(uint32_t i = 0; i < count; i++)
+                    {
+                        Entry* e = root->GetChild(std::format("c{}", i));
+                        auto v = e? e->GetValue<int64_t>() : std::span<int64_t>{};
+                        bAllMatch = bAllMatch && v.size() == 1 && v[0] == static_cast<int64_t>(i);
+                    }
+                    CHECK_MSG(bAllMatch, "all children readable after regrowth into the heap");
+                }
+            }
+
+#if !FDF_NO_COMMENTS
+            // Comment replacement: shrink in place, regrow within the granted slack, then force heap
+            {
+                UniqueEntryPtr root = NewEntry();
+                Entry* e = root? root->Emplace("a") : nullptr;
+                if(CHECK(e != nullptr))
+                {
+                    e->SetValue(static_cast<int64_t>(1));
+                    e->SetComment("0123456789");
+                    CHECK(e->GetComment() == "0123456789");
+                    e->SetComment("ab");
+                    CHECK(e->GetComment() == "ab");
+                    e->SetComment("0123456789ABCDEF012");
+                    CHECK(e->GetComment() == "0123456789ABCDEF012");
+                    const std::string longComment(300, 'x');
+                    e->SetComment(longComment);
+                    CHECK(e->GetComment() == longComment);
+                }
+            }
+#endif
+        }
+
         static void WriterCommentTest()
         {
             UniqueEntryPtr root = ParseBuffer(
@@ -1895,6 +2005,7 @@ int main()
     RunCase("StringRoundTripTest", Test::StringRoundTripTest);
     RunCase("FloatRoundTripTest",  Test::FloatRoundTripTest);
     RunCase("TimestampTest",       Test::TimestampTest);
+    RunCase("AllocatorTest",       Test::AllocatorTest);
     RunCase("RoundTripTest",       Test::RoundTripTest);
 #if !FDF_NO_COMMENTS
     RunCase("WriterCommentTest",   Test::WriterCommentTest);

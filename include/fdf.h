@@ -1930,63 +1930,94 @@ namespace fdf::detail
 
 
 
-    class GlobalAllocator
+    FDF_EXPORT_INTERNAL class GlobalAllocator
     {
         template<auto DIAGNOSTIC_CALLBACK>
         friend struct detail::Utils;
 
-        inline static constinit SlabAllocator<8U>  B8;
-        inline static constinit SlabAllocator<16U> B16;
-        inline static constinit SlabAllocator<32U> B32;
-        inline static constinit SlabAllocator<64U> B64;
+        inline static constinit SlabAllocator<8U>   B8;
+        inline static constinit SlabAllocator<16U>  B16;
+        inline static constinit SlabAllocator<32U>  B32;
+        inline static constinit SlabAllocator<64U>  B64;
+        inline static constinit SlabAllocator<128U> B128;
+        inline static constinit SlabAllocator<256U> B256;
         inline static constinit SlabAllocator<sizeof(Entry), alignof(Entry)>  ENTRY_ALLOCATOR;
 
-    public:
-        static void* Allocate(size_t size) noexcept
-        {
-            if(size <= 8)
-                return B8.Allocate();
-            if(size <= 16)
-                return B16.Allocate();
-            if(size <= 32)
-                return B32.Allocate();
-            if(size <= 64)
-                return B64.Allocate();
+        static constexpr size_t MAX_BUCKET = 256U;
 
-            void* p = ::operator new(size, std::nothrow);
-            assert(p && "Allocation shouldn't fail");
-            return p;
+        // Smallest bucket that fits size, clamped to the 8-byte floor (SlabAllocator needs room for a free-list pointer)
+        [[nodiscard]] static constexpr size_t BucketFor(size_t size) noexcept
+        {
+            return std::bit_ceil(std::max<size_t>(size, 8U));
+        }
+
+        template<size_t BUCKET>
+        [[nodiscard]] static auto& SlabFor() noexcept
+        {
+            if constexpr(BUCKET == 8U)        return B8;
+            else if constexpr(BUCKET == 16U)  return B16;
+            else if constexpr(BUCKET == 32U)  return B32;
+            else if constexpr(BUCKET == 64U)  return B64;
+            else if constexpr(BUCKET == 128U) return B128;
+            else                              return B256;
+        }
+
+    public:
+        struct AllocationResult { void* ptr; size_t size; };
+
+        // size = the bucket actually granted (>= request), or the exact request for the heap fallback
+        [[nodiscard]] static AllocationResult AllocateAtLeast(size_t size) noexcept
+        {
+            if(size > MAX_BUCKET)
+            {
+                void* p = ::operator new(size, std::nothrow);
+                assert(p && "Allocation shouldn't fail");
+                return { p, size };
+            }
+
+            switch(BucketFor(size))
+            {
+                case 8U:   return { B8.Allocate(),   8U };
+                case 16U:  return { B16.Allocate(),  16U };
+                case 32U:  return { B32.Allocate(),  32U };
+                case 64U:  return { B64.Allocate(),  64U };
+                case 128U: return { B128.Allocate(), 128U };
+                default:   return { B256.Allocate(), 256U };
+            }
+        }
+
+        [[nodiscard]] static void* Allocate(size_t size) noexcept
+        {
+            return AllocateAtLeast(size).ptr;
         }
 
         static bool Deallocate(void* p, size_t size) noexcept
         {
-            if(size <= 8U)
-                return B8.Deallocate(p);
-            if(size <= 16U)
-                return B16.Deallocate(p);
-            if(size <= 32U)
-                return B32.Deallocate(p);
-            if(size <= 64U)
-                return B64.Deallocate(p);
+            if(size > MAX_BUCKET)
+            {
+                ::operator delete(p);
+                return true;
+            }
 
-            ::operator delete(p);
-            return true;
+            switch(BucketFor(size))
+            {
+                case 8U:   return B8.Deallocate(p);
+                case 16U:  return B16.Deallocate(p);
+                case 32U:  return B32.Deallocate(p);
+                case 64U:  return B64.Deallocate(p);
+                case 128U: return B128.Deallocate(p);
+                default:   return B256.Deallocate(p);
+            }
         }
 
 
 
 
         template<size_t size>
-        static void* Allocate() noexcept
+        [[nodiscard]] static void* Allocate() noexcept
         {
-            if constexpr(size <= 8U)
-                return B8.Allocate();
-            else if constexpr(size <= 16U)
-                return B16.Allocate();
-            else if constexpr(size <= 32U)
-                return B32.Allocate();
-            else if constexpr(size <= 64U)
-                return B64.Allocate();
+            if constexpr(BucketFor(size) <= MAX_BUCKET)
+                return SlabFor<BucketFor(size)>().Allocate();
             else
             {
                 void* p = ::operator new(size, std::nothrow);
@@ -1998,14 +2029,8 @@ namespace fdf::detail
         template<size_t size>
         static bool Deallocate(void* p) noexcept
         {
-            if constexpr(size <= 8U)
-                return B8.Deallocate(p);
-            else if constexpr(size <= 16U)
-                return B16.Deallocate(p);
-            else if constexpr(size <= 32U)
-                return B32.Deallocate(p);
-            else if constexpr(size <= 64U)
-                return B64.Deallocate(p);
+            if constexpr(BucketFor(size) <= MAX_BUCKET)
+                return SlabFor<BucketFor(size)>().Deallocate(p);
             else
             {
                 ::operator delete(p);
@@ -2019,14 +2044,8 @@ namespace fdf::detail
         template<typename T, typename... Args>
         [[nodiscard]] static T* Create(Args&&... args) noexcept(std::is_nothrow_constructible_v<T, Args...>)
         {
-            if constexpr(sizeof(T) <= 8U)
-                return B8.Create<T>(std::forward<Args>(args)...);
-            else if constexpr(sizeof(T) <= 16U)
-                return B16.Create<T>(std::forward<Args>(args)...);
-            else if constexpr(sizeof(T) <= 32U)
-                return B32.Create<T>(std::forward<Args>(args)...);
-            else if constexpr(sizeof(T) <= 64U)
-                return B64.Create<T>(std::forward<Args>(args)...);
+            if constexpr(BucketFor(sizeof(T)) <= MAX_BUCKET)
+                return SlabFor<BucketFor(sizeof(T))>().template Create<T>(std::forward<Args>(args)...);
             else
             {
                 T* p = new (std::nothrow) T(std::forward<Args>(args)...);
@@ -2038,14 +2057,8 @@ namespace fdf::detail
         template<typename T>
         [[nodiscard]] static bool Destroy(T* obj) noexcept(std::is_nothrow_destructible_v<T>)
         {
-            if constexpr(sizeof(T) <= 8U)
-                return B8.Destroy(obj);
-            else if constexpr(sizeof(T) <= 16U)
-                return B16.Destroy(obj);
-            else if constexpr(sizeof(T) <= 32U)
-                return B32.Destroy(obj);
-            else if constexpr(sizeof(T) <= 64U)
-                return B64.Destroy(obj);
+            if constexpr(BucketFor(sizeof(T)) <= MAX_BUCKET)
+                return SlabFor<BucketFor(sizeof(T))>().Destroy(obj);
             else
             {
                 delete obj;
@@ -2377,9 +2390,10 @@ namespace fdf
                 if(newComment.size() > GetCommentControlBlock()->capacity)
                 {
                     detail::GlobalAllocator::Deallocate(comment.raw, GetCommentControlBlock()->capacity + sizeof(Entry::CommentControlBlock) + 1);
-                    comment.raw = detail::GlobalAllocator::Allocate(newComment.size() + sizeof(Entry::CommentControlBlock) + 1);
-                    GetCommentControlBlock()->capacity = static_cast<uint32_t>(newComment.size());
-                    GetCommentControlBlock()->size = GetCommentControlBlock()->capacity;
+                    const auto [buffer, granted] = detail::GlobalAllocator::AllocateAtLeast(newComment.size() + sizeof(Entry::CommentControlBlock) + 1);
+                    comment.raw = buffer;
+                    GetCommentControlBlock()->capacity = static_cast<uint32_t>(granted - sizeof(Entry::CommentControlBlock) - 1);
+                    GetCommentControlBlock()->size = static_cast<uint32_t>(newComment.size());
                 }
                 else
                 {
@@ -2388,9 +2402,10 @@ namespace fdf
             }
             else
             {
-                comment.raw = detail::GlobalAllocator::Allocate(newComment.size() + sizeof(Entry::CommentControlBlock) + 1);
-                GetCommentControlBlock()->capacity = static_cast<uint32_t>(newComment.size());
-                GetCommentControlBlock()->size = GetCommentControlBlock()->capacity;
+                const auto [buffer, granted] = detail::GlobalAllocator::AllocateAtLeast(newComment.size() + sizeof(Entry::CommentControlBlock) + 1);
+                comment.raw = buffer;
+                GetCommentControlBlock()->capacity = static_cast<uint32_t>(granted - sizeof(Entry::CommentControlBlock) - 1);
+                GetCommentControlBlock()->size = static_cast<uint32_t>(newComment.size());
             }
 
             size_t i = 0, j = 0;
@@ -2607,21 +2622,21 @@ namespace fdf
                 assert(size <= capacity && "size must never exceed capacity");
                 if(size == capacity)
                 {
-                    const uint32_t newCapacity = capacity * 2;
-                    void* newBuffer = detail::GlobalAllocator::Allocate(newCapacity * sizeof(void*));
+                    const auto [newBuffer, granted] = detail::GlobalAllocator::AllocateAtLeast(capacity * 2 * sizeof(void*));
 
                     for(size_t i = 0; i < size; i++)
                         static_cast<Entry**>(newBuffer)[i] = static_cast<Entry**>(data.raw)[i];
 
                     (void)detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(void*));
                     data.raw = newBuffer;
-                    capacity = newCapacity;
+                    capacity = static_cast<uint32_t>(granted / sizeof(void*));
                 }
             }
             else
             {
-                data.raw = detail::GlobalAllocator::Allocate(4 * sizeof(void*));
-                capacity = 4;
+                const auto [newBuffer, granted] = detail::GlobalAllocator::AllocateAtLeast(4 * sizeof(void*));
+                data.raw = newBuffer;
+                capacity = static_cast<uint32_t>(granted / sizeof(void*));
                 size = 0;
             }
 
@@ -4440,8 +4455,9 @@ namespace fdf::detail
                 }
                 else
                 {
-                    root->comment.raw = GlobalAllocator::Allocate(view.size() + sizeof(Entry::CommentControlBlock) + 1);
-                    root->GetCommentControlBlock()->capacity = static_cast<uint32_t>(view.size());
+                    const auto [buffer, granted] = GlobalAllocator::AllocateAtLeast(view.size() + sizeof(Entry::CommentControlBlock) + 1);
+                    root->comment.raw = buffer;
+                    root->GetCommentControlBlock()->capacity = static_cast<uint32_t>(granted - sizeof(Entry::CommentControlBlock) - 1);
                     root->GetCommentControlBlock()->size = 0;
 
                     char* cur = root->GetCommentData();
