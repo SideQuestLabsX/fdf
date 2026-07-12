@@ -43,7 +43,7 @@ Entry*       GetChild(path...);          // "window.title", "items.0.name"
 Entry*       GetDirectChild(key);        // single level, by name or index
 std::string_view GetIdentifier()  const; // this node's key
 std::string  GetFullIdentifier()  const; // dotted path from the root
-const fdf::String& GetComment()   const;  // converts to std::string_view implicitly
+fdf::String& GetComment();               // + const overload, converts to std::string_view
 Type         GetType()            const;
 uint32_t     GetChildCount()      const;
 ```
@@ -59,8 +59,7 @@ auto flag = e->GetChild("fullscreen")->GetValue<bool>()[0];      // true
 auto when = e->GetChild("created")->GetValue<Timestamp>();       // decoded fields
 ```
 
-A string value is stored as an array of `fdf::String`, an 8-byte slab-backed mutable string: one
-pointer to a `[size][capacity][chars…]` block.
+A string value is stored as an array of `fdf::String` (see [fdf::String](#fdfstring)).
 
 ```cpp
 std::span<fdf::String> comps = e->GetChild("name")->GetValue<fdf::String>();
@@ -99,7 +98,6 @@ void SetValue(value);                    // bool, integer, float, string, Timest
                                          // a std::span for a numeric/bool pack,
                                          // or NullType/NilType/ArrayType/MapType
 bool SetIdentifier(std::string_view);
-void SetComment(std::string_view);
 void SetType(Type);
 void Resize(uint32_t);
 
@@ -127,6 +125,32 @@ if(Entry* arr = root->Emplace("levels"))
 ```
 
 Writing the tree back out is covered in [Styling](Styling.md).
+
+## fdf::String
+
+The string value type. 8 bytes: a single pointer to a `[u32 size][u32 capacity][chars…][\0]` block.
+It mirrors most of the `std::string`'s API for edit and delegates most of the read operations to std::string_view.
+
+Deliberate divergences from `std::string`:
+
+- **`substr` returns a `std::string_view`** into the block, not a new `String`. That view, like
+  any `string_view`, `data()`, `c_str()`, iterator or `operator[]` reference, dangles the moment
+  the string is mutated or destroyed.
+- **Everything is `noexcept` and nothing throws.** Out-of-range access asserts, so there is no
+  `at()`.
+- **Sizes are `size_t` on the interface, storage stays `uint32_t`,** so a size past 4GB asserts.
+  `npos` is `std::string_view::npos`.
+- **No allocator surface, no `shrink_to_fit`, no SSO.** The slab allocator makes the first two
+  no-ops.
+- **Free `operator+` covers every `String`/`string_view`/`char` mix,** with `String&&` overloads
+  on either side that grow an existing buffer in place instead of allocating fresh.
+
+```cpp
+fdf::String s = fdf::String("game") + "-" + "config";   // "game-config", rvalue lhs reused
+s.replace(0, 4, "asset");                               // "asset-config"
+if(s.ends_with("config") && s.contains("-"))
+    std::print("{}\n", s);
+```
 
 ## Combining documents
 

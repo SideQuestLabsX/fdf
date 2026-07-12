@@ -555,13 +555,15 @@ FDF_EXPORT namespace fdf
 
     using UniqueEntryPtr = std::unique_ptr<Entry, detail::EntryDeleter>;
 
-    // 8-byte slab-backed mutable string, no SSO: [u32 size][u32 capacity][chars...]
+    // 8-byte slab-backed mutable string, no SSO: [u32 size][u32 capacity][chars...]['\0']
     class String
     {
     public:
+        static constexpr size_t npos = std::string_view::npos;
+
         constexpr String() noexcept = default;
-        constexpr String(std::string_view value) noexcept  { Assign(value); }
-        constexpr String(const String& other) noexcept  { Assign(other.View()); }
+        constexpr String(std::string_view value) noexcept  { assign(value); }
+        constexpr String(const String& other) noexcept  { assign(other); }
         constexpr String(String&& other) noexcept
             : ptr(other.ptr)
         {
@@ -569,11 +571,11 @@ FDF_EXPORT namespace fdf
         }
         constexpr ~String() noexcept  { Free(); }
 
-        constexpr String& operator=(std::string_view value) noexcept  { Assign(value); return *this; }
+        constexpr String& operator=(std::string_view value) noexcept  { return assign(value); }
         constexpr String& operator=(const String& other) noexcept
         {
             if(this != &other)
-                Assign(other.View());
+                assign(other);
             return *this;
         }
         constexpr String& operator=(String&& other) noexcept
@@ -588,13 +590,255 @@ FDF_EXPORT namespace fdf
         }
 
         [[nodiscard]] constexpr operator std::string_view() const noexcept  { return View(); }
-        [[nodiscard]] constexpr std::string_view View()     const noexcept  { return ptr? std::string_view{ptr + HEADER_SIZE, LoadU32(0)} : std::string_view{}; }
-        [[nodiscard]] constexpr uint32_t         Size()     const noexcept  { return ptr? LoadU32(0) : 0; }
-        [[nodiscard]] constexpr bool             IsEmpty()  const noexcept  { return Size() == 0; }
+        [[nodiscard]] explicit operator std::string() const  { return std::string(View()); }
+
+        // Reads
+        [[nodiscard]] constexpr size_t      size()     const noexcept  { return View().size(); }
+        [[nodiscard]] constexpr size_t      length()   const noexcept  { return View().size(); }
+        [[nodiscard]] constexpr bool        empty()    const noexcept  { return View().empty(); }
+        [[nodiscard]] constexpr size_t      capacity() const noexcept  { return Capacity(); }
+        [[nodiscard]] constexpr const char* data()     const noexcept  { return View().data(); }
+        [[nodiscard]] constexpr char*       data()           noexcept  { return ptr? ptr + HEADER_SIZE : nullptr; }
+        [[nodiscard]] constexpr const char* c_str()    const noexcept  { return ptr? ptr + HEADER_SIZE : ""; }
+
+        [[nodiscard]] constexpr char&       operator[](size_t index)       noexcept  { assert(index < size() && "String index out of range"); return ptr[HEADER_SIZE + index]; }
+        [[nodiscard]] constexpr const char& operator[](size_t index) const noexcept  { assert(index < size() && "String index out of range"); return ptr[HEADER_SIZE + index]; }
+        [[nodiscard]] constexpr char&       front()       noexcept  { assert(!empty() && "front on empty String"); return (*this)[0]; }
+        [[nodiscard]] constexpr const char& front() const noexcept  { assert(!empty() && "front on empty String"); return (*this)[0]; }
+        [[nodiscard]] constexpr char&       back()        noexcept  { assert(!empty() && "back on empty String"); return (*this)[size() - 1]; }
+        [[nodiscard]] constexpr const char& back()  const noexcept  { assert(!empty() && "back on empty String"); return (*this)[size() - 1]; }
+
+        [[nodiscard]] constexpr char*       begin()        noexcept  { return data(); }
+        [[nodiscard]] constexpr char*       end()          noexcept  { return data() + size(); }
+        [[nodiscard]] constexpr const char* begin()  const noexcept  { return View().data(); }
+        [[nodiscard]] constexpr const char* end()    const noexcept  { return View().data() + View().size(); }
+        [[nodiscard]] constexpr const char* cbegin() const noexcept  { return begin(); }
+        [[nodiscard]] constexpr const char* cend()   const noexcept  { return end(); }
+
+        [[nodiscard]] constexpr size_t find(std::string_view s, size_t pos = 0)    const noexcept  { return View().find(s, pos); }
+        [[nodiscard]] constexpr size_t find(char c, size_t pos = 0)                const noexcept  { return View().find(c, pos); }
+        [[nodiscard]] constexpr size_t rfind(std::string_view s, size_t pos = npos) const noexcept  { return View().rfind(s, pos); }
+        [[nodiscard]] constexpr size_t rfind(char c, size_t pos = npos)             const noexcept  { return View().rfind(c, pos); }
+        [[nodiscard]] constexpr size_t find_first_of(std::string_view s, size_t pos = 0)     const noexcept  { return View().find_first_of(s, pos); }
+        [[nodiscard]] constexpr size_t find_last_of(std::string_view s, size_t pos = npos)   const noexcept  { return View().find_last_of(s, pos); }
+        [[nodiscard]] constexpr size_t find_first_not_of(std::string_view s, size_t pos = 0)   const noexcept  { return View().find_first_not_of(s, pos); }
+        [[nodiscard]] constexpr size_t find_last_not_of(std::string_view s, size_t pos = npos) const noexcept  { return View().find_last_not_of(s, pos); }
+        [[nodiscard]] constexpr bool starts_with(std::string_view s) const noexcept  { return View().starts_with(s); }
+        [[nodiscard]] constexpr bool starts_with(char c)             const noexcept  { return View().starts_with(c); }
+        [[nodiscard]] constexpr bool ends_with(std::string_view s)   const noexcept  { return View().ends_with(s); }
+        [[nodiscard]] constexpr bool ends_with(char c)               const noexcept  { return View().ends_with(c); }
+        [[nodiscard]] constexpr bool contains(std::string_view s)    const noexcept  { return View().contains(s); }
+        [[nodiscard]] constexpr bool contains(char c)                const noexcept  { return View().contains(c); }
+        [[nodiscard]] constexpr int  compare(std::string_view s)     const noexcept  { return View().compare(s); }
+
+        // Returns a view into this block, dangles on the next mutation
+        [[nodiscard]] constexpr std::string_view substr(size_t pos = 0, size_t count = npos) const noexcept
+        {
+            std::string_view v = View();
+            if(pos > v.size())
+            {
+                assert(false && "substr pos out of range");
+                pos = v.size();
+            }
+            return v.substr(pos, count);
+        }
+
+        // The String overloads are exact matches, so String-vs-String never trips MSVC's C2666 (ambiguous with the rewritten reversed candidate)
+        [[nodiscard]] constexpr bool operator==(const String& other) const noexcept  { return View() == std::string_view(other); }
+        [[nodiscard]] constexpr std::strong_ordering operator<=>(const String& other) const noexcept  { return View() <=> std::string_view(other); }
         [[nodiscard]] constexpr bool operator==(std::string_view value) const noexcept  { return View() == value; }
+        [[nodiscard]] constexpr std::strong_ordering operator<=>(std::string_view value) const noexcept  { return View() <=> value; }
+
+        // Edits
+        constexpr String& assign(std::string_view value) noexcept
+        {
+            if(AliasesBlock(value))
+            {
+                String temp(value);
+                return assign(std::string_view(temp));
+            }
+            const uint32_t newSize = static_cast<uint32_t>(value.size());
+            assert(value.size() <= detail::UINT32_MAX_VALUE && "String size overflow");
+            if(newSize > Capacity())
+                Grow(newSize);
+            for(uint32_t i = 0; i < newSize; i++)
+                ptr[HEADER_SIZE + i] = value[i];
+            if(ptr)
+            {
+                StoreU32(0, newSize);
+                ptr[HEADER_SIZE + newSize] = '\0';
+            }
+            return *this;
+        }
+
+        constexpr String& append(std::string_view value) noexcept
+        {
+            if(value.empty())
+                return *this;
+            if(AliasesBlock(value))
+            {
+                String temp(value);
+                return append(std::string_view(temp));
+            }
+            const size_t oldSize = size();
+            const size_t newSize = oldSize + value.size();
+            assert(newSize <= detail::UINT32_MAX_VALUE && "String size overflow");
+            if(newSize > Capacity())
+                Grow(static_cast<uint32_t>(newSize));
+            for(size_t i = 0; i < value.size(); i++)
+                ptr[HEADER_SIZE + oldSize + i] = value[i];
+            StoreU32(0, static_cast<uint32_t>(newSize));
+            ptr[HEADER_SIZE + newSize] = '\0';
+            return *this;
+        }
+
+        constexpr void push_back(char c) noexcept  { (void)append(std::string_view(&c, 1)); }
+        constexpr void pop_back() noexcept
+        {
+            assert(!empty() && "pop_back on empty String");
+            const uint32_t newSize = static_cast<uint32_t>(size()) - 1;
+            StoreU32(0, newSize);
+            ptr[HEADER_SIZE + newSize] = '\0';
+        }
+
+        constexpr String& operator+=(std::string_view value) noexcept  { return append(value); }
+        constexpr String& operator+=(char c) noexcept  { push_back(c); return *this; }
+
+        constexpr String& insert(size_t pos, std::string_view value) noexcept
+        {
+            assert(pos <= size() && "insert pos out of range");
+            if(value.empty())
+                return *this;
+            if(AliasesBlock(value))
+            {
+                String temp(value);
+                return insert(pos, std::string_view(temp));
+            }
+            const size_t oldSize = size();
+            const size_t newSize = oldSize + value.size();
+            assert(newSize <= detail::UINT32_MAX_VALUE && "String size overflow");
+            if(newSize > Capacity())
+                Grow(static_cast<uint32_t>(newSize));
+            for(size_t i = oldSize; i > pos; i--)
+                ptr[HEADER_SIZE + i - 1 + value.size()] = ptr[HEADER_SIZE + i - 1];
+            for(size_t i = 0; i < value.size(); i++)
+                ptr[HEADER_SIZE + pos + i] = value[i];
+            StoreU32(0, static_cast<uint32_t>(newSize));
+            ptr[HEADER_SIZE + newSize] = '\0';
+            return *this;
+        }
+
+        constexpr String& erase(size_t pos = 0, size_t count = npos) noexcept
+        {
+            assert(pos <= size() && "erase pos out of range");
+            const size_t oldSize = size();
+            const size_t removed = std::min(count, oldSize - pos);
+            for(size_t i = pos + removed; i < oldSize; i++)
+                ptr[HEADER_SIZE + i - removed] = ptr[HEADER_SIZE + i];
+            if(ptr)
+            {
+                const uint32_t newSize = static_cast<uint32_t>(oldSize - removed);
+                StoreU32(0, newSize);
+                ptr[HEADER_SIZE + newSize] = '\0';
+            }
+            return *this;
+        }
+
+        constexpr String& replace(size_t pos, size_t count, std::string_view value) noexcept
+        {
+            assert(pos <= size() && "replace pos out of range");
+            if(AliasesBlock(value))
+            {
+                String temp(value);
+                return replace(pos, count, std::string_view(temp));
+            }
+            const size_t oldSize = size();
+            const size_t removed = std::min(count, oldSize - pos);
+            const size_t tailStart = pos + removed;
+            const size_t tailLen = oldSize - tailStart;
+            const size_t newSize = oldSize - removed + value.size();
+            assert(newSize <= detail::UINT32_MAX_VALUE && "String size overflow");
+            if(newSize > Capacity())
+                Grow(static_cast<uint32_t>(newSize));
+            if(value.size() > removed)
+            {
+                for(size_t i = 0; i < tailLen; i++)
+                    ptr[HEADER_SIZE + newSize - 1 - i] = ptr[HEADER_SIZE + oldSize - 1 - i];
+            }
+            else if(value.size() < removed)
+            {
+                for(size_t i = 0; i < tailLen; i++)
+                    ptr[HEADER_SIZE + pos + value.size() + i] = ptr[HEADER_SIZE + tailStart + i];
+            }
+            for(size_t i = 0; i < value.size(); i++)
+                ptr[HEADER_SIZE + pos + i] = value[i];
+            if(ptr)
+            {
+                StoreU32(0, static_cast<uint32_t>(newSize));
+                ptr[HEADER_SIZE + newSize] = '\0';
+            }
+            return *this;
+        }
+
+        constexpr void clear() noexcept
+        {
+            if(ptr)
+            {
+                StoreU32(0, 0);
+                ptr[HEADER_SIZE] = '\0';
+            }
+        }
+
+        constexpr void resize(size_t n, char ch = ' ') noexcept
+        {
+            assert(n <= detail::UINT32_MAX_VALUE && "String size overflow");
+            const size_t oldSize = size();
+            if(n > Capacity())
+                Grow(static_cast<uint32_t>(n));
+            for(size_t i = oldSize; i < n; i++)
+                ptr[HEADER_SIZE + i] = ch;
+            if(ptr)
+            {
+                StoreU32(0, static_cast<uint32_t>(n));
+                ptr[HEADER_SIZE + n] = '\0';
+            }
+        }
+
+        constexpr void reserve(size_t newCapacity) noexcept
+        {
+            assert(newCapacity <= detail::UINT32_MAX_VALUE && "String capacity overflow");
+            if(newCapacity > Capacity())
+                Grow(static_cast<uint32_t>(newCapacity));
+        }
+
+        constexpr void swap(String& other) noexcept
+        {
+            char* temp = ptr;
+            ptr = other.ptr;
+            other.ptr = temp;
+        }
 
     private:
         static constexpr uint32_t HEADER_SIZE = 2 * sizeof(uint32_t);
+
+        [[nodiscard]] constexpr std::string_view View() const noexcept  { return ptr? std::string_view{ptr + HEADER_SIZE, LoadU32(0)} : std::string_view{}; }
+
+        // True when value points into this block, so a mutation would read bytes it is about to move or free
+        [[nodiscard]] constexpr bool AliasesBlock(std::string_view value) const noexcept
+        {
+            if(!ptr || value.empty())
+                return false;
+            const char* const last = ptr + HEADER_SIZE + Capacity() + 1;
+            if consteval
+            {
+                // relational comparison of pointers into different allocations is not a constant expression, scan by equality instead
+                for(const char* p = ptr; p != last; ++p)
+                    if(p == value.data())
+                        return true;
+                return false;
+            }
+            return value.data() >= ptr && value.data() < last;
+        }
 
         [[nodiscard]] constexpr uint32_t LoadU32(uint32_t offset) const noexcept
         {
@@ -613,21 +857,55 @@ FDF_EXPORT namespace fdf
 
         [[nodiscard]] constexpr uint32_t Capacity() const noexcept  { return ptr? LoadU32(sizeof(uint32_t)) : 0; }
 
-        constexpr void Assign(std::string_view value) noexcept
-        {
-            const uint32_t newSize = static_cast<uint32_t>(value.size());
-            if(newSize > Capacity())
-                Grow(newSize);
-            for(uint32_t i = 0; i < newSize; i++)
-                ptr[HEADER_SIZE + i] = value[i];
-            if(ptr)
-                StoreU32(0, newSize);
-        }
         constexpr void Grow(uint32_t minCapacity) noexcept;
         constexpr void Free() noexcept;
 
         char* ptr = nullptr;
     };
+
+    [[nodiscard]] constexpr String operator+(const String& a, const String& b) noexcept
+    {
+        String result;
+        result.reserve(a.size() + b.size());
+        result.append(a);
+        result.append(b);
+        return result;
+    }
+    [[nodiscard]] constexpr String operator+(const String& a, std::string_view b) noexcept
+    {
+        String result;
+        result.reserve(a.size() + b.size());
+        result.append(a);
+        result.append(b);
+        return result;
+    }
+    [[nodiscard]] constexpr String operator+(std::string_view a, const String& b) noexcept
+    {
+        String result;
+        result.reserve(a.size() + b.size());
+        result.append(a);
+        result.append(b);
+        return result;
+    }
+    [[nodiscard]] constexpr String operator+(const String& a, char b) noexcept
+    {
+        String result(a);
+        result.push_back(b);
+        return result;
+    }
+    [[nodiscard]] constexpr String operator+(char a, const String& b) noexcept
+    {
+        String result;
+        result.reserve(1 + b.size());
+        result.push_back(a);
+        result.append(b);
+        return result;
+    }
+    [[nodiscard]] constexpr String operator+(String&& a, const String& b) noexcept  { a.append(b); return std::move(a); }
+    [[nodiscard]] constexpr String operator+(String&& a, std::string_view b) noexcept  { a.append(b); return std::move(a); }
+    [[nodiscard]] constexpr String operator+(String&& a, char b) noexcept  { a.push_back(b); return std::move(a); }
+    [[nodiscard]] constexpr String operator+(std::string_view a, String&& b) noexcept  { b.insert(0, a); return std::move(b); }
+    [[nodiscard]] constexpr String operator+(char a, String&& b) noexcept  { b.insert(0, std::string_view(&a, 1)); return std::move(b); }
 
     class Entry
     {
@@ -788,6 +1066,9 @@ FDF_EXPORT namespace fdf
         }
 
         [[nodiscard]] constexpr const String& GetComment() const noexcept;
+    #if !FDF_NO_COMMENTS
+        [[nodiscard]] constexpr String& GetComment() noexcept;
+    #endif
 
     private:
         constexpr void SetIdentifier_INTERNAL(std::string_view newIdentifier) noexcept;
@@ -795,7 +1076,6 @@ FDF_EXPORT namespace fdf
 
     public:
         [[nodiscard]] constexpr bool SetIdentifier(std::string_view newIdentifier) noexcept;
-        constexpr void SetComment(std::string_view newComment) noexcept;
         constexpr void ReleaseData() noexcept;
         constexpr void ReleaseComment() noexcept;
         constexpr void ReleaseEverything() noexcept;
@@ -1710,6 +1990,26 @@ namespace fdf::detail
         return (c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r');
     }
 
+    // Comments are stored raw; the writer streams them through this: leading whitespace
+    // stripped, each newline (+ the following whitespace run) collapsed into one space
+    constexpr void NormalizeComment(std::string_view raw, auto&& writeChar) noexcept
+    {
+        size_t i = 0;
+        while(i < raw.size() && constexpr_isspace(raw[i]))
+            i++;
+        for(; i < raw.size(); i++)
+        {
+            if(raw[i] != '\n')
+                writeChar(raw[i]);
+            else
+            {
+                writeChar(' ');
+                while(i + 1 < raw.size() && constexpr_isspace(raw[i + 1]))
+                    i++;
+            }
+        }
+    }
+
     [[nodiscard]] constexpr bool constexpr_isalpha(char c) noexcept
     {
         return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
@@ -2393,20 +2693,25 @@ namespace fdf
         char* newPtr;
         if consteval
         {
-            newPtr = new char[HEADER_SIZE + newCapacity];
+            newPtr = new char[HEADER_SIZE + newCapacity + 1];
         }
         else
         {
-            // capacity = usable chars in the granted bucket, so re-assignments within the slack skip the realloc
-            const auto [buffer, granted] = detail::GlobalAllocator::AllocateAtLeast(HEADER_SIZE + newCapacity);
+            // capacity = usable chars in the granted bucket (terminator slot excluded), so re-assignments within the slack skip the realloc
+            const auto [buffer, granted] = detail::GlobalAllocator::AllocateAtLeast(HEADER_SIZE + newCapacity + 1);
             newPtr = static_cast<char*>(buffer);
-            newCapacity = static_cast<uint32_t>(granted) - HEADER_SIZE;
+            newCapacity = static_cast<uint32_t>(granted) - HEADER_SIZE - 1;
         }
+
+        const uint32_t oldSize = static_cast<uint32_t>(size());
+        for(uint32_t i = 0; i < oldSize; i++)
+            newPtr[HEADER_SIZE + i] = ptr[HEADER_SIZE + i];
 
         Free();
         ptr = newPtr;
-        StoreU32(0, 0);
+        StoreU32(0, oldSize);
         StoreU32(sizeof(uint32_t), newCapacity);
+        ptr[HEADER_SIZE + oldSize] = '\0';
     }
 
     constexpr void String::Free() noexcept
@@ -2416,7 +2721,7 @@ namespace fdf
         if consteval
             { delete[] ptr; }
         else
-            { detail::GlobalAllocator::Deallocate(ptr, LoadU32(sizeof(uint32_t)) + HEADER_SIZE); }
+            { detail::GlobalAllocator::Deallocate(ptr, LoadU32(sizeof(uint32_t)) + HEADER_SIZE + 1); }
         ptr = nullptr;
     }
 
@@ -2503,29 +2808,12 @@ namespace fdf
     #endif
     }
 
-    constexpr void Entry::SetComment([[maybe_unused]] std::string_view newComment) noexcept
+#if !FDF_NO_COMMENTS
+    constexpr String& Entry::GetComment() noexcept
     {
-    #if !FDF_NO_COMMENTS
-        // Strip leading whitespace, collapse each newline (+ trailing whitespace) into a single space
-        std::string normalized;
-        normalized.reserve(newComment.size());
-        size_t i = 0;
-        while(i < newComment.size() && detail::constexpr_isspace(newComment[i]))
-            i++;
-        for(; i < newComment.size(); i++)
-        {
-            if(newComment[i] != '\n')
-                normalized.push_back(newComment[i]);
-            else
-            {
-                normalized.push_back(' ');
-                while(i + 1 < newComment.size() && detail::constexpr_isspace(newComment[i + 1]))
-                    i++;
-            }
-        }
-        comment = std::string_view(normalized);
-    #endif
+        return comment;
     }
+#endif
 
     constexpr void Entry::ReleaseData() noexcept
     {
@@ -4207,22 +4495,19 @@ namespace fdf
         switch(fileCommentCombineStrategy)
         {
         case CommentCombineStrategy::UseExisting: break;
-        case CommentCombineStrategy::UseNew: SetComment(other->GetComment()); break;
+        case CommentCombineStrategy::UseNew: GetComment() = other->GetComment(); break;
         case CommentCombineStrategy::UseNewIfExistingIsEmpty:
-            if(GetComment().IsEmpty())
-                SetComment(other->GetComment());
+            if(GetComment().empty())
+                GetComment() = other->GetComment();
             break;
         case CommentCombineStrategy::Merge:
-            if(GetComment().IsEmpty())
-                SetComment(other->GetComment());
-            else if(!other->GetComment().IsEmpty())
+            if(GetComment().empty())
+                GetComment() = other->GetComment();
+            else if(!other->GetComment().empty())
             {
-                const std::string_view existing = GetComment();
-                const std::string_view incoming = other->GetComment();
-                std::string merged;
-                merged.reserve(existing.size() + 1 + incoming.size());
-                merged.append(existing).append(1, '\n').append(incoming);
-                SetComment(merged);
+                // the writer collapses the '\n' into a space at emit
+                comment.push_back('\n');
+                comment.append(other->GetComment());
             }
             break;
         case CommentCombineStrategy::Clear: ReleaseComment(); break;
@@ -4449,7 +4734,7 @@ namespace fdf::detail
             #if !FDF_NO_COMMENTS
                 if(currentToken.type == TokenType::Comment)
                 {
-                    if(root->size == 0 && root->comment.IsEmpty() && currentToken.count > 0 && content[currentToken.startPosition] == '#')
+                    if(root->size == 0 && root->comment.empty() && currentToken.count > 0 && content[currentToken.startPosition] == '#')
                     {
                         std::string_view sv = tokenizer.ToView(currentToken);
                         size_t firstChar = sv.find_first_not_of("# ");
@@ -4514,24 +4799,9 @@ namespace fdf::detail
         }
 
         #if !FDF_NO_COMMENTS
-            // A file comment keeps its newlines, only stripping leading whitespace on each line
+            // Stored raw, the writer strips per-line leading whitespace when emitting the block
             if(fileCommentToken.type != TokenType::NonExisting)
-            {
-                std::string_view view = tokenizer.ToView(fileCommentToken);
-                std::string normalized;
-                normalized.reserve(view.size());
-
-                bool bAfterNewLine = true;
-                for(char c : view)
-                {
-                    if(bAfterNewLine && constexpr_isspace(c))
-                        continue;
-                    normalized.push_back(c);
-                    bAfterNewLine = (c == '\n');
-                }
-
-                root->comment = std::string_view(normalized);
-            }
+                root->comment = tokenizer.ToView(fileCommentToken);
         #endif
 
         return root;
@@ -4636,7 +4906,7 @@ namespace fdf::detail
 
         #if !FDF_NO_COMMENTS
             if(comment.type != TokenType::NonExisting)
-                entry.SetComment(tokenizer.ToView(comment));
+                entry.GetComment() = tokenizer.ToView(comment);
         #endif
             return true;
         };
@@ -5056,12 +5326,14 @@ namespace fdf::detail
         {
             entry.AllocateStringArray(1);
 
-            std::string decoded;
-            DecodeStringLiteral(view, [&](char c) { decoded.push_back(c); });
+            // decode straight into the stored String, no transient buffer
+            String* dest;
             if consteval
-                { entry.data.strArray[0] = std::string_view(decoded); }
+                { dest = entry.data.strArray; }
             else
-                { static_cast<String*>(entry.data.raw)[0] = std::string_view(decoded); }
+                { dest = static_cast<String*>(entry.data.raw); }
+            dest->reserve(view.size() - 2);   // decoded length <= literal length minus the quotes
+            DecodeStringLiteral(view, [&](char c) { dest->push_back(c); });
 
             return postProcess();
         }
@@ -5164,7 +5436,7 @@ namespace fdf::detail
 
             #if !FDF_NO_COMMENTS
                 if(comment.type != TokenType::NonExisting)
-                    array.SetComment(tokenizer.ToView(comment));
+                    array.GetComment() = tokenizer.ToView(comment);
             #endif
 
                 return true;
@@ -5271,7 +5543,7 @@ namespace fdf::detail
 
             #if !FDF_NO_COMMENTS
                 if(comment.type != TokenType::NonExisting)
-                    map.SetComment(tokenizer.ToView(comment));
+                    map.GetComment() = tokenizer.ToView(comment);
             #endif
 
                 return true;
@@ -5483,56 +5755,53 @@ namespace fdf::detail
 
         #if !FDF_NO_COMMENTS
             // Short comments on simple entries go inline (trailing); long ones and container
-            // comments stay as leading // lines because they can't share the value's line
-            const std::string_view entryComment = STYLE.bEntryComment? e.GetComment().View() : std::string_view{};
-            const bool bInlineComment = !entryComment.empty() && !e.IsContainer() && entryComment.size() <= STYLE.singleLineCommentLimit;
-            if(!entryComment.empty() && !bInlineComment)
+            const std::string_view entryComment = STYLE.bEntryComment? std::string_view(e.GetComment()) : std::string_view{};
+            size_t commentSize = 0;
+            detail::NormalizeComment(entryComment, [&](char) { commentSize++; });
+            const bool bInlineComment = commentSize != 0 && !e.IsContainer() && commentSize <= STYLE.singleLineCommentLimit;
+            if(commentSize != 0 && !bInlineComment)
             {
-                std::string_view sv = entryComment;
                 const size_t start = buffer.size();
-                if constexpr(STYLE.singleLineCommentLimit < 5)
-                {
-                    addTabFn(depth);
-                    buffer.append("// ");
-                    buffer.append(sv);
-                    buffer.append("\n");
-                }
-                else
+                addTabFn(depth);
+                buffer.append("// ");
+                const size_t textStart = buffer.size();
+                detail::NormalizeComment(entryComment, [&](char c) { buffer.push_back(c); });
+                buffer.push_back('\n');
+
+                if constexpr(STYLE.singleLineCommentLimit >= 5)
                 {
                     const uint32_t overhead = (depth * STYLE.tabSize) + 3;
-                    if(overhead + 5 > STYLE.singleLineCommentLimit)
+                    if(overhead + 5 <= STYLE.singleLineCommentLimit)
                     {
-                        addTabFn(depth);
-                        buffer.append("// ");
-                        buffer.append(sv);
-                        buffer.append("\n");
-                    }
-                    else
-                    {
+                        // wrap in place: break each overlong line at the last space that fits
+                        const size_t available = STYLE.singleLineCommentLimit - overhead;
+                        size_t lineStart = textStart;
                         bool bMultiLine = false;
-                        while(!sv.empty())
+                        while(buffer.size() - 1 - lineStart > available)
                         {
-                            addTabFn(depth);
-                            buffer.append("// ");
-                            if(sv.size() > STYLE.singleLineCommentLimit - overhead)
+                            bMultiLine = true;
+                            size_t breakPos = buffer.find_last_of(' ', lineStart + available);
+                            if(breakPos == std::string::npos || breakPos <= lineStart)
                             {
-                                bMultiLine = true;
-                                uint32_t pos = STYLE.singleLineCommentLimit - overhead;
-                                if(!detail::constexpr_isspace(buffer[pos]))
-                                {
-                                    const size_t found = sv.find_last_of(' ', pos);
-                                    if(found != std::string::npos)
-                                        pos = static_cast<uint32_t>(found);
-                                }
-                                buffer.append(sv.substr(0, pos));
-                                sv = sv.substr(pos + 1);
+                                breakPos = lineStart + available;   // no space fits, hard split
+                                buffer.insert(breakPos, 1, '\n');
+                            }
+                            else
+                                buffer[breakPos] = '\n';
+
+                            size_t prefixEnd = breakPos + 1;
+                            if constexpr(STYLE.bUseSpacesOverTabs)
+                            {
+                                buffer.insert(prefixEnd, depth * STYLE.tabSize, ' ');
+                                prefixEnd += depth * STYLE.tabSize;
                             }
                             else
                             {
-                                buffer.append(sv);
-                                sv = {};
+                                buffer.insert(prefixEnd, depth, '\t');
+                                prefixEnd += depth;
                             }
-                            buffer.append("\n");
+                            buffer.insert(prefixEnd, "// ");
+                            lineStart = prefixEnd + 3;
                         }
 
                         if(bMultiLine)
@@ -5567,7 +5836,7 @@ namespace fdf::detail
                     // '\x01' is a placeholder for the gap before the comment, resolved (and aligned) in a final pass
                     buffer.push_back('\x01');
                     buffer.append("// ");
-                    buffer.append(entryComment);
+                    detail::NormalizeComment(entryComment, [&](char c) { buffer.push_back(c); });
                 }
             #endif
                 buffer.push_back('\n');
@@ -5628,21 +5897,38 @@ namespace fdf::detail
             {
                 if(bHasDedicatedRoot)
                 {
+                    // Stored raw: keep newlines but strip each line's leading whitespace, drop blank
+                    // lines, and break a contained "*/" so the block comment can't close early
                     const std::string_view fileComment = root.GetComment();
-                    if(!fileComment.empty())
+                    if(fileComment.find_first_not_of(" \t\n\v\f\r") != std::string::npos)
                     {
                         buffer.append("/*#\n");
-                        size_t prevNewLinePos = detail::SIZE_T_MAX_VALUE;
-                        size_t newLinePos = fileComment.find_first_of('\n');
-                        while(newLinePos != std::string::npos)
+                        bool bPendingNewLine = false;
+                        bool bLineStart = true;
+                        for(char c : fileComment)
                         {
-                            addTabFn(1);
-                            buffer.append(fileComment, prevNewLinePos + 1, newLinePos - prevNewLinePos);
-                            prevNewLinePos = newLinePos;
-                            newLinePos = fileComment.find_first_of('\n', newLinePos + 1);
+                            if(c == '\n')
+                            {
+                                bPendingNewLine = true;
+                                bLineStart = true;
+                                continue;
+                            }
+                            if(bLineStart && detail::constexpr_isspace(c))
+                                continue;
+                            if(bPendingNewLine)
+                            {
+                                buffer.push_back('\n');
+                                bPendingNewLine = false;
+                            }
+                            if(bLineStart)
+                            {
+                                addTabFn(1);
+                                bLineStart = false;
+                            }
+                            if(c == '/' && buffer.back() == '*')
+                                buffer.push_back(' ');
+                            buffer.push_back(c);
                         }
-                        addTabFn(1);
-                        buffer.append(fileComment, prevNewLinePos + 1);
                         buffer.append("\n*/\n\n\n");
                     }
                 }
@@ -5835,6 +6121,19 @@ namespace fdf::detail
 
 
 
+
+
+
+
+template<>
+struct std::formatter<fdf::String> : std::formatter<std::string_view>
+{
+    template<typename FormatContext>
+    constexpr auto format(const fdf::String& value, FormatContext& ctx) const
+    {
+        return std::formatter<std::string_view>::format(std::string_view(value), ctx);
+    }
+};
 
 
 

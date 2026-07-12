@@ -295,7 +295,7 @@ namespace fdf::detail
             std::string temp;
             e->ForEach<ForEachFlags::Recursive | ForEachFlags::Group>([&](const Entry& entry)
             {
-                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}--Comment={}", "", 4 * entry.CalculateDepth(), ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.GetType())], entry.GetChildCount(), entry.GetFullIdentifier(), entry.DataToView(temp), entry.GetComment().View()));
+                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}--Comment={}", "", 4 * entry.CalculateDepth(), ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.GetType())], entry.GetChildCount(), entry.GetFullIdentifier(), entry.DataToView(temp), std::string_view(entry.GetComment())));
                 buffer.push_back('\n');
             });
 
@@ -976,7 +976,7 @@ namespace fdf::detail
                 if(CHECK(e && e->GetType() == Type::String))
                 {
                     const std::span<String> comps = e->GetValue<String>();
-                    CHECK(comps.size() == 1 && comps[0] == "hello" && comps[0].Size() == 5);
+                    CHECK(comps.size() == 1 && comps[0] == "hello" && comps[0].size() == 5);
 
                     const Entry& ce = *e;
                     const std::span<const String> constComps = ce.GetValue<String>();
@@ -999,7 +999,7 @@ namespace fdf::detail
                     CHECK(FirstString(*e) == "much longer than it was before");
 
                     comps[0] = "";
-                    CHECK(comps[0].IsEmpty() && FirstString(*e) == "");
+                    CHECK(comps[0].empty() && FirstString(*e) == "");
                 }
             }
 
@@ -1012,8 +1012,8 @@ namespace fdf::detail
                     const std::span<String> comps = e->GetValue<String>();
                     if(CHECK(e->GetType() == Type::String && comps.size() == 1))
                     {
-                        CHECK(comps[0].IsEmpty() && comps[0].Size() == 0);
-                        CHECK(comps[0].View().data() == nullptr);   // empty = no allocation
+                        CHECK(comps[0].empty() && comps[0].size() == 0);
+                        CHECK(comps[0].data() == nullptr);   // empty = no allocation
                     }
                     CHECK(FirstString(*e) == "");
                 }
@@ -1053,6 +1053,161 @@ namespace fdf::detail
                     CHECK(t->GetValue<String>().empty());
                 }
             }
+        }
+
+
+
+
+        // fdf::String std API: terminator invariant, edit ops (growth preserves content, within-cap no
+        // realloc), read one-liners, operator+ chains incl. move-lhs reuse, comparisons, std::string + formatter
+        static void StringApiTest()
+        {
+            using fdf::String;
+
+            // c_str terminator invariant: strlen tracks size across every mutation
+            {
+                String s;
+                CHECK(s.c_str()[0] == '\0' && std::string_view(s.c_str()).empty());   // null state -> ""
+                s.assign("hello");
+                CHECK(std::strlen(s.c_str()) == s.size() && s == "hello");
+                s.append(" world");
+                CHECK(std::strlen(s.c_str()) == s.size() && s == "hello world");
+                s.erase(5, 6);
+                CHECK(std::strlen(s.c_str()) == s.size() && s == "hello");
+                s.insert(0, ">> ");
+                CHECK(std::strlen(s.c_str()) == s.size() && s == ">> hello");
+                s.resize(4);
+                CHECK(std::strlen(s.c_str()) == s.size() && s == ">> h");
+                s.clear();
+                CHECK(s.empty() && s.c_str()[0] == '\0');   // allocated, size 0, still terminated
+            }
+
+            // growth preserves existing content
+            {
+                String s("abc");
+                s.append("defghijklmnopqrstuvwxyz0123456789");   // forces a realloc
+                CHECK(s == "abcdefghijklmnopqrstuvwxyz0123456789");
+                String t("12");
+                t.insert(1, "----------------------------------------");   // realloc mid-insert
+                CHECK(t == "1----------------------------------------2");
+            }
+
+            // reserve then stay within capacity: data() must not move
+            {
+                String s("x");
+                s.reserve(64);
+                const char* stable = s.data();
+                const size_t cap = s.capacity();
+                CHECK(cap >= 64);
+                s.append("0123456789");
+                CHECK(s.capacity() == cap && s.data() == stable && s == "x0123456789");
+            }
+
+            // edit-op semantics
+            {
+                String s("hello");
+                s.push_back('!');
+                CHECK(s == "hello!");
+                s.pop_back();
+                CHECK(s == "hello");
+                s.replace(0, 1, "J");
+                CHECK(s == "Jello");
+                s.replace(1, 4, "umanji");   // value longer than removed, tail shifts right
+                CHECK(s == "Jumanji");
+                s.replace(3, 4, "p");        // value shorter than removed, tail shifts left
+                CHECK(s == "Jump");
+                s.erase(3);                  // erase to end
+                CHECK(s == "Jum");
+                s += "ble";
+                CHECK(s == "Jumble");
+                s += '!';
+                CHECK(s == "Jumble!");
+                s.resize(9, '.');
+                CHECK(s == "Jumble!..");
+                String other("swap");
+                s.swap(other);
+                CHECK(s == "swap" && other == "Jumble!..");
+            }
+
+            // read one-liners spot check
+            {
+                String s("hello world");
+                CHECK(s.size() == 11 && s.length() == 11 && !s.empty());
+                CHECK(s.front() == 'h' && s.back() == 'd' && s[4] == 'o');
+                CHECK(s.find("world") == 6 && s.find('z') == String::npos);
+                CHECK(s.rfind('o') == 7 && s.find_first_of("aeiou") == 1 && s.find_last_of("aeiou") == 7);
+                CHECK(s.find_first_not_of("hel") == 4 && s.find_last_not_of("ld") == 8);
+                CHECK(s.starts_with("hello") && s.ends_with("world") && s.contains("o w"));
+                CHECK(s.compare("hello world") == 0 && s.substr(6) == "world" && s.substr(0, 5) == "hello");
+                size_t vowels = 0;
+                for(char c : s)   // iterator range-for
+                    vowels += (c == 'o');
+                CHECK(vowels == 2);
+            }
+
+            // operator+ chains, incl. move-lhs reuse
+            {
+                String a("foo");
+                String b("bar");
+                CHECK(a + b == "foobar");
+                CHECK(a + "-" + b == "foo-bar");   // (a+"-") is an rvalue, reused for the +b append
+                CHECK("<" + a == "<foo" && a + '!' == "foo!" && '@' + a == "@foo");
+                String moved = std::move(a) + std::string_view("X");
+                CHECK(moved == "fooX");
+                CHECK(std::string_view("pre-") + std::move(b) == "pre-bar");   // move-rhs, rhs buffer reused
+                CHECK('#' + String("tag") == "#tag");                          // char + move-rhs
+            }
+
+            // comparisons against String / string_view / const char*
+            {
+                String s("mid");
+                CHECK(s == String("mid") && s == std::string_view("mid") && s == "mid");
+                CHECK((s <=> String("mid")) == std::strong_ordering::equal);
+                CHECK((s <=> std::string_view("mzz")) == std::strong_ordering::less);
+                CHECK((s <=> "aaa") == std::strong_ordering::greater);
+                CHECK("mid" == s && String("mid") == s);   // rewritten reversed candidates
+            }
+
+            // explicit std::string conversion + std::formatter
+            {
+                String s("convert");
+                CHECK(static_cast<std::string>(s) == "convert");
+                CHECK(std::format("[{}]", s) == "[convert]");
+                CHECK(std::format("{:>9}", s) == "  convert");   // padding rides the string_view formatter
+            }
+
+            // self-aliasing mutations: value points into this->block, std::string guarantees these
+            {
+                String s("HelloWorld");
+                s.insert(0, s.substr(5));   // no-grow, tail shifts over the source region
+                CHECK_MSG(s == "WorldHelloWorld", std::format("self-insert got '{}'", std::string_view(s)));
+
+                String a("HelloWorld");
+                a.replace(0, 2, a.substr(3));   // "loWorldlloWorld"
+                CHECK_MSG(a == "loWorldlloWorld", std::format("self-replace got '{}'", std::string_view(a)));
+
+                String b("HelloWorld");
+                b = b.substr(2);   // self-assign from own substring
+                CHECK_MSG(b == "lloWorld", std::format("self-assign got '{}'", std::string_view(b)));
+
+                String c("0123456789ABCDEFGHIJ");   // long enough that self-append grows past capacity
+                c += c;
+                CHECK_MSG(c == "0123456789ABCDEFGHIJ0123456789ABCDEFGHIJ", std::format("self-append got '{}'", std::string_view(c)));
+            }
+
+#if !FDF_NO_COMMENTS
+            // e->GetComment() = e->GetComment(); a no-op, not corruption
+            {
+                UniqueEntryPtr root = NewEntry();
+                Entry* e = root? root->Emplace("k") : nullptr;
+                if(CHECK(e != nullptr))
+                {
+                    e->GetComment() = "keep me";
+                    e->GetComment() = e->GetComment();   // self-feed
+                    CHECK_MSG(e->GetComment() == "keep me", std::format("self-SetComment got '{}'", std::string_view(e->GetComment())));
+                }
+            }
+#endif
         }
 
 
@@ -1575,14 +1730,14 @@ namespace fdf::detail
                 if(CHECK(e != nullptr))
                 {
                     e->SetValue(static_cast<int64_t>(1));
-                    e->SetComment("0123456789");
+                    e->GetComment() = "0123456789";
                     CHECK(e->GetComment() == "0123456789");
-                    e->SetComment("ab");
+                    e->GetComment() = "ab";
                     CHECK(e->GetComment() == "ab");
-                    e->SetComment("0123456789ABCDEF012");
+                    e->GetComment() = "0123456789ABCDEF012";
                     CHECK(e->GetComment() == "0123456789ABCDEF012");
                     const std::string longComment(300, 'x');
-                    e->SetComment(longComment);
+                    e->GetComment() = longComment;
                     CHECK(e->GetComment() == longComment);
                 }
             }
@@ -1624,6 +1779,56 @@ namespace fdf::detail
                 std::string out;
                 WriteBuffer<Style{ .bEntryComment = false }>(*root, out);
                 CHECK(!out.contains("//"));
+            }
+
+            // Raw storage: GetComment hands out the stored text unchanged, the mutable ref edits
+            // in place, and the writer collapses newlines + leading whitespace at emit
+            {
+                UniqueEntryPtr r = NewEntry();
+                Entry* e = r? r->Emplace("k") : nullptr;
+                if(CHECK(e != nullptr))
+                {
+                    e->SetValue(static_cast<int64_t>(1));
+                    e->GetComment() = "  lead\n\t\ttail";
+                    CHECK(e->GetComment() == "  lead\n\t\ttail");   // raw, not normalized on set
+                    e->GetComment().append("\nmore");               // in-place edit through the mutable ref
+                    CHECK(e->GetComment() == "  lead\n\t\ttail\nmore");
+
+                    std::string out;
+                    WriteBuffer<Style{ .bCommas = false }>(*r, out);
+                    CHECK_MSG(out.contains("// lead tail more"), out);
+
+                    UniqueEntryPtr re = ParseBuffer(out);
+                    Entry* k = re? re->GetChild("k") : nullptr;
+                    if(CHECK(k != nullptr))
+                        CHECK(k->GetComment() == "lead tail more");   // reparse yields the emitted form
+                }
+            }
+
+            // File comment: stored raw, the block emit strips per-line leading whitespace, drops
+            // blank lines, neutralizes a contained close sequence, and the written form is stable
+            {
+                UniqueEntryPtr r = NewEntry();
+                if(CHECK(static_cast<bool>(r)))
+                {
+                    r->Emplace("k")->SetValue(static_cast<int64_t>(1));
+                    r->GetComment() = "   header line\n\n   evil */ inside";
+                    CHECK(r->GetComment() == "   header line\n\n   evil */ inside");   // raw
+
+                    std::string out1;
+                    WriteBuffer<Style{ .bCommas = false }>(*r, out1);
+                    CHECK_MSG(out1.starts_with("/*#\n"), out1);
+                    CHECK_MSG(out1.contains("    header line\n"), out1);   // leading whitespace stripped, newline kept
+                    CHECK_MSG(out1.contains("evil * / inside"), out1);     // '*/' broken so the block can't close early
+
+                    UniqueEntryPtr re = ParseBuffer(out1);
+                    if(CHECK(static_cast<bool>(re)))
+                    {
+                        std::string out2;
+                        WriteBuffer<Style{ .bCommas = false }>(*re, out2);
+                        CHECK_MSG(out1 == out2, "file comment emit is round-trip stable");
+                    }
+                }
             }
         }
     #endif
@@ -1769,6 +1974,55 @@ consteval bool StringParseMutateProbe()
     return FirstString(*e) == "rewritten";
 }
 static_assert(StringParseMutateProbe(), "consteval string parse + mutate through the span");
+
+// The std edit + read surface must fold at constant evaluation, terminator maintained throughout
+consteval bool StringApiProbe()
+{
+    fdf::String s("abc");
+    s.append("def");         // "abcdef"
+    s.insert(0, "[");        // "[abcdef"
+    s.erase(4, 1);           // drop 'd' -> "[abcef"
+    if(s != "[abcef")
+        return false;
+    s.replace(0, 1, "<<");   // grow the head -> "<<abcef"
+    if(s != "<<abcef")
+        return false;
+    s.resize(4);             // "<<ab"
+    if(s != "<<ab")
+        return false;
+    if(s.c_str()[s.size()] != '\0')   // terminator invariant at consteval
+        return false;
+    if(s.find("ab") != 2 || s.substr(2) != "ab" || !s.starts_with("<<"))
+        return false;
+    fdf::String joined = fdf::String("x") + s + std::string_view("y");
+    return joined == "x<<aby";
+}
+static_assert(StringApiProbe(), "consteval String edit/read/operator+ surface");
+
+// Self-aliasing edits: constant evaluation rejects reads of freed memory, so a growing
+// self-append/assign that frees the source block before copying fails to compile on the bug
+consteval bool StringSelfAliasProbe()
+{
+    fdf::String s("0123456789ABCDEFGHIJ");
+    s += s;   // grows past capacity, source block freed mid-copy on the bug
+    if(s != "0123456789ABCDEFGHIJ0123456789ABCDEFGHIJ")
+        return false;
+
+    fdf::String i("HelloWorld");
+    i.insert(0, i.substr(5));   // no-grow tail-shift overlap
+    if(i != "WorldHelloWorld")
+        return false;
+
+    fdf::String r("HelloWorld");
+    r.replace(0, 2, r.substr(3));
+    if(r != "loWorldlloWorld")
+        return false;
+
+    fdf::String a("HelloWorld");
+    a = a.substr(2);   // self-assign from own substring
+    return a == "lloWorld";
+}
+static_assert(StringSelfAliasProbe(), "consteval String self-aliasing edits");
 
 consteval bool HexTimestampStringViewProbe()
 {
@@ -2059,7 +2313,7 @@ consteval size_t ExtractCommentSize(auto buffer)
     if(!eRoot)
         return 0;
     if(auto* eValue = eRoot->GetDirectChild("value"))
-        return eValue->GetComment().Size();
+        return eValue->GetComment().size();
     return 0;
 }
 
@@ -2071,7 +2325,7 @@ consteval auto ExtractCommentArray(auto buffer)
     if(!eRoot)
         return result;
     if(auto* eValue = eRoot->GetDirectChild("value"))
-        fdf::detail::constexpr_memcpy(result.data(), eValue->GetComment().View().data(), SIZE);
+        fdf::detail::constexpr_memcpy(result.data(), eValue->GetComment().data(), SIZE);
     return result;
 }
 
@@ -2148,6 +2402,7 @@ int main()
     RunCase("MultiDimTest",        Test::MultiDimTest);
     RunCase("StringRoundTripTest", Test::StringRoundTripTest);
     RunCase("StringStorageTest",   Test::StringStorageTest);
+    RunCase("StringApiTest",       Test::StringApiTest);
     RunCase("FloatRoundTripTest",  Test::FloatRoundTripTest);
     RunCase("TimestampTest",       Test::TimestampTest);
     RunCase("AllocatorTest",       Test::AllocatorTest);
