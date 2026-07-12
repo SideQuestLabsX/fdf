@@ -94,9 +94,9 @@ root->ForEach<fdf::ForEachFlags::Recursive>([](const fdf::Entry& e)
 Entry* Emplace(std::string_view key);    // add a child, returns it ("" for array items)
 Entry* AddChild(UniqueEntryPtr& e);      // adopt an existing node
 
-void SetValue(value);                    // bool, integer, float, string, Timestamp,
-                                         // a std::span for a numeric/bool pack,
-                                         // or NullType/NilType/ArrayType/MapType
+void SetValue(value);                    // bool, integer, float, string, Timestamp...
+                                         // std::span for a pack OR you could just GetValue() and
+                                         // edit each member separately. (Can't change member count) 
 bool SetIdentifier(std::string_view);
 void SetType(Type);
 void Resize(uint32_t);

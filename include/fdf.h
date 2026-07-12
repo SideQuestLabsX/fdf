@@ -145,6 +145,7 @@ FDF_EXPORT namespace fdf
         UnterminatedComment,
         InvalidComment,
         InvalidNumber,
+        InvalidPack,         // malformed pack: dangling '|' or a non-widenable component mix
         InvalidTimestamp,
         InvalidToken,        // generic lexer failure with no more specific reason
         InputTooLarge,       // buffer would overflow the 32-bit offsets, refused before parsing
@@ -1147,6 +1148,7 @@ FDF_EXPORT namespace fdf
         constexpr void SetValue(std::unsigned_integral auto value) noexcept;
         constexpr void SetValue(std::floating_point    auto value) noexcept;
         constexpr void SetValue(std::string_view value) noexcept;
+        constexpr void SetValue(std::span<const std::string_view> value) noexcept;
         constexpr void SetValue(char value) noexcept;
         constexpr void SetValue(const char* value) noexcept;
         constexpr void SetValue(const Timestamp& value) noexcept;
@@ -1220,7 +1222,7 @@ namespace fdf::detail
     inline constexpr auto KEYWORDS = std::to_array<std::string_view>(
     {
         "null", "nil",
-        "true", "false", " MD_BOOL_PLACEHOLDER "
+        "true", "false"
     });
 
     FDF_EXPORT_INTERNAL enum class TokenType : uint8_t
@@ -1233,6 +1235,7 @@ namespace fdf::detail
 
         Equal,
         Comma,
+        Pipe,  // pack separator
 
         CurlyBraceOpen,
         CurlyBraceClose,
@@ -2020,30 +2023,21 @@ namespace fdf::detail
         return c >= '0' && c <= '9';
     }
 
-    // Resolve a Atom's text into a concrete value type, and count components for Int/Float/Version
-    // Only structurally impossible input returns false, content is validated by the per-type parse
-    [[nodiscard]] constexpr bool ClassifyAtom(std::string_view view, Type& outType, uint8_t& components) noexcept
+    // Resolve a single Atom's text into a concrete value type. Only structurally impossible input
+    // returns false, content is validated by the per-type parse
+    [[nodiscard]] constexpr bool ClassifyAtom(std::string_view view, Type& outType) noexcept
     {
-        components = 1;
         if(view.empty())
             return false;
 
-        // keyword literals, resolved here now that the lexer no longer classifies them. extra8 = the
-        // KEYWORDS index, 4 marks a '|'-joined bool vector
+        // keyword literals, resolved here
         for(size_t i = 0; i < KEYWORDS.size(); i++)
         {
             if(view == KEYWORDS[i])
             {
-                components = static_cast<uint8_t>(i);
                 outType = i <= 1? Type::Null : Type::Bool;
                 return true;
             }
-        }
-        if(view.starts_with(KEYWORDS[2]) || view.starts_with(KEYWORDS[3]))
-        {
-            components = 4;
-            outType = Type::Bool;
-            return true;
         }
 
         if(view.size() >= 3 && view[0] == '0' && (view[1] == 'x' || view[1] == 'X'))
@@ -2058,8 +2052,6 @@ namespace fdf::detail
             return true;
         }
 
-        const bool bHasPipe = view.find('|') != std::string_view::npos;
-
         // a date '-' sits between digits (2024-12-24), an exponent '-' follows an 'e'/'E' (1.0e-05)
         bool bDateDash = false;
         for(size_t i = 1; i < view.size(); i++)
@@ -2071,7 +2063,7 @@ namespace fdf::detail
             }
         }
 
-        if(view.find(':') != std::string_view::npos || (!bHasPipe && bDateDash))
+        if(view.find(':') != std::string_view::npos || bDateDash)
         {
             outType = Type::Timestamp;  // validated by the parse below
             return true;
@@ -2081,12 +2073,7 @@ namespace fdf::detail
         bool bAnyFloat = false;
         for(char c : view)
         {
-            if(c == '|')
-            {
-                dotCount = 0;
-                components++;
-            }
-            else if(c == '.')
+            if(c == '.')
             {
                 dotCount++;
                 bAnyFloat = true;
@@ -2095,17 +2082,13 @@ namespace fdf::detail
                 bAnyFloat = true;
         }
 
-        if(!bHasPipe)
+        if(dotCount == 2 || dotCount == 3)  // 3-4 dotted components is a version
         {
-            if(dotCount == 2 || dotCount == 3)  // 3-4 dotted components is a version
-            {
-                components = static_cast<uint8_t>(dotCount + 1);
-                outType = Type::Version;
-                return true;
-            }
-            if(dotCount > 3)
-                return false;
+            outType = Type::Version;
+            return true;
         }
+        if(dotCount > 3)
+            return false;
 
         outType = bAnyFloat? Type::Float : Type::Int;
         return true;
@@ -2610,6 +2593,8 @@ namespace fdf::detail
             return MakeToken(TokenType::Equal, 1);
         if(content[index] == ',')
             return MakeToken(TokenType::Comma, 1);
+        if(content[index] == '|')
+            return MakeToken(TokenType::Pipe, 1);
 
 
 
@@ -2625,7 +2610,7 @@ namespace fdf::detail
             while(end < content.size())
             {
                 const char c = content[end];
-                if(constexpr_isspace(c) || c == ',' || c == '=' || c == '/' || c == '"' || c == '\''
+                if(constexpr_isspace(c) || c == ',' || c == '=' || c == '|' || c == '/' || c == '"' || c == '\''
                    || c == '{' || c == '}' || c == '[' || c == ']')
                     break;
                 end++;
@@ -4170,12 +4155,30 @@ namespace fdf
 
     constexpr void Entry::SetValue(const std::string_view value) noexcept
     {
+        SetValue(std::span<const std::string_view>(&value, 1));
+    }
+
+    constexpr void Entry::SetValue(const std::span<const std::string_view> value) noexcept
+    {
         ReleaseData();
-        AllocateStringArray(1);
+
+        // A string value is at least one component, so an empty span becomes a single empty string
+        const uint32_t count = value.empty()? 1U : static_cast<uint32_t>(value.size());
+        AllocateStringArray(count);
+        if(value.empty())
+            return;
+
         if consteval
-            { data.strArray[0] = value; }
+        {
+            for(uint32_t i = 0; i < count; i++)
+                data.strArray[i] = value[i];
+        }
         else
-            { static_cast<String*>(data.raw)[0] = value; }
+        {
+            String* arr = static_cast<String*>(data.raw);
+            for(uint32_t i = 0; i < count; i++)
+                arr[i] = value[i];
+        }
     }
 
     constexpr void Entry::SetValue(const char value) noexcept
@@ -4347,25 +4350,48 @@ namespace fdf
             case Type::Map:     return detail::MAP_TEXT;
 
             case Type::String:
-            case Type::Timestamp:
             {
+                // the writer quotes string components itself, this view only serves component 0
                 const std::span<const String> text = GetValue<String>();
                 return text.empty()? std::string_view() : std::string_view(text[0]);
             }
 
+            case Type::Timestamp:
+            {
+                const std::span<const String> text = GetValue<String>();
+                if(text.empty())
+                    return {};
+                if(text.size() == 1)
+                    return std::string_view(text[0]);
+                temp.clear();
+                for(size_t i = 0; i < text.size(); i++)
+                {
+                    if(i) temp.push_back('|');
+                    temp.append(std::string_view(text[i]));
+                }
+                return temp;
+            }
+
             case Type::Hex:
             {
-                // Stored as "0x" + digits, no terminator. Keep the "0x" prefix lowercase (the lexer only
-                // accepts a lowercase x), case the digits per style
+                // Each component is stored as "0x" + digits, case the digits per style
                 const std::span<const String> text = GetValue<String>();
-                temp = text.empty()? std::string_view() : std::string_view(text[0]);
-                for(size_t i = 2; i < temp.size(); i++)
+                if(text.empty())
+                    return {};
+                temp.clear();
+                for(size_t c = 0; c < text.size(); c++)
                 {
-                    const char c = temp[i];
-                    if constexpr(STYLE.bUppercaseHex)
-                        { if(c >= 'a' && c <= 'f') temp[i] = static_cast<char>(c - 32); }
-                    else
-                        { if(c >= 'A' && c <= 'F') temp[i] = static_cast<char>(c + 32); }
+                    if(c) temp.push_back('|');
+                    const size_t base = temp.size();
+                    temp.append(std::string_view(text[c]));
+                    for(size_t i = base + 2; i < temp.size(); i++)
+                    {
+                        const char ch = temp[i];
+                        if constexpr(STYLE.bUppercaseHex)
+                            { if(ch >= 'a' && ch <= 'f') temp[i] = static_cast<char>(ch - 32); }
+                        else
+                            { if(ch >= 'A' && ch <= 'F') temp[i] = static_cast<char>(ch + 32); }
+                    }
                 }
                 return temp;
             }
@@ -4879,11 +4905,11 @@ namespace fdf::detail
         assert(IsValueLiteral(tokenizer.Current().type) && "Sanity check!");
 
         Token currentToken = tokenizer.Current();
-        std::string_view view = tokenizer.ToView(currentToken);
+        const Token valueToken = currentToken;  // start of the value, used for diagnostics
 
+        // The gather leaves currentToken on the first token past the value, so postProcess must not advance first
         auto postProcess = [&]()
         {
-            currentToken = tokenizer.Advance();
             if(currentToken.type == TokenType::Comma)
             {
                 currentToken = tokenizer.Advance();
@@ -4911,130 +4937,118 @@ namespace fdf::detail
             return true;
         };
 
-        // The lexer emits a StringLiteral or a bare Atom. A StringLiteral is already a String; an Atom
-        // gets resolved to its value Type here. Structural rejects recover, content errors surface below
-        Type valueType = Type::String;
-        if(currentToken.type == TokenType::Atom)
+        struct Component { std::string_view view; Type type; };
+
+        // A StringLiteral is already a String, an Atom resolves via ClassifyAtom. Structural rejects
+        // recover here, content errors surface in the per-type parse below
+        auto classifyToken = [&](Token token, Component& out) -> bool
         {
-            if(!ClassifyAtom(view, valueType, currentToken.extra8))
+            const std::string_view v = tokenizer.ToView(token);
+            if(token.type == TokenType::StringLiteral)
             {
-                Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, currentToken);
+                out = { v, Type::String };
+                return true;
+            }
+
+            Type t = Type::String;
+            if(!ClassifyAtom(v, t))
+            {
+                Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, token);
                 return false;
             }
+            out = { v, t };
+            return true;
+        };
+
+        // Gather the value's components. A single scalar stays on the stack, a '|' pack spills to a vector
+        Component single[1];
+        if(!classifyToken(currentToken, single[0]))
+            return false;
+
+        currentToken = tokenizer.Advance();
+
+        std::vector<Component> packComponents;
+        std::span<const Component> components(single, 1);
+
+        if(currentToken.type == TokenType::Pipe)
+        {
+            packComponents.push_back(single[0]);
+            while(currentToken.type == TokenType::Pipe)
+            {
+                currentToken = tokenizer.Advance();
+                FDF_CHECK_TOKEN(currentToken);
+                if(!IsValueLiteral(currentToken.type))
+                {
+                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidPack, tokenizer, valueToken);
+                    return false;  // dangling '|' with no component
+                }
+
+                Component c;
+                if(!classifyToken(currentToken, c))
+                    return false;
+                packComponents.push_back(c);
+
+                currentToken = tokenizer.Advance();
+            }
+            components = packComponents;
         }
 
-        if(valueType == Type::Null)
+        bool bAllBool      = true;
+        bool bAllNumeric   = true;
+        bool bAllString    = true;
+        bool bAllHex       = true;
+        bool bAllTimestamp = true;
+        bool bAnyFloat     = false;
+        for(const Component& c : components)
         {
-            entry.type = Type::Null;
+            bAllBool      = bAllBool      && c.type == Type::Bool;
+            bAllNumeric   = bAllNumeric   && (c.type == Type::Int || c.type == Type::Float);
+            bAllString    = bAllString    && c.type == Type::String;
+            bAllHex       = bAllHex       && c.type == Type::Hex;
+            bAllTimestamp = bAllTimestamp && c.type == Type::Timestamp;
+            bAnyFloat     = bAnyFloat     || c.type == Type::Float;
+        }
+
+        // A pack (2+ components) must be uniform: all bool, string, hex, timestamp, or all numeric
+        // (int/float widen). A mix like 1|true, or null/version components, has no common type
+        if(components.size() > 1 && !bAllBool && !bAllNumeric && !bAllString && !bAllHex && !bAllTimestamp)
+        {
+            Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidPack, tokenizer, valueToken);
+            return false;
+        }
+
+        if(bAllBool)
+        {
+            entry.type = Type::Bool;
+            entry.size = static_cast<uint32_t>(components.size());
+            if consteval
+            {
+                entry.data.boolArray = new (std::nothrow) bool[entry.size];
+                assert(entry.data.boolArray && "Allocation shouldn't fail");
+            }
+            else
+            {
+                entry.data.raw = GlobalAllocator::Allocate(entry.size * sizeof(bool));
+            }
+
+            for(size_t i = 0; i < components.size(); i++)
+            {
+                const bool value = components[i].view == KEYWORDS[2];
+                if consteval
+                    { entry.GetDataAs<bool>()[i] = value; }
+                else
+                    { static_cast<bool*>(entry.data.raw)[i] = value; }
+            }
+
             return postProcess();
         }
 
-        if(valueType == Type::Bool)
+
+
+
+        if(bAllNumeric && !bAnyFloat)
         {
-            if(currentToken.extra8 == 2 || currentToken.extra8 == 3)
-            {
-                entry.type = Type::Bool;
-                entry.size = 1;
-                if consteval
-                {
-                    entry.data.boolArray = new (std::nothrow) bool[1];
-                    assert(entry.data.boolArray && "Allocation shouldn't fail");
-                    *entry.GetDataAs<bool>() = currentToken.extra8 == 2;
-                }
-                else
-                {
-                    entry.data.raw = GlobalAllocator::Allocate(sizeof(bool));
-                    static_cast<bool*>(entry.data.raw)[0] = currentToken.extra8 == 2;
-                }
-                return postProcess();
-            }
-
-            if(currentToken.extra8 == 4)
-            {
-                std::string_view mdBool = view;
-
-                entry.type = Type::Bool;
-                entry.size = static_cast<uint32_t>(std::ranges::count(mdBool, '|')) + 1;
-                if consteval
-                {
-                    entry.data.boolArray = new (std::nothrow) bool[entry.size];
-                    assert(entry.data.boolArray && "Allocation shouldn't fail");
-                }
-                else
-                {
-                    entry.data.raw = GlobalAllocator::Allocate(entry.size * sizeof(bool));
-                }
-
-                size_t cur = 0;
-                bool bLastWasBoolLiteral = false;
-                while(!mdBool.empty())
-                {
-                    if(mdBool.starts_with(KEYWORDS[2]))
-                    {
-                        if(bLastWasBoolLiteral)
-                        {
-                            entry.ReleaseData();
-                            return false;
-                        }
-
-                        bLastWasBoolLiteral = true;
-                        if consteval
-                            { entry.GetDataAs<bool>()[cur++] = true; }
-                        else
-                            { static_cast<bool*>(entry.data.raw)[cur++] = true; }
-                        mdBool = mdBool.substr(4);
-                    }
-                    else if(mdBool.starts_with(KEYWORDS[3]))
-                    {
-                        if(bLastWasBoolLiteral)
-                        {
-                            entry.ReleaseData();
-                            return false;
-                        }
-
-                        bLastWasBoolLiteral = true;
-                        if consteval
-                            { entry.GetDataAs<bool>()[cur++] = false; }
-                        else
-                            { static_cast<bool*>(entry.data.raw)[cur++] = false; }
-                        mdBool = mdBool.substr(5);
-                    }
-                    else if(mdBool.starts_with('|'))
-                    {
-                        if(!bLastWasBoolLiteral)
-                        {
-                            entry.ReleaseData();
-                            return false;
-                        }
-
-                        bLastWasBoolLiteral = false;
-                        mdBool = mdBool.substr(1);
-                    }
-                    else
-                    {
-                        entry.ReleaseData();
-                        return false;
-                    }
-                }
-
-                return postProcess();
-            }
-
-            return false;  // Invalid keyword when expected a value
-        }
-
-
-
-
-        // String/Hex/Timestamp get their size (1) from AllocateStringArray below
-        if(valueType != Type::String && valueType != Type::Hex && valueType != Type::Timestamp)
-            entry.size = currentToken.extra8;
-
-
-
-
-        if(valueType == Type::Int)
-        {
+            entry.size = static_cast<uint32_t>(components.size());
             if consteval
             {
                 entry.data.vInt = new (std::nothrow) std::vector<int64_t>();
@@ -5052,25 +5066,61 @@ namespace fdf::detail
 
             bool bIsUnsigned = false;
             bool bContainsAnyNegative = false;
-            bool bIsFirstChar = true;
-            bool bIsNegative = false;
-            bool bComponentHasDigit = false;  // rejects empty components like -|1
 
-            uint64_t result = 0;
-            uint8_t currentDimension = 0;
-            const uint8_t dimensionCount = static_cast<uint8_t>(entry.size);
-
-            auto finishDimension = [&]() -> bool
+            auto fail = [&]() -> bool
             {
+                Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, valueToken);
+                entry.ReleaseData();
+                return false;
+            };
+
+            for(size_t d = 0; d < components.size(); d++)
+            {
+                const std::string_view seg = components[d].view;
+                uint64_t result = 0;
+                bool bIsNegative = false;
+                bool bIsFirstChar = true;
+                bool bComponentHasDigit = false;
+
+                for(char c : seg)
+                {
+                    if(bIsFirstChar && c == '-')
+                    {
+                        bIsNegative = true;
+                        bContainsAnyNegative = true;
+                    }
+                    else if(constexpr_isdigit(c))
+                    {
+                        if(result > UINT64_MAX_VALUE / 10)
+                            return fail();  // Overflow
+
+                        result *= 10;
+
+                        const uint64_t digit = static_cast<uint64_t>(c - '0');
+                        if(result > UINT64_MAX_VALUE - digit)
+                            return fail();  // Overflow
+
+                        result += digit;
+                        bComponentHasDigit = true;
+                    }
+                    else
+                        return fail();  // unknown character
+
+                    bIsFirstChar = false;
+                }
+
+                if(!bComponentHasDigit)
+                    return fail();  // empty component like "-"
+
                 if(bIsNegative)
                 {
                     if(bIsUnsigned || result > INT64_MAX_VALUE)
-                        return false;
+                        return fail();
 
                     if consteval
-                        { (*entry.GetDataVector<int64_t>())[currentDimension] = -static_cast<int64_t>(result); }
+                        { (*entry.GetDataVector<int64_t>())[d] = -static_cast<int64_t>(result); }
                     else
-                        { static_cast<int64_t*>(entry.data.raw)[currentDimension] = -static_cast<int64_t>(result); }
+                        { static_cast<int64_t*>(entry.data.raw)[d] = -static_cast<int64_t>(result); }
                 }
                 else
                 {
@@ -5081,10 +5131,7 @@ namespace fdf::detail
                     if(bIsUnsigned)
                     {
                         if(bContainsAnyNegative)
-                        {
-                            entry.ReleaseData();
-                            return false;
-                        }
+                            return fail();
 
                         if(!bWasUnsigned)
                         {
@@ -5103,7 +5150,7 @@ namespace fdf::detail
                             }
                             else
                             {
-                                for(uint8_t i = 0; i < currentDimension - 1; i++)
+                                for(size_t i = 0; i < d; i++)
                                 {
                                     const int64_t temp = static_cast<int64_t*>(entry.data.raw)[i];
                                     static_cast<uint64_t*>(entry.data.raw)[i] = static_cast<uint64_t>(temp);
@@ -5114,76 +5161,19 @@ namespace fdf::detail
                         entry.type = Type::UInt;  // keep type matched to the promoted buffer
 
                         if consteval
-                            { (*entry.GetDataVector<uint64_t>())[currentDimension] = result; }
+                            { (*entry.GetDataVector<uint64_t>())[d] = result; }
                         else
-                            { static_cast<uint64_t*>(entry.data.raw)[currentDimension] = result; }
+                            { static_cast<uint64_t*>(entry.data.raw)[d] = result; }
                     }
                     else
                     {
                         if consteval
-                            { (*entry.GetDataVector<int64_t>())[currentDimension] = static_cast<int64_t>(result); }
+                            { (*entry.GetDataVector<int64_t>())[d] = static_cast<int64_t>(result); }
                         else
-                            { static_cast<int64_t*>(entry.data.raw)[currentDimension] = static_cast<int64_t>(result); }
+                            { static_cast<int64_t*>(entry.data.raw)[d] = static_cast<int64_t>(result); }
                     }
                 }
-
-                return true;
-            };
-
-
-            for(size_t i = 0; i < view.size(); i++)
-            {
-                char c = view[i];
-                if(bIsFirstChar && c == '-')
-                {
-                    bIsNegative = true;
-                    bContainsAnyNegative = true;
-                }
-                else if(constexpr_isdigit(c))
-                {
-                    if(result > UINT64_MAX_VALUE / 10)
-                        return false;  // Overflow
-
-                    result *= 10;
-
-                    const uint64_t digit = static_cast<uint64_t>(c - '0');
-                    if(result > UINT64_MAX_VALUE - digit)
-                        return false; // Overflow
-
-                    result += digit;
-                    bComponentHasDigit = true;
-                }
-                else if(c == '|')
-                {
-                    if(currentDimension >= dimensionCount - 1)
-                        return false;  // Too much dimensions
-
-                    if(!bComponentHasDigit)
-                        return false;  // empty component
-
-                    if(!finishDimension())
-                        return false;
-
-                    bIsFirstChar = true;
-                    bIsNegative = false;
-                    bComponentHasDigit = false;
-
-                    result = 0;
-                    currentDimension++;
-
-                    continue;
-                }
-                else
-                    return false;  // unknown character
-
-                bIsFirstChar = false;
             }
-
-            if(!bComponentHasDigit)
-                return false;  // trailing empty component
-
-            if(!finishDimension())
-                return false;
 
             entry.type = bIsUnsigned? Type::UInt : Type::Int;
             return postProcess();
@@ -5192,9 +5182,11 @@ namespace fdf::detail
 
 
 
-        if(valueType == Type::Float)
+        // Numeric widening: any float component makes the whole pack float
+        if(bAllNumeric)
         {
             entry.type = Type::Float;
+            entry.size = static_cast<uint32_t>(components.size());
             if consteval
             {
                 entry.data.vFloat = new (std::nothrow) std::vector<double>();
@@ -5206,37 +5198,89 @@ namespace fdf::detail
                 entry.data.raw = GlobalAllocator::Allocate(entry.size * sizeof(double));
             }
 
-            uint8_t currentDimension = 0;
-            const uint8_t dimensionCount = static_cast<uint8_t>(entry.size);
-
-            // Split on '|' (multi-dimensional) and round-trip-parse each component
-            size_t segStart = 0;
-            for(size_t i = 0; i <= view.size(); i++)
+            for(size_t d = 0; d < components.size(); d++)
             {
-                if(i != view.size() && view[i] != '|')
-                    continue;
-
-                if(currentDimension >= dimensionCount)
-                    return false;  // more components than the tokenizer counted
-
-                const std::string_view seg = view.substr(segStart, i - segStart);
+                const std::string_view seg = components[d].view;
                 bool bOk = false;
                 const double result = detail::ParseDouble(seg.data(), seg.data() + seg.size(), &bOk);
                 if(!bOk)
+                {
+                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, valueToken);
+                    entry.ReleaseData();
                     return false;
+                }
 
                 if consteval
-                    { (*entry.GetDataVector<double>())[currentDimension] = result; }
+                    { (*entry.GetDataVector<double>())[d] = result; }
                 else
-                    { static_cast<double*>(entry.data.raw)[currentDimension] = result; }
-
-                currentDimension++;
-                segStart = i + 1;
+                    { static_cast<double*>(entry.data.raw)[d] = result; }
             }
 
-            if(currentDimension != dimensionCount)
-                return false;
+            return postProcess();
+        }
 
+        // Scalar string and '|' string pack share one shape: a String[count] slab (scalar is count 1)
+        if(bAllString)
+        {
+            const uint32_t count = static_cast<uint32_t>(components.size());
+            entry.AllocateStringArray(count);
+
+            String* dest;
+            if consteval
+                { dest = entry.data.strArray; }
+            else
+                { dest = static_cast<String*>(entry.data.raw); }
+
+            // decode each literal straight into its stored component, no transient buffer
+            for(uint32_t i = 0; i < count; i++)
+            {
+                const std::string_view literal = components[i].view;
+                dest[i].reserve(literal.size() - 2);   // decoded length <= literal length minus the quotes
+                DecodeStringLiteral(literal, [&](char c) { dest[i].push_back(c); });
+            }
+
+            return postProcess();
+        }
+
+        // Hex and timestamp keep raw text in a String[count], scalar or pack. Timestamps validate
+        // before allocation, a buffer left on a failed entry gets double-freed by recovery cleanup
+        if(bAllHex || bAllTimestamp)
+        {
+            if(bAllTimestamp)
+            {
+                for(const Component& c : components)
+                {
+                    if(!IsValidTimestamp(c.view))
+                    {
+                        Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidTimestamp, tokenizer, valueToken);
+                        return false;
+                    }
+                }
+            }
+
+            const uint32_t count = static_cast<uint32_t>(components.size());
+            entry.AllocateStringArray(count);
+            entry.type = bAllHex? Type::Hex : Type::Timestamp;
+
+            for(uint32_t i = 0; i < count; i++)
+            {
+                if consteval
+                    { entry.data.strArray[i] = components[i].view; }
+                else
+                    { static_cast<String*>(entry.data.raw)[i] = components[i].view; }
+            }
+
+            return postProcess();
+        }
+
+
+        // A single component remains: null / version
+        const std::string_view view = single[0].view;
+        const Type valueType = single[0].type;
+
+        if(valueType == Type::Null)
+        {
+            entry.type = Type::Null;
             return postProcess();
         }
 
@@ -5246,6 +5290,13 @@ namespace fdf::detail
         if(valueType == Type::Version)
         {
             entry.type = Type::Version;
+
+            entry.size = 1;  // dotted component count
+            for(char c : view)
+            {
+                if(c == '.')
+                    entry.size++;
+            }
 
             // Allocate exactly entry.size (the component count): GetValue and ReleaseData both key off
             // size, so over-allocating to 4 desynced the consteval span length and the runtime free size
@@ -5309,44 +5360,6 @@ namespace fdf::detail
                 { (*entry.GetDataVector<uint64_t>())[currentDimension] = result; }
             else
                 { static_cast<uint64_t*>(entry.data.raw)[currentDimension] = result; }
-
-            return postProcess();
-        }
-
-
-        // Validate before allocating; a buffer left on a failed entry gets double-freed by recovery cleanup
-        if(valueType == Type::Timestamp && !IsValidTimestamp(view))
-        {
-            Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidTimestamp, tokenizer, currentToken);
-            return false;
-        }
-
-
-        if(valueType == Type::String)
-        {
-            entry.AllocateStringArray(1);
-
-            // decode straight into the stored String, no transient buffer
-            String* dest;
-            if consteval
-                { dest = entry.data.strArray; }
-            else
-                { dest = static_cast<String*>(entry.data.raw); }
-            dest->reserve(view.size() - 2);   // decoded length <= literal length minus the quotes
-            DecodeStringLiteral(view, [&](char c) { dest->push_back(c); });
-
-            return postProcess();
-        }
-
-        // Hex/Timestamp: whole text in a single String[1]
-        if(valueType == Type::Hex || valueType == Type::Timestamp)
-        {
-            entry.AllocateStringArray(1);
-            entry.type = valueType;
-            if consteval
-                { entry.data.strArray[0] = view; }
-            else
-                { static_cast<String*>(entry.data.raw)[0] = view; }
 
             return postProcess();
         }
@@ -5629,16 +5642,8 @@ namespace fdf::detail
 
 
 
-        auto writeSimpleEntryValueFn = [&](const Entry& e) -> void
+        auto writeQuotedStringFn = [&buffer](std::string_view view) -> void
         {
-            std::string temp;
-            const std::string_view view = e.DataToView<STYLE>(temp);
-            if(e.type != Type::String)
-            {
-                buffer.append(view);
-                return;
-            }
-
             // Pick the quote that needs the least escaping: single quotes when the value has a double
             // quote but no single quote (and the style allows it), double quotes otherwise. Backslash
             // and control chars are always escaped so the output re-parses to the exact same value
@@ -5666,6 +5671,24 @@ namespace fdf::detail
                 }
             }
             buffer.push_back(quote);
+        };
+        auto writeSimpleEntryValueFn = [&](const Entry& e) -> void
+        {
+            if(e.type == Type::String)
+            {
+                // a plain string is a pack of one, components are quoted separately and joined by '|'
+                const std::span<const String> parts = e.GetValue<String>();
+                for(uint32_t i = 0; i < parts.size(); i++)
+                {
+                    if(i)
+                        buffer.push_back('|');
+                    writeQuotedStringFn(parts[i]);
+                }
+                return;
+            }
+
+            std::string temp;
+            buffer.append(e.DataToView<STYLE>(temp));
         };
         [[maybe_unused]] auto writeSimpleEntryFn = [&](const Entry& e) -> void
         {

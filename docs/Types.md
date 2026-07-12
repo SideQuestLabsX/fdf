@@ -16,18 +16,20 @@
 
 ## Packs
 
-Numbers or bools joined with `|` form a pack: one atomic value with N uniform components. Two or
-more components, no fixed upper bound. All components must share a type. Numerics widen to reach
-that uniformity (any float makes the pack float, a value past the signed range makes it unsigned, a
-negative makes it signed); a mix that can't widen, like `1|true`, is an error.
+Numbers, bools, strings, hex, or timestamps joined with `|` form a pack: one atomic value with N
+uniform components. All components must share a type. They can implicitly widen from int to float for example,
+but still must be a single type. A mix that can't widen, like `1|true` or `1|"a"`, is an error.
 
 ```fdf
-resolution = 1920|1080      // 2 components
-scale      = 1.0|1.0|1.0    // 3 components
-gradient   = 1|50|10|1      // 4 components
-five       = 1|2|3|4|5      // 5 components
-offset     = 0.5|-0.5|1.0   // widening is fine
-flags      = true|false     // bool pack
+resolution = 1920|1080             // 2 components
+scale      = 1.0|1.0|1.0           // 3 components
+gradient   = 1|50|10|1             // 4 components
+five       = 1|2|3|4|5             // 5 components
+offset     = 0.5|-0.5|1.0          // widening is fine
+flags      = true|false            // bool pack
+tags       = "config"|"a|b"|'x'    // string pack, a '|' inside quotes is literal
+channels   = 0xFF|0x80|0x40        // hex pack
+window     = 2024-12-24|2024-12-31 // timestamp pack
 ```
 
 A pack is not an array. A pack is a single value with N interchangeable components and no element

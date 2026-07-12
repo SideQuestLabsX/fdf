@@ -55,6 +55,7 @@ namespace fdf::detail
 
         "Equal           ",
         "Comma           ",
+        "Pipe            ",
 
         "CurlyBraceOpen  ",
         "CurlyBraceClose ",
@@ -364,6 +365,7 @@ namespace fdf::detail
             "value2 = nil\n"
             "escaped5 = \"asd\\tasd\\p\"\n"
             "escaped6 = \"\\\\asd\\\\\"\n"
+            "authors = \"ann\"|\"bo\"\n"
             "gameSettings1 {\n"
             "    resolution = 1920|1080\n"
             "    fullscreen = false\n"
@@ -381,10 +383,10 @@ namespace fdf::detail
             if(!e)
                 return;
 
-            // Derived from READ_DOC: 12 top-level entries; recursive adds gameSettings1's 3 children
-            // + 3 tag elements, and players' 2 maps + their 4 leaves = 24
-            CHECK_MSG(e->GetChildCountRecursive() == 24, std::format("recursive count = {}", e->GetChildCountRecursive()));
-            CHECK_MSG(e->GetChildCount() == 12, std::format("top level count = {}", e->GetChildCount()));
+            // Derived from READ_DOC: 13 top-level entries, recursive adds gameSettings1's 3 children
+            // + 3 tag elements, and players' 2 maps + their 4 leaves = 25
+            CHECK_MSG(e->GetChildCountRecursive() == 25, std::format("recursive count = {}", e->GetChildCountRecursive()));
+            CHECK_MSG(e->GetChildCount() == 13, std::format("top level count = {}", e->GetChildCount()));
 
             if(Entry* entry = e->GetChild("appVersion"); CHECK(entry && entry->GetType() == Type::Version))
             {
@@ -421,6 +423,12 @@ namespace fdf::detail
 
             if(Entry* entry = e->GetChild("value2"); CHECK(entry))
                 CHECK(entry->GetType() == Type::Null);
+
+            if(Entry* entry = e->GetChild("authors"); CHECK(entry && entry->GetType() == Type::String))
+            {
+                const std::span<const String> parts = entry->GetValue<String>();
+                CHECK(parts.size() == 2 && parts[0] == "ann" && parts[1] == "bo");
+            }
 
             if(Entry* entry = e->GetChild("gameSettings1.resolution"); CHECK(entry && entry->GetType() == Type::Int))
             {
@@ -833,9 +841,9 @@ namespace fdf::detail
 
 
 
-        // Multi-dim numbers across the matrix: Int/UInt/Float, 2..N dims, signs in every position,
-        // widening, and malformed-input recovery
-        static void MultiDimTest()
+        // Packs across the matrix: Int/UInt/Float/Bool/String/Hex/Timestamp, 2..N components, signs
+        // in every position, widening, string escapes, SetValue/round-trip, and malformed-input recovery
+        static void PackTest()
         {
             auto checkInt = [](std::string_view src, std::initializer_list<int64_t> exp)
             {
@@ -863,6 +871,32 @@ namespace fdf::detail
                 for(double x : exp)
                     CHECK_MSG(s[i++] == x, src);
             };
+            auto checkBool = [](std::string_view src, std::initializer_list<bool> exp)
+            {
+                UniqueEntryPtr root = ParseBuffer(std::format("v = {}\n", src));
+                Entry* e = root? root->GetChild("v") : nullptr;
+                if(!CHECK_MSG(e && e->GetType() == Type::Bool, src))
+                    return;
+                auto s = e->GetValue<bool>();
+                if(!CHECK_MSG(s.size() == exp.size(), src))
+                    return;
+                size_t i = 0;
+                for(bool x : exp)
+                    CHECK_MSG(s[i++] == x, src);
+            };
+            auto checkStrings = [](std::string_view src, std::initializer_list<std::string_view> exp)
+            {
+                UniqueEntryPtr root = ParseBuffer(std::format("v = {}\n", src));
+                Entry* e = root? root->GetChild("v") : nullptr;
+                if(!CHECK_MSG(e && e->GetType() == Type::String, src))
+                    return;
+                const std::span<const String> parts = e->GetValue<String>();
+                if(!CHECK_MSG(parts.size() == exp.size(), src))
+                    return;
+                size_t i = 0;
+                for(std::string_view x : exp)
+                    CHECK_MSG(parts[i++] == x, src);
+            };
 
             // Int: dimensions 2..5, negatives in leading / middle / trailing / all positions
             checkInt("1|2",         { 1, 2 });
@@ -877,19 +911,26 @@ namespace fdf::detail
             // no fixed dimension cap
             checkInt("1|2|3|4|5|6", { 1, 2, 3, 4, 5, 6 });
 
+            // '|' is a structural token, whitespace around it is fine
+            checkInt("1 | 2",       { 1, 2 });
+
             // float, incl exponents and mixed signs
             checkFloat("1.0|2.0",             { 1.0, 2.0 });
             checkFloat("0.5|-0.5|1.0",        { 0.5, -0.5, 1.0 });
             checkFloat("-1.5|2.5|-3.5|4.5",   { -1.5, 2.5, -3.5, 4.5 });
             checkFloat("1.5e3|-2.5",          { 1.5e3, -2.5 });
 
-            // one float component widens the whole vector to float
+            // one float component widens the whole pack to float
             checkFloat("1|2.0",       { 1.0, 2.0 });
             checkFloat("1|2.5|3",     { 1.0, 2.5, 3.0 });
             checkFloat("-1|2.5",      { -1.0, 2.5 });
             checkFloat("1|-2.5|3",    { 1.0, -2.5, 3.0 });
 
-            // UInt component beyond INT64_MAX keeps the whole vector unsigned
+            // bool packs
+            checkBool("true|false",       { true, false });
+            checkBool("true|false|true",  { true, false, true });
+
+            // UInt component beyond INT64_MAX keeps the whole pack unsigned
             if(UniqueEntryPtr root = ParseBuffer(std::string("v = 18446744073709551615|1\n")))
             {
                 Entry* e = root->GetChild("v");
@@ -900,9 +941,168 @@ namespace fdf::detail
                 }
             }
 
-            // malformed multi-dim values are rejected but recoverable: bad entry skipped, sibling
-            // survives. also the heap-corruption regression, a mid-parse failure must not leave a
-            // Map-typed entry pointing at an int buffer
+            // string packs: components decode escapes like plain strings, a '|' inside quotes is
+            // literal (the lexer only splits unquoted pipes)
+            checkStrings("\"alice\"|\"bob\"|\"carol\"",  { "alice", "bob", "carol" });
+            checkStrings("\"with|pipe\"|\"b\"",          { "with|pipe", "b" });
+            checkStrings("\"a\\\"q\"|'b\\tc'",           { "a\"q", "b\tc" });
+            checkStrings("\"\"|\"x\"",                   { "", "x" });
+
+            // hex and timestamp packs keep each component's raw text, read through the const span
+            auto checkText = [](std::string_view src, Type type, std::initializer_list<std::string_view> exp)
+            {
+                UniqueEntryPtr root = ParseBuffer(std::format("v = {}\n", src));
+                const Entry* e = root? root->GetChild("v") : nullptr;
+                if(!CHECK_MSG(e && e->GetType() == type, src))
+                    return;
+                const std::span<const String> parts = e->GetValue<String>();
+                if(!CHECK_MSG(parts.size() == exp.size(), src))
+                    return;
+                size_t i = 0;
+                for(std::string_view x : exp)
+                    CHECK_MSG(parts[i++] == x, src);
+            };
+            checkText("0xFF|0xAA",                Type::Hex,       { "0xFF", "0xAA" });
+            checkText("0x1|0x2|0x3",              Type::Hex,       { "0x1", "0x2", "0x3" });
+            checkText("2024-12-24|15:30:00",      Type::Timestamp, { "2024-12-24", "15:30:00" });
+            checkText("2024-12-24T15:30:00Z|2024-359", Type::Timestamp, { "2024-12-24T15:30:00Z", "2024-359" });
+
+            // GetValue<Timestamp> on a timestamp pack decodes component 0
+            if(UniqueEntryPtr root = ParseBuffer(std::string("v = 2024-12-24|15:30:00\n")))
+            {
+                const Entry* e = root->GetChild("v");
+                if(CHECK(e && e->GetType() == Type::Timestamp))
+                {
+                    const Timestamp ts = e->GetValue<Timestamp>();
+                    CHECK(ts.year == 2024 && ts.month == 12 && ts.day == 24);
+                }
+            }
+
+            // hex/timestamp pack write -> reparse round trip, unquoted atoms joined with '|'
+            for(std::string_view src : { "v = 0xFF|0xAA\n", "v = 2024-12-24|15:30:00\n" })
+            {
+                UniqueEntryPtr root = ParseBuffer(src);
+                if(!CHECK_MSG(static_cast<bool>(root), src))
+                    continue;
+                std::string out;
+                WriteBuffer<Style{ .bCommas = false }>(*root, out);
+                CHECK_MSG(!out.contains('"') && !out.contains('\''), out);
+
+                UniqueEntryPtr reparsed = ParseBuffer(out);
+                const Entry* a = root->GetChild("v");
+                const Entry* b = reparsed? reparsed->GetChild("v") : nullptr;
+                if(CHECK_MSG(a && b && a->GetType() == b->GetType(), out))
+                {
+                    const std::span<const String> pa = a->GetValue<String>();
+                    const std::span<const String> pb = b->GetValue<String>();
+                    if(CHECK_MSG(pa.size() == pb.size(), out))
+                    {
+                        for(size_t i = 0; i < pa.size(); i++)
+                            CHECK_MSG(pa[i] == pb[i], out);
+                    }
+                }
+            }
+
+            // scalar accessors on a string pack fall back to the first component
+            if(UniqueEntryPtr root = ParseBuffer(std::string("v = \"first\"|\"second\"\n")))
+            {
+                Entry* e = root->GetChild("v");
+                if(CHECK(e && e->GetType() == Type::String))
+                {
+                    CHECK(FirstString(*e) == "first");
+
+                    const std::span<const String> parts = e->GetValue<String>();
+                    std::string joined;
+                    for(const String& part : parts)
+                        joined.append(std::string_view(part));
+                    CHECK(joined == "firstsecond");
+                }
+            }
+
+            // SetValue builds a pack, replaces one, and a scalar SetValue tears one down
+            if(UniqueEntryPtr root = NewEntry())
+            {
+                Entry* e = root->Emplace("v");
+                if(CHECK(static_cast<bool>(e)))
+                {
+                    const std::string_view parts[] = { "x", "yy", "zzz" };
+                    e->SetValue(std::span<const std::string_view>(parts));
+                    std::span<String> comps = e->GetValue<String>();
+                    CHECK(e->GetType() == Type::String && comps.size() == 3 && comps[0] == "x" && comps[1] == "yy" && comps[2] == "zzz");
+
+                    const std::string_view shorter[] = { "a", "b" };
+                    e->SetValue(std::span<const std::string_view>(shorter));
+                    comps = e->GetValue<String>();
+                    CHECK(comps.size() == 2 && comps[0] == "a" && comps[1] == "b");
+
+                    e->SetValue(std::string_view("plain"));
+                    comps = e->GetValue<String>();
+                    CHECK(comps.size() == 1 && comps[0] == "plain" && FirstString(*e) == "plain");
+                }
+            }
+
+            // mutation through the span: an edit reallocs that component's own chunk in place, the
+            // span itself never moves (valid until SetValue/ReleaseData), and a component can grow
+            if(UniqueEntryPtr root = NewEntry())
+            {
+                Entry* e = root->Emplace("v");
+                if(CHECK(static_cast<bool>(e)))
+                {
+                    const std::string_view parts[] = { "aa", "bb", "cc" };
+                    e->SetValue(std::span<const std::string_view>(parts));
+                    std::span<String> comps = e->GetValue<String>();
+                    const String* before = comps.data();
+
+                    comps[1] = "much longer than before";                 // grows that component
+                    comps[2] = "";                                        // shrink to empty, no realloc needed
+                    CHECK(comps[0] == "aa" && comps[1] == "much longer than before" && comps[2] == "");
+                    CHECK(comps[2].empty());
+                    CHECK(e->GetValue<String>().data() == before);        // span never moves
+                    CHECK(FirstString(*e) == "aa");                       // component 0 unchanged
+                }
+            }
+
+            // empty span becomes a single empty component (a string value is never zero components)
+            if(UniqueEntryPtr root = NewEntry())
+            {
+                Entry* e = root->Emplace("v");
+                if(CHECK(static_cast<bool>(e)))
+                {
+                    e->SetValue(std::span<const std::string_view>());
+                    std::span<String> comps = e->GetValue<String>();
+                    CHECK(e->GetType() == Type::String && comps.size() == 1 && comps[0].empty());
+                }
+            }
+
+            // string pack write -> reparse round trip, incl escapes and embedded pipes
+            if(UniqueEntryPtr root = NewEntry())
+            {
+                Entry* e = root->Emplace("v");
+                if(CHECK(static_cast<bool>(e)))
+                {
+                    const std::string_view parts[] = { "plain", "with|pipe", "with \"quote\"", "tab\there", "" };
+                    e->SetValue(std::span<const std::string_view>(parts));
+
+                    std::string out;
+                    WriteBuffer<Style{ .bCommas = false }>(*root, out);
+
+                    UniqueEntryPtr reparsed = ParseBuffer(out);
+                    Entry* r = reparsed? reparsed->GetChild("v") : nullptr;
+                    if(CHECK_MSG(r && r->GetType() == Type::String, out))
+                    {
+                        const std::span<const String> comps = r->GetValue<String>();
+                        if(CHECK_MSG(comps.size() == 5, out))
+                        {
+                            for(size_t i = 0; i < 5; i++)
+                                CHECK_MSG(comps[i] == parts[i], out);
+                        }
+                    }
+                }
+            }
+
+            // malformed packs are rejected but recoverable: bad entry skipped, sibling survives.
+            // also the heap-corruption regression, a mid-parse failure must not leave a Map-typed
+            // entry pointing at a scalar buffer
             constexpr std::string_view recover[] =
             {
                 "bad = 1|99999999999999999999999\nok = 7\n",   // component overflows u64
@@ -911,7 +1111,8 @@ namespace fdf::detail
                 "bad = -|1\nok = 7\n",                          // empty leading component
                 "bad = 1|\nok = 7\n",                           // empty trailing component
                 "bad = 1||2\nok = 7\n",                         // empty middle component
-                "bad = 1.0|.\nok = 7\n",                        // empty trailing float component
+                "bad = 1.0|-\nok = 7\n",                        // unparsable float component
+                "bad = 1x2\nok = 7\n",                          // old 'x' separator is just an invalid value
             };
             for(std::string_view src : recover)
             {
@@ -923,6 +1124,39 @@ namespace fdf::detail
                     if(CHECK_MSG(ok && ok->GetType() == Type::Int, src))
                         CHECK_MSG(ok->GetValue<int64_t>()[0] == 7, src);
                 }
+            }
+
+            // pack-specific diagnostics
+            struct PackCase { DiagnosticType type; std::string_view src; };
+            constexpr PackCase packCases[] =
+            {
+                { DiagnosticType::InvalidPack,      "bad = 1|true\nok = 7\n" },               // non-widenable mix
+                { DiagnosticType::InvalidPack,      "bad = 1|\nok = 7\n" },                   // dangling '|'
+                { DiagnosticType::InvalidPack,      "bad = 1|\"a\"\nok = 7\n" },              // number/string mix
+                { DiagnosticType::InvalidPack,      "bad = null|null\nok = 7\n" },            // null has no pack form
+                { DiagnosticType::InvalidPack,      "bad = 1.0.0|2.0.0\nok = 7\n" },          // version has no pack form
+                { DiagnosticType::InvalidPack,      "bad = 0xFF|1\nok = 7\n" },               // hex/number mix
+                { DiagnosticType::InvalidPack,      "bad = 0xFF|2024-12-24\nok = 7\n" },      // hex/timestamp mix
+                { DiagnosticType::InvalidPack,      "bad = 2024-12-24|\"a\"\nok = 7\n" },     // timestamp/string mix
+                { DiagnosticType::InvalidTimestamp, "bad = 2024-12-24|25:99:00\nok = 7\n" },  // bad component in a timestamp pack
+                { DiagnosticType::InvalidNumber,    "bad = 1x2\nok = 7\n" },                  // old 'x' syntax
+            };
+            for(const PackCase& c : packCases)
+            {
+                test::g_lastDiagnostic = {};
+                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(c.src);
+                CHECK_MSG(test::g_lastDiagnostic.type == c.type, c.src);
+                if(CHECK_MSG(static_cast<bool>(root), c.src))
+                    CHECK_MSG(root->GetChild("ok") != nullptr, c.src);
+            }
+
+            // a bare '.' can't start an Atom, so '1.0|.' dies in the lexer and the whole parse is fatal
+            {
+                test::g_lastDiagnostic = {};
+                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("bad = 1.0|.\nok = 7\n");
+                CHECK(root == nullptr);
+                CHECK(test::g_lastDiagnostic.type == DiagnosticType::InvalidToken);
+                CHECK(test::g_lastDiagnostic.severity == DiagnosticSeverity::Fatal);
             }
         }
 
@@ -1482,8 +1716,20 @@ namespace fdf::detail
                 case Type::Int:                       return SpanEqual(a.GetValue<int64_t>(),  b.GetValue<int64_t>());
                 case Type::UInt: case Type::Version:  return SpanEqual(a.GetValue<uint64_t>(), b.GetValue<uint64_t>());
                 case Type::Float:                     return SpanEqual(a.GetValue<double>(),   b.GetValue<double>());
-                case Type::String: case Type::Timestamp: return FirstString(a) == FirstString(b);
-                case Type::Hex:                       return EqualIgnoreCase(FirstString(a), FirstString(b));
+                case Type::String: case Type::Timestamp: return SpanEqual(a.GetValue<String>(), b.GetValue<String>());
+                case Type::Hex:
+                {
+                    const std::span<const String> ha = a.GetValue<String>();
+                    const std::span<const String> hb = b.GetValue<String>();
+                    if(ha.size() != hb.size())
+                        return false;
+                    for(size_t i = 0; i < ha.size(); i++)
+                    {
+                        if(!EqualIgnoreCase(ha[i], hb[i]))
+                            return false;
+                    }
+                    return true;
+                }
                 default:                              return false;
             }
         }
@@ -1557,7 +1803,9 @@ namespace fdf::detail
                 "sApos = \"it's\"\n"
                 "sBack = \"a\\\\b\"\n"
                 "sCtrl = \"tab\\there\"\n"
+                "smd = \"a\"|\"b|c\"|\"\"\n"
                 "hexv = 0xFF00AA\n"
+                "hmd = 0xFF|0xAA|0x01\n"
                 "ver3 = 1.2.3\n"
                 "ver4 = 1.2.3.4\n"
                 "tsDate = 2024-12-24\n"
@@ -1565,6 +1813,7 @@ namespace fdf::detail
                 "tsOrd = 2024-359\n"
                 "tsWeek = 2024-W52-2\n"
                 "tsTime = 15:30:00\n"
+                "tmd = 2024-12-24|15:30:00\n"
                 "nn = null\n"
                 "arrScalar [ 1, 2, 3 ]\n"
                 "arrStr [ \"a\", \"b\", \"c\" ]\n"
@@ -1945,6 +2194,47 @@ consteval bool MultiDimWidenProbe()
 }
 static_assert(MultiDimWidenProbe(), "consteval multidim int->float widening");
 
+consteval bool StringPackProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = \"a\"|'b\\tc'|\"dd\"\n");
+    const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
+    if(!e || e->GetType() != fdf::Type::String)
+        return false;
+    const std::span<const fdf::String> parts = e->GetValue<fdf::String>();
+    return parts.size() == 3 && parts[0] == "a" && parts[1] == "b\tc" && parts[2] == "dd";
+}
+static_assert(StringPackProbe(), "consteval string pack parse");
+
+consteval bool StringPackInjectProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::NewEntry();
+    fdf::Entry* e = root->Emplace("v");
+    if(!e)
+        return false;
+    const std::string_view parts[] = { "x", "yy" };
+    e->SetValue(std::span<const std::string_view>(parts));
+    std::span<fdf::String> comps = e->GetValue<fdf::String>();
+    if(e->GetType() != fdf::Type::String || comps.size() != 2 || comps[0] != "x" || comps[1] != "yy")
+        return false;
+    comps[1] = "grown at compile time";   // mutate a component through the span at consteval
+    return e->GetValue<fdf::String>()[1] == "grown at compile time" && e->GetValue<fdf::String>()[0] == "x";
+}
+static_assert(StringPackInjectProbe(), "consteval string pack inject + mutate + read back");
+
+consteval bool HexTimestampPackProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("h = 0xFF|0xAA\nt = 2024-12-24|15:30:00\n");
+    const fdf::Entry* h = root? root->GetDirectChild("h") : nullptr;
+    const fdf::Entry* t = root? root->GetDirectChild("t") : nullptr;
+    if(!h || h->GetType() != fdf::Type::Hex || !t || t->GetType() != fdf::Type::Timestamp)
+        return false;
+    const std::span<const fdf::String> hp = h->GetValue<fdf::String>();
+    const std::span<const fdf::String> tp = t->GetValue<fdf::String>();
+    return hp.size() == 2 && hp[0] == "0xFF" && hp[1] == "0xAA"
+        && tp.size() == 2 && tp[0] == "2024-12-24" && tp[1] == "15:30:00";
+}
+static_assert(HexTimestampPackProbe(), "consteval hex/timestamp pack parse");
+
 consteval bool StringInjectProbe()
 {
     fdf::UniqueEntryPtr root = fdf::NewEntry();
@@ -2198,12 +2488,14 @@ consteval bool WriteCompositeProbe()
     root->Emplace("res")->SetValue(std::span(dims, 2));
     double xyz[3] = { 1.0, 2.5, 3.0 };
     root->Emplace("pos")->SetValue(std::span(xyz, 3));
+    const std::string_view names[2] = { "ann", "bo" };
+    root->Emplace("who")->SetValue(std::span<const std::string_view>(names));
 
     std::string out;
     fdf::WriteBuffer<fdf::Style{}>(*root, out);
-    return ContainsAt(out, "res=1920|1080") && ContainsAt(out, "pos=1.0|2.5|3.0");
+    return ContainsAt(out, "res=1920|1080") && ContainsAt(out, "pos=1.0|2.5|3.0") && ContainsAt(out, "who=\"ann\"|\"bo\"");
 }
-static_assert(WriteCompositeProbe(), "consteval write multidim int/float");
+static_assert(WriteCompositeProbe(), "consteval write multidim int/float/string packs");
 
 // SetValue/GetValue round-trips exercised in a constant-evaluated context. Mirrors
 // ValueTest; covers the consteval storage path the runtime tests cannot reach
@@ -2399,7 +2691,7 @@ int main()
     RunCase("MutateTest",          Test::MutateTest);
     RunCase("RecoveryTest",        Test::RecoveryTest);
     RunCase("NegativeTest",        Test::NegativeTest);
-    RunCase("MultiDimTest",        Test::MultiDimTest);
+    RunCase("PackTest",            Test::PackTest);
     RunCase("StringRoundTripTest", Test::StringRoundTripTest);
     RunCase("StringStorageTest",   Test::StringStorageTest);
     RunCase("StringApiTest",       Test::StringApiTest);
