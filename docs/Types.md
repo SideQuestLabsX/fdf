@@ -10,13 +10,13 @@
 | Float | `3.14`, `1.0e21` | 64-bit, scientific notation supported. `inf`/`nan` not representable |
 | String | `"text"`, `'text'` | single or double quotes |
 | Hex | `0xFF5733` | `0x`/`0X` prefix marks it as hex |
-| Version | `1.0.0.0` | dotted version literal |
+| Version | `1.0.0`, `1.0.0.0` | three- or four-component dotted numeric version |
 | Timestamp | `2024-12-24T15:30:00`, `2024-12-24`, `15:30:00` | ISO-8601 date, time, or both |
 | Null / Nil | `null`, `nil` | absence of a value, `nil` is an alias of `null` |
 
 ## Packs
 
-Numbers, bools, strings, hex, or timestamps joined with `|` form a pack: one atomic value with N
+Numbers, bools, strings, hex, versions, or timestamps joined with `|` form a pack: one atomic value with N
 uniform components. All components must share a type. They can implicitly widen from int to float for example,
 but still must be a single type. A mix that can't widen, like `1|true` or `1|"a"`, is an error.
 
@@ -29,8 +29,12 @@ offset     = 0.5|-0.5|1.0          // widening is fine
 flags      = true|false            // bool pack
 tags       = "config"|"a|b"|'x'    // string pack, a '|' inside quotes is literal
 channels   = 0xFF|0x80|0x40        // hex pack
+versions   = 1.0.0|1.1.0.0         // 3 and 4 components can mix
 window     = 2024-12-24|2024-12-31 // timestamp pack
 ```
+
+Version components are `uint32_t`, except `major` is limited to `0..2147483647`.
+`1.2.3` and `1.2.3.0` stay distinct.
 
 A pack is not an array. A pack is a single value with N interchangeable components and no element
 identity: no per-component comments, no nesting, no `Entry` per component. An array (`[ ]`) is a

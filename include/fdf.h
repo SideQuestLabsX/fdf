@@ -224,7 +224,19 @@ FDF_EXPORT namespace fdf
     struct NilType     { consteval NilType()     noexcept = default; };
     struct ArrayType   { consteval ArrayType()   noexcept = default; };
     struct MapType     { consteval MapType()     noexcept = default; };
-    struct VersionType { consteval VersionType() noexcept = default; };
+
+    struct Version
+    {
+        uint32_t bHasRevision : 1 = false;
+        uint32_t major        : 31 = 0;
+        uint32_t minor             = 0;
+        uint32_t patch             = 0;
+        uint32_t revision          = 0;
+
+        constexpr bool operator==(const Version&) const noexcept = default;
+    };
+    static_assert(sizeof(Version) == 16);
+    static_assert(alignof(Version) == alignof(uint32_t));
 
 
     // Decoded view of an ISO-8601 timestamp. Transient: a Timestamp entry stores the raw text
@@ -933,7 +945,7 @@ FDF_EXPORT namespace fdf
         char identifier[detail::MAX_IDENTIFIER_LENGTH + 1] = {};
         Type type = Type::Map;
         uint32_t size = 0;
-        uint32_t capacity = 0;  // container child-buffer capacity (containers only)
+        uint32_t capacity = 0;  // runtime slab element capacity; 0 means the slab holds exactly `size`
         Entry* parent = nullptr;
 
         // Union of typed pointers, constexpr can't cast void*->T* (MSVC)
@@ -942,10 +954,11 @@ FDF_EXPORT namespace fdf
         {
             void* raw = nullptr;
             bool* boolArray;
-            String* strArray;
             std::vector<int64_t>* vInt;
             std::vector<uint64_t>* vUInt;
+            std::vector<Version>* vVersion;
             std::vector<double>* vFloat;
+            std::vector<String>* vString;
             std::vector<Entry*>* vEntry;
         };
         DataPtr data;
@@ -959,7 +972,9 @@ FDF_EXPORT namespace fdf
         {
             if constexpr(std::is_same_v<T, int64_t>)       return data.vInt;
             else if constexpr(std::is_same_v<T, uint64_t>) return data.vUInt;
+            else if constexpr(std::is_same_v<T, Version>)  return data.vVersion;
             else if constexpr(std::is_same_v<T, double>)   return data.vFloat;
+            else if constexpr(std::is_same_v<T, String>)   return data.vString;
             else                                           return data.vEntry;   // Entry*
         }
         template<typename T>
@@ -967,9 +982,19 @@ FDF_EXPORT namespace fdf
         {
             if constexpr(std::is_same_v<T, int64_t>)       return data.vInt;
             else if constexpr(std::is_same_v<T, uint64_t>) return data.vUInt;
+            else if constexpr(std::is_same_v<T, Version>)  return data.vVersion;
             else if constexpr(std::is_same_v<T, double>)   return data.vFloat;
+            else if constexpr(std::is_same_v<T, String>)   return data.vString;
             else                                           return data.vEntry;
         }
+
+        // runtime scalar alloc; records the granted bucket count in `capacity` so frees hit the same bucket
+        template<typename T>
+        constexpr T* AllocateSlab(uint32_t count) noexcept;
+
+        // grow/shrink the storage for one stored type; Resize dispatches to it per `type`
+        template<typename T>
+        constexpr void ResizeStorage(uint32_t _size) noexcept;
 
         // consteval-only; runtime casts data.raw at the call site
         template<typename T>
@@ -992,12 +1017,35 @@ FDF_EXPORT namespace fdf
             {
                 case Type::Bool:                                          return !data.boolArray;
                 case Type::Int:                                           return !data.vInt;
-                case Type::UInt:   case Type::Version:                    return !data.vUInt;
+                case Type::UInt:                                          return !data.vUInt;
+                case Type::Version:                                       return !data.vVersion;
                 case Type::Float:                                         return !data.vFloat;
-                case Type::String: case Type::Hex: case Type::Timestamp:  return !data.strArray;
+                case Type::String: case Type::Hex: case Type::Timestamp:  return !data.vString;
                 case Type::Array:  case Type::Map:                        return !data.vEntry;
                 default:                                                  return true;   // Null / Nil hold no data
             }
+        }
+
+        // Null the data pointer. At runtime `.raw` is the live member; at consteval there's no
+        // void*->T* cast, so activate the member matching `type` (reads there go through it)
+        constexpr void ResetDataNull() noexcept
+        {
+            if consteval
+            {
+                switch(type)
+                {
+                    case Type::Bool:                                         data.boolArray = nullptr; break;
+                    case Type::Int:                                          data.vInt = nullptr;      break;
+                    case Type::UInt:                                         data.vUInt = nullptr;     break;
+                    case Type::Version:                                      data.vVersion = nullptr;  break;
+                    case Type::Float:                                        data.vFloat = nullptr;    break;
+                    case Type::String: case Type::Hex: case Type::Timestamp: data.vString = nullptr;   break;
+                    case Type::Array:  case Type::Map:                       data.vEntry = nullptr;    break;
+                    default:                                                 data.raw = nullptr;       break;
+                }
+            }
+            else
+                { data.raw = nullptr; }
         }
 
 
@@ -1152,6 +1200,7 @@ FDF_EXPORT namespace fdf
         constexpr void SetValue(char value) noexcept;
         constexpr void SetValue(const char* value) noexcept;
         constexpr void SetValue(const Timestamp& value) noexcept;
+        constexpr void SetValue(const Version& value) noexcept;
         constexpr void SetValue(auto* value) = delete; // no pointer types (except char*)
 
         constexpr void SetValue(std::span<bool> value) noexcept;
@@ -1159,8 +1208,7 @@ FDF_EXPORT namespace fdf
         constexpr void SetValue(std::span<T> value) noexcept;
         template<std::unsigned_integral T>
         constexpr void SetValue(std::span<T> value) noexcept;
-        template<std::unsigned_integral T>
-        constexpr void SetValue(std::span<T> value, VersionType) noexcept;
+        constexpr void SetValue(std::span<const Version> value) noexcept;
         template<std::floating_point T>
         constexpr void SetValue(std::span<T> value) noexcept;
 
@@ -2811,44 +2859,44 @@ namespace fdf
             if consteval
                 { delete[] GetDataAs<bool>(); }
             else
-                { detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(bool)); }
+                { detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(bool)); }
             break;
         case Type::Int:
             if consteval
                 { delete GetDataVector<int64_t>(); }
             else
-                { detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(int64_t)); }
+                { detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(int64_t)); }
             break;
         case Type::UInt:
             if consteval
                 { delete GetDataVector<uint64_t>(); }
             else
-                { detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(uint64_t)); }
+                { detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(uint64_t)); }
             break;
         case Type::Float:
             if consteval
                 { delete GetDataVector<double>(); }
             else
-                { detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(double)); }
+                { detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(double)); }
             break;
         case Type::String:
         case Type::Hex:
         case Type::Timestamp:
             if consteval
-                { delete[] data.strArray; }   // ~String frees each component's chunk
+                { delete data.vString; }
             else
             {
                 String* arr = static_cast<String*>(data.raw);
-                for(uint32_t i = 0; i < size; i++)
+                for(uint32_t i = 0; i < size; i++)   // only [0,size) are alive
                     std::destroy_at(arr + i);
-                detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(String));
+                detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(String));
             }
             break;
         case Type::Version:
             if consteval
-                { delete GetDataVector<uint64_t>(); }
+                { delete GetDataVector<Version>(); }
             else
-                { detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(uint64_t)); }
+                { detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(Version)); }
             break;
         case Type::Array:
         case Type::Map:
@@ -2857,15 +2905,15 @@ namespace fdf
                 { delete GetDataVector<Entry*>(); }
             else
                 { (void)detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(void*)); }
-            data.vEntry = nullptr;   // keep the active member consistent with type (Map/Array)
-            capacity = 0;
-            return;
+            break;
         case Type::Null:
         default:
             return;
         }
 
-        data.raw = nullptr;
+        size = 0;
+        capacity = 0;
+        ResetDataNull();
     }
 
     constexpr void Entry::ReleaseComment() noexcept
@@ -2881,18 +2929,27 @@ namespace fdf
         ReleaseComment();
     }
 
+    template<typename T>
+    constexpr T* Entry::AllocateSlab(uint32_t count) noexcept
+    {
+        const auto [p, granted] = detail::GlobalAllocator::AllocateAtLeast(count * sizeof(T));
+        capacity = static_cast<uint32_t>(granted / sizeof(T));
+        return static_cast<T*>(p);
+    }
+
     constexpr void Entry::AllocateStringArray(uint32_t count) noexcept
     {
         type = Type::String;
         size = count;
         if consteval
         {
-            data.strArray = new (std::nothrow) String[count];
-            assert(data.strArray && "Allocation shouldn't fail");
+            data.vString = new (std::nothrow) std::vector<String>();
+            assert(data.vString && "Allocation shouldn't fail");
+            data.vString->resize(count);
         }
         else
         {
-            data.raw = detail::GlobalAllocator::Allocate(count * sizeof(String));
+            data.raw = AllocateSlab<String>(count);
             for(uint32_t i = 0; i < count; i++)
                 std::construct_at(static_cast<String*>(data.raw) + i);
         }
@@ -3833,7 +3890,7 @@ namespace fdf
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<uint64_t>() noexcept
     {
-        if(type != Type::UInt && type != Type::Version)
+        if(type != Type::UInt)
             return std::span<uint64_t>();
         if consteval
             { return std::span(*GetDataVector<uint64_t>()); }
@@ -3841,6 +3898,16 @@ namespace fdf
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<unsigned int>() noexcept  { return GetValue<uint64_t>(); }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<Version>() noexcept
+    {
+        if(type != Type::Version)
+            return std::span<Version>();
+        if consteval
+            { return std::span(*GetDataVector<Version>()); }
+        return std::span(static_cast<Version*>(data.raw), size);
+    }
 
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<double>() noexcept
@@ -3860,7 +3927,7 @@ namespace fdf
         if(type != Type::String || IsDataNull())
             return std::span<String>();
         if consteval
-            { return std::span<String>(data.strArray, size); }
+            { return std::span<String>(*GetDataVector<String>()); }
         return std::span<String>(static_cast<String*>(data.raw), size);
     }
     template<>
@@ -3902,7 +3969,7 @@ namespace fdf
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<uint64_t>() const noexcept
     {
-        if(type != Type::UInt && type != Type::Version)
+        if(type != Type::UInt)
             return std::span<const uint64_t>();
         if consteval
             { return std::span(*GetDataVector<uint64_t>()); }
@@ -3910,6 +3977,16 @@ namespace fdf
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<unsigned int>() const noexcept  { return GetValue<uint64_t>(); }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<Version>() const noexcept
+    {
+        if(type != Type::Version)
+            return std::span<const Version>();
+        if consteval
+            { return std::span(*GetDataVector<Version>()); }
+        return std::span(static_cast<const Version*>(data.raw), size);
+    }
 
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<double>() const noexcept
@@ -3929,7 +4006,7 @@ namespace fdf
         if((type != Type::String && type != Type::Hex && type != Type::Timestamp) || IsDataNull())
             return std::span<const String>();
         if consteval
-            { return std::span<const String>(data.strArray, size); }
+            { return std::span<const String>(*GetDataVector<String>()); }
         return std::span<const String>(static_cast<const String*>(data.raw), size);
     }
     template<>
@@ -3969,87 +4046,87 @@ namespace fdf
             return;
         ReleaseData();
         type = _type;
+        if consteval
+            { ResetDataNull(); } // Only needed for union active member at comptime
     }
 
-    // Resize only applies to numeric scalar arrays. Existing elements are preserved, new ones zero-filled
+    template<typename T>
+    constexpr void Entry::ResizeStorage(const uint32_t _size) noexcept
+    {
+        if(size == _size)
+            return;
+
+        if consteval
+        {
+            if constexpr(std::is_same_v<T, bool>)
+            {
+                bool* newData = _size? new (std::nothrow) bool[_size] : nullptr;
+                assert((_size == 0 || newData) && "Allocation shouldn't fail");
+                uint32_t i = 0;
+                if(data.boolArray)
+                {
+                    for(; i < std::min(size, _size); i++)
+                        newData[i] = data.boolArray[i];
+                    delete[] data.boolArray;
+                }
+                for(; i < _size; i++)
+                    newData[i] = false;
+                data.boolArray = newData;
+            }
+            else
+            {
+                if(!GetDataVector<T>())
+                {
+                    GetDataVector<T>() = new (std::nothrow) std::vector<T>();
+                    assert(GetDataVector<T>() && "Allocation shouldn't fail");
+                }
+                GetDataVector<T>()->resize(_size);
+            }
+        }
+        else
+        {
+            T* arr = static_cast<T*>(data.raw);
+            if(_size <= capacity)   // slab has room: adjust the live range in place
+            {
+                for(uint32_t i = _size; i < size; i++)   // shrink: destroy the dropped tail
+                    std::destroy_at(arr + i);
+                for(uint32_t i = size; i < _size; i++)   // grow: value-init the new tail
+                    std::construct_at(arr + i);
+            }
+            else   // grow past capacity: move the live range to a bigger bucket
+            {
+                const uint32_t oldCapacity = capacity;
+                T* newData = AllocateSlab<T>(_size);
+                uint32_t i = 0;
+                for(; i < size; i++)   // size < _size here, every live element survives
+                    std::construct_at(newData + i, std::move(arr[i]));
+                for(; i < _size; i++)
+                    std::construct_at(newData + i);
+                for(uint32_t j = 0; j < size; j++)   // destroy the moved-from originals
+                    std::destroy_at(arr + j);
+                if(oldCapacity)   // nothing to free when growing from an empty entry
+                    detail::GlobalAllocator::Deallocate(data.raw, oldCapacity * sizeof(T));
+                data.raw = newData;
+            }
+        }
+
+        size = _size;
+    }
+
+    // Resize a value pack in place: bool, numeric, version, or string. Map/array/null and the constrained-text
+    // types (hex/timestamp) are rejected, an empty component isn't a valid hex or timestamp
     constexpr void Entry::Resize(const uint32_t _size) noexcept
     {
         switch(type)
         {
-        case Type::Bool:
-        case Type::Int:
-        case Type::UInt:
-        case Type::Float:
-        case Type::Version:
-            break;
-        default:
-            return;
+        case Type::Bool:    ResizeStorage<bool>(_size);     break;
+        case Type::Int:     ResizeStorage<int64_t>(_size);  break;
+        case Type::UInt:    ResizeStorage<uint64_t>(_size); break;
+        case Type::Float:   ResizeStorage<double>(_size);   break;
+        case Type::String:  ResizeStorage<String>(_size);   break;
+        case Type::Version: ResizeStorage<Version>(_size);  break;
+        default:            return;
         }
-
-        if(size == _size)
-            return;
-
-        // Bool stores a raw bool[] at compile time (not a vector), so it needs its own consteval branch
-        if(type == Type::Bool && std::is_constant_evaluated())
-        {
-            bool* newData = _size? new (std::nothrow) bool[_size] : nullptr;
-            assert((_size == 0 || newData) && "Allocation shouldn't fail");
-            uint32_t i = 0;
-            if(data.boolArray)
-            {
-                for(; i < std::min(size, _size); i++)
-                    newData[i] = GetDataAs<bool>()[i];
-                delete[] GetDataAs<bool>();
-            }
-            for(; i < _size; i++)
-                newData[i] = false;
-
-            data.boolArray = newData;
-            size = _size;
-            return;
-        }
-
-        auto resize = [&]<typename T>() noexcept
-        {
-            if consteval
-            {
-                // Bool's consteval path (raw bool[]) is handled above; this lambda only runs for bool at runtime
-                if constexpr(!std::is_same_v<T, bool>)
-                {
-                    if(!GetDataVector<T>())
-                    {
-                        GetDataVector<T>() = new (std::nothrow) std::vector<T>();
-                        assert(GetDataVector<T>() && "Allocation shouldn't fail");
-                    }
-                    GetDataVector<T>()->resize(_size);
-                }
-            }
-            else
-            {
-                void* newData = _size? detail::GlobalAllocator::Allocate(_size * sizeof(T)) : nullptr;
-                uint32_t i = 0;
-                if(data.raw)
-                {
-                    for(; i < std::min(size, _size); i++)
-                        static_cast<T*>(newData)[i] = static_cast<T*>(data.raw)[i];
-                    detail::GlobalAllocator::Deallocate(data.raw, size * sizeof(T));
-                }
-                for(; i < _size; i++)
-                    static_cast<T*>(newData)[i] = T{};
-                data.raw = newData;
-            }
-        };
-
-        switch(type)
-        {
-        case Type::Bool:                    resize.operator()<bool>();     break;  // runtime only (consteval handled above)
-        case Type::Int:                     resize.operator()<int64_t>();  break;
-        case Type::UInt: case Type::Version: resize.operator()<uint64_t>(); break;
-        case Type::Float:                   resize.operator()<double>();   break;
-        default:                                                           break;
-        }
-
-        size = _size;
     }
 
 
@@ -4091,7 +4168,7 @@ namespace fdf
         }
         else
         {
-            data.raw = detail::GlobalAllocator::Allocate(sizeof(bool));
+            data.raw = AllocateSlab<bool>(size);
             static_cast<bool*>(data.raw)[0] = value;
         }
     }
@@ -4110,7 +4187,7 @@ namespace fdf
         }
         else
         {
-            data.raw = detail::GlobalAllocator::Allocate(size * sizeof(int64_t));
+            data.raw = AllocateSlab<int64_t>(size);
             static_cast<int64_t*>(data.raw)[0] = static_cast<int64_t>(value);
         }
     }
@@ -4129,7 +4206,7 @@ namespace fdf
         }
         else
         {
-            data.raw = detail::GlobalAllocator::Allocate(size * sizeof(uint64_t));
+            data.raw = AllocateSlab<uint64_t>(size);
             static_cast<uint64_t*>(data.raw)[0] = static_cast<uint64_t>(value);
         }
     }
@@ -4148,7 +4225,7 @@ namespace fdf
         }
         else
         {
-            data.raw = detail::GlobalAllocator::Allocate(size * sizeof(double));
+            data.raw = AllocateSlab<double>(size);
             static_cast<double*>(data.raw)[0] = static_cast<double>(value);
         }
     }
@@ -4171,7 +4248,7 @@ namespace fdf
         if consteval
         {
             for(uint32_t i = 0; i < count; i++)
-                data.strArray[i] = value[i];
+                (*data.vString)[i] = value[i];
         }
         else
         {
@@ -4199,7 +4276,7 @@ namespace fdf
         AllocateStringArray(1);
         type = Type::Timestamp;
         if consteval
-            { data.strArray[0] = std::string_view(text); }
+            { (*data.vString)[0] = std::string_view(text); }
         else
             { static_cast<String*>(data.raw)[0] = std::string_view(text); }
     }
@@ -4222,7 +4299,7 @@ namespace fdf
         }
         else
         {
-            data.raw = detail::GlobalAllocator::Allocate(size * sizeof(bool));
+            data.raw = AllocateSlab<bool>(size);
             for(size_t i = 0; i < size; i++)
                 static_cast<bool*>(data.raw)[i] = value[i];
         }
@@ -4246,7 +4323,7 @@ namespace fdf
         }
         else
         {
-            data.raw = detail::GlobalAllocator::Allocate(size * sizeof(int64_t));
+            data.raw = AllocateSlab<int64_t>(size);
             for(size_t i = 0; i < size; i++)
                 static_cast<int64_t*>(data.raw)[i] = static_cast<int64_t>(value[i]);
         }
@@ -4270,36 +4347,40 @@ namespace fdf
         }
         else
         {
-            data.raw = detail::GlobalAllocator::Allocate(size * sizeof(uint64_t));
+            data.raw = AllocateSlab<uint64_t>(size);
             for(size_t i = 0; i < size; i++)
                 static_cast<uint64_t*>(data.raw)[i] = static_cast<uint64_t>(value[i]);
         }
     }
 
-    template <std::unsigned_integral T>
-    constexpr void Entry::SetValue(std::span<T> value, VersionType) noexcept
+    constexpr void Entry::SetValue(const Version& value) noexcept
     {
-        assert((value.size() == 3 || value.size() == 4) && "Version must include 3 or 4 elements!");
+        SetValue(std::span<const Version>(&value, 1));
+    }
+
+    constexpr void Entry::SetValue(const std::span<const Version> value) noexcept
+    {
         ReleaseData();
-        type = Type::UInt;
+        type = Type::Version;
         size = static_cast<uint32_t>(value.size());
+        if(size == 0)
+            return;
+        // revision is meaningless without bHasRevision, force it to 0 so the value the writer emits
+        // and a re-parse both agree with what's stored
+        auto normalized = [](Version v) noexcept { if(!v.bHasRevision) v.revision = 0; return v; };
         if consteval
         {
-            data.vUInt = new (std::nothrow) std::vector<uint64_t>();
-            assert(data.vUInt && "Allocation shouldn't fail");
-            GetDataVector<uint64_t>()->resize(4, 0ULL);
-            for(size_t i = 0; i < size; i++)
-                (*GetDataVector<uint64_t>())[i] = static_cast<uint64_t>(value[i]);
+            data.vVersion = new (std::nothrow) std::vector<Version>();
+            assert(data.vVersion && "Allocation shouldn't fail");
+            data.vVersion->reserve(size);
+            for(const Version& v : value)
+                data.vVersion->push_back(normalized(v));
         }
         else
         {
-            data.raw = detail::GlobalAllocator::Allocate(4 * sizeof(uint64_t));
-            static_cast<uint64_t*>(data.raw)[0] = 0ULL;
-            static_cast<uint64_t*>(data.raw)[1] = 0ULL;
-            static_cast<uint64_t*>(data.raw)[2] = 0ULL;
-            static_cast<uint64_t*>(data.raw)[3] = 0ULL;
+            data.raw = AllocateSlab<Version>(size);
             for(size_t i = 0; i < size; i++)
-                static_cast<uint64_t*>(data.raw)[i] = static_cast<uint64_t>(value[i]);
+                std::construct_at(static_cast<Version*>(data.raw) + i, normalized(value[i]));
         }
     }
 
@@ -4321,7 +4402,7 @@ namespace fdf
         }
         else
         {
-            data.raw = detail::GlobalAllocator::Allocate(size * sizeof(double));
+            data.raw = AllocateSlab<double>(size);
             for(size_t i = 0; i < size; i++)
                 static_cast<double*>(data.raw)[i] = static_cast<double>(value[i]);
         }
@@ -4398,14 +4479,23 @@ namespace fdf
 
             case Type::Version:
             {
-                const auto span = GetValue<uint64_t>();
+                const std::span<const Version> span = GetValue<Version>();
                 if(span.empty())
                     return {};
                 temp.clear();
                 for(size_t i = 0; i < span.size(); i++)
                 {
-                    if(i) temp.push_back('.');
-                    detail::AppendUInt(temp, span[i]);
+                    if(i) temp.push_back('|');
+                    detail::AppendUInt(temp, span[i].major);
+                    temp.push_back('.');
+                    detail::AppendUInt(temp, span[i].minor);
+                    temp.push_back('.');
+                    detail::AppendUInt(temp, span[i].patch);
+                    if(span[i].bHasRevision)
+                    {
+                        temp.push_back('.');
+                        detail::AppendUInt(temp, span[i].revision);
+                    }
                 }
                 return temp;
             }
@@ -4997,6 +5087,7 @@ namespace fdf::detail
         bool bAllNumeric   = true;
         bool bAllString    = true;
         bool bAllHex       = true;
+        bool bAllVersion   = true;
         bool bAllTimestamp = true;
         bool bAnyFloat     = false;
         for(const Component& c : components)
@@ -5005,13 +5096,13 @@ namespace fdf::detail
             bAllNumeric   = bAllNumeric   && (c.type == Type::Int || c.type == Type::Float);
             bAllString    = bAllString    && c.type == Type::String;
             bAllHex       = bAllHex       && c.type == Type::Hex;
+            bAllVersion   = bAllVersion   && c.type == Type::Version;
             bAllTimestamp = bAllTimestamp && c.type == Type::Timestamp;
             bAnyFloat     = bAnyFloat     || c.type == Type::Float;
         }
 
-        // A pack (2+ components) must be uniform: all bool, string, hex, timestamp, or all numeric
-        // (int/float widen). A mix like 1|true, or null/version components, has no common type
-        if(components.size() > 1 && !bAllBool && !bAllNumeric && !bAllString && !bAllHex && !bAllTimestamp)
+        // A pack (2+ components) must be uniform. A mix like 1|true, or null/version components, has no common type
+        if(components.size() > 1 && !bAllBool && !bAllNumeric && !bAllString && !bAllHex && !bAllVersion && !bAllTimestamp)
         {
             Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidPack, tokenizer, valueToken);
             return false;
@@ -5028,7 +5119,7 @@ namespace fdf::detail
             }
             else
             {
-                entry.data.raw = GlobalAllocator::Allocate(entry.size * sizeof(bool));
+                entry.data.raw = entry.AllocateSlab<bool>(entry.size);
             }
 
             for(size_t i = 0; i < components.size(); i++)
@@ -5046,6 +5137,92 @@ namespace fdf::detail
 
 
 
+        if(bAllVersion)
+        {
+            entry.type = Type::Version;
+            entry.size = static_cast<uint32_t>(components.size());
+            if consteval
+            {
+                entry.data.vVersion = new (std::nothrow) std::vector<Version>(entry.size);
+                assert(entry.data.vVersion && "Allocation shouldn't fail");
+            }
+            else
+            {
+                entry.data.raw = entry.AllocateSlab<Version>(entry.size);
+                for(size_t i = 0; i < components.size(); i++)
+                    std::construct_at(static_cast<Version*>(entry.data.raw) + i);
+            }
+
+            auto fail = [&]() -> bool
+            {
+                Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, valueToken);
+                entry.ReleaseData();
+                return false;
+            };
+
+            for(size_t versionIndex = 0; versionIndex < components.size(); versionIndex++)
+            {
+                Version& version = [&]() -> Version&
+                {
+                    if consteval
+                        { return (*entry.GetDataVector<Version>())[versionIndex]; }
+                    else
+                        { return static_cast<Version*>(entry.data.raw)[versionIndex]; }
+                }();
+                uint32_t componentIndex = 0;
+                uint64_t result = 0;
+                bool bHasDigit = false;
+
+                auto storeComponent = [&]() -> bool
+                {
+                    if(!bHasDigit || result > detail::UINT32_MAX_VALUE || (componentIndex == 0 && result > 0x7FFFFFFFU))
+                        return false;
+
+                    switch(componentIndex)
+                    {
+                        #if defined(__GNUC__) && !defined(__clang__)
+                            #pragma GCC diagnostic push
+                            #pragma GCC diagnostic ignored "-Wconversion"
+                        #endif
+                        case 0: version.major    = static_cast<uint32_t>(result); break;
+                        #if defined(__GNUC__) && !defined(__clang__)
+                            #pragma GCC diagnostic pop
+                        #endif
+                        case 1: version.minor    = static_cast<uint32_t>(result); break;
+                        case 2: version.patch    = static_cast<uint32_t>(result); break;
+                        case 3: version.revision = static_cast<uint32_t>(result); break;
+                        default: return false;
+                    }
+                    componentIndex++;
+                    result = 0;
+                    bHasDigit = false;
+                    return true;
+                };
+
+                for(char c : components[versionIndex].view)
+                {
+                    if(constexpr_isdigit(c))
+                    {
+                        const uint64_t digit = static_cast<uint64_t>(c - '0');
+                        if(result > (detail::UINT32_MAX_VALUE - digit) / 10)
+                            return fail();
+                        result = result * 10 + digit;
+                        bHasDigit = true;
+                    }
+                    else if(c != '.' || !storeComponent())
+                        return fail();
+                }
+
+                if(!storeComponent() || (componentIndex != 3 && componentIndex != 4))
+                    return fail();
+                version.bHasRevision = componentIndex == 4;
+            }
+            return postProcess();
+        }
+
+
+
+
         if(bAllNumeric && !bAnyFloat)
         {
             entry.size = static_cast<uint32_t>(components.size());
@@ -5057,7 +5234,7 @@ namespace fdf::detail
             }
             else
             {
-                entry.data.raw = GlobalAllocator::Allocate(entry.size * sizeof(int64_t));
+                entry.data.raw = entry.AllocateSlab<int64_t>(entry.size);
             }
 
             // match type to the buffer now, else an early error return leaves a Map pointing at an
@@ -5195,7 +5372,7 @@ namespace fdf::detail
             }
             else
             {
-                entry.data.raw = GlobalAllocator::Allocate(entry.size * sizeof(double));
+                entry.data.raw = entry.AllocateSlab<double>(entry.size);
             }
 
             for(size_t d = 0; d < components.size(); d++)
@@ -5227,7 +5404,7 @@ namespace fdf::detail
 
             String* dest;
             if consteval
-                { dest = entry.data.strArray; }
+                { dest = entry.data.vString->data(); }
             else
                 { dest = static_cast<String*>(entry.data.raw); }
 
@@ -5265,7 +5442,7 @@ namespace fdf::detail
             for(uint32_t i = 0; i < count; i++)
             {
                 if consteval
-                    { entry.data.strArray[i] = components[i].view; }
+                    { (*entry.data.vString)[i] = components[i].view; }
                 else
                     { static_cast<String*>(entry.data.raw)[i] = components[i].view; }
             }
@@ -5274,8 +5451,6 @@ namespace fdf::detail
         }
 
 
-        // A single component remains: null / version
-        const std::string_view view = single[0].view;
         const Type valueType = single[0].type;
 
         if(valueType == Type::Null)
@@ -5283,87 +5458,6 @@ namespace fdf::detail
             entry.type = Type::Null;
             return postProcess();
         }
-
-
-
-
-        if(valueType == Type::Version)
-        {
-            entry.type = Type::Version;
-
-            entry.size = 1;  // dotted component count
-            for(char c : view)
-            {
-                if(c == '.')
-                    entry.size++;
-            }
-
-            // Allocate exactly entry.size (the component count): GetValue and ReleaseData both key off
-            // size, so over-allocating to 4 desynced the consteval span length and the runtime free size
-            if consteval
-            {
-                entry.data.vUInt = new (std::nothrow) std::vector<uint64_t>();
-                assert(entry.data.vUInt && "Allocation shouldn't fail");
-                entry.GetDataVector<uint64_t>()->resize(entry.size);
-            }
-            else
-            {
-                entry.data.raw = GlobalAllocator::Allocate(entry.size * sizeof(uint64_t));
-            }
-
-            uint8_t currentDimension = 0;
-            const uint8_t dimensionCount = static_cast<uint8_t>(entry.size);
-
-            uint64_t result = 0;
-            bool bComponentHasDigit = false;  // rejects empty components like "1..0"
-            for(char c : view)
-            {
-                if(constexpr_isdigit(c))
-                {
-                    if(result > UINT64_MAX_VALUE / 10)
-                        return false;  // Overflow
-
-                    result *= 10;
-
-                    const uint64_t digit = static_cast<uint64_t>(c - '0');
-                    if(result > UINT64_MAX_VALUE - digit)
-                        return false; // Overflow
-
-                    result += digit;
-                    bComponentHasDigit = true;
-                }
-                else if(c == '.')
-                {
-                    if(currentDimension >= dimensionCount - 1)
-                        return false;  // Too much dimensions
-
-                    if(!bComponentHasDigit)
-                        return false;  // empty component
-
-                    if consteval
-                        { (*entry.GetDataVector<uint64_t>())[currentDimension] = result; }
-                    else
-                        { static_cast<uint64_t*>(entry.data.raw)[currentDimension] = result; }
-
-                    result = 0;
-                    currentDimension++;
-                    bComponentHasDigit = false;
-                }
-                else
-                    return false;  // unknown character
-            }
-
-            if(!bComponentHasDigit)
-                return false;  // trailing empty component
-
-            if consteval
-                { (*entry.GetDataVector<uint64_t>())[currentDimension] = result; }
-            else
-                { static_cast<uint64_t*>(entry.data.raw)[currentDimension] = result; }
-
-            return postProcess();
-        }
-
         return false;  // unhandled token
     }
     template<auto DIAGNOSTIC_CALLBACK>

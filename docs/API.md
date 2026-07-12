@@ -56,8 +56,13 @@ components (one element for a plain scalar, more for a pack); a timestamp is dec
 auto name = e->GetChild("name")->GetValue<fdf::String>()[0];     // "MyGame"
 auto px   = e->GetChild("pos")->GetValue<int64_t>();             // pack span: [100, 100]
 auto flag = e->GetChild("fullscreen")->GetValue<bool>()[0];      // true
+auto vers = e->GetChild("versions")->GetValue<Version>();
 auto when = e->GetChild("created")->GetValue<Timestamp>();       // decoded fields
 ```
+
+`Version` is 16 bytes. `major` is limited to `0..2147483647`; the other components use the
+full `uint32_t` range. `bHasRevision` distinguishes `1.2.3` from `1.2.3.0`. Packs may mix both
+forms: `1.0.0|2.0.0.0`.
 
 A string value is stored as an array of `fdf::String` (see [fdf::String](#fdfstring)).
 
@@ -94,12 +99,12 @@ root->ForEach<fdf::ForEachFlags::Recursive>([](const fdf::Entry& e)
 Entry* Emplace(std::string_view key);    // add a child, returns it ("" for array items)
 Entry* AddChild(UniqueEntryPtr& e);      // adopt an existing node
 
-void SetValue(value);                    // bool, integer, float, string, Timestamp...
+void SetValue(value);                    // bool, integer, float, string, Version, Timestamp...
                                          // std::span for a pack OR you could just GetValue() and
                                          // edit each member separately. (Can't change member count) 
 bool SetIdentifier(std::string_view);
 void SetType(Type);
-void Resize(uint32_t);
+void Resize(uint32_t);                   // grow/shrink a bool/int/uint/float/version/string pack; tail zero/empty
 
 bool RemoveChild(child | key | index);
 bool ClearChildren();

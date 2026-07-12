@@ -390,8 +390,8 @@ namespace fdf::detail
 
             if(Entry* entry = e->GetChild("appVersion"); CHECK(entry && entry->GetType() == Type::Version))
             {
-                auto val = entry->GetValue<uint64_t>();
-                CHECK(val.size() == 4 && val[0] == 1 && val[1] == 0 && val[2] == 0 && val[3] == 0);
+                auto val = entry->GetValue<Version>();
+                CHECK(val.size() == 1 && val[0].bHasRevision && val[0].major == 1 && val[0].minor == 0 && val[0].patch == 0 && val[0].revision == 0);
             }
 
             if(Entry* entry = e->GetChild("name"); CHECK(entry && entry->GetType() == Type::String))
@@ -585,6 +585,22 @@ namespace fdf::detail
                 CHECK(e->GetType() == Type::Bool && v.size() == 3 && v[0] == true && v[1] == false && v[2] == true);
             }
 
+            if(Entry* e = root->Emplace("versions"); CHECK(e))
+            {
+                const Version versions[2] =
+                {
+                    { .bHasRevision = false, .major = 1, .minor = 2, .patch = 3, .revision = 0 },
+                    { .bHasRevision = true,  .major = 4, .minor = 5, .patch = 6, .revision = 0 }
+                };
+                e->SetValue(std::span<const Version>(versions));
+                auto v = e->GetValue<Version>();
+                CHECK(e->GetType() == Type::Version && v.size() == 2);
+                CHECK(!v[0].bHasRevision && v[0].major == 1 && v[0].minor == 2 && v[0].patch == 3 && v[0].revision == 0);
+                CHECK(v[1].bHasRevision && v[1].major == 4 && v[1].minor == 5 && v[1].patch == 6 && v[1].revision == 0);
+                v[0].patch = 9;
+                CHECK(e->GetValue<Version>()[0].patch == 9);
+            }
+
             // Set from a Timestamp reference, decode it back
             if(Entry* e = root->Emplace("t"); CHECK(e))
             {
@@ -643,7 +659,7 @@ namespace fdf::detail
                 CHECK(root->GetChildCount() == count - 2);
             }
 
-            // Resize numeric scalar arrays: existing elements preserved, new ones zero-filled
+            // Resize packable scalar arrays: existing elements preserved, new ones zero-filled
             if(Entry* e = root->Emplace("vec"); CHECK(e))
             {
                 int64_t init[2] = {10, 20};
@@ -656,6 +672,11 @@ namespace fdf::detail
                 e->Resize(1);
                 auto shrunk = e->GetValue<int64_t>();
                 CHECK(shrunk.size() == 1 && shrunk[0] == 10);
+
+                // grow back into freed slack: reuse path, no realloc
+                e->Resize(3);
+                auto regrown = e->GetValue<int64_t>();
+                CHECK(regrown.size() == 3 && regrown[0] == 10 && regrown[1] == 0 && regrown[2] == 0);
             }
 
             if(Entry* e = root->Emplace("flags"); CHECK(e))
@@ -664,6 +685,76 @@ namespace fdf::detail
                 e->Resize(3);
                 auto v = e->GetValue<bool>();
                 CHECK(v.size() == 3 && v[0] == true && v[1] == false && v[2] == false);
+            }
+
+            // Version rides the flat path (construct_at into the slack, no ownership)
+            if(Entry* e = root->Emplace("vers"); CHECK(e))
+            {
+                const Version vs[2] =
+                {
+                    { .bHasRevision = false, .major = 1, .minor = 2, .patch = 3, .revision = 0 },
+                    { .bHasRevision = true,  .major = 4, .minor = 5, .patch = 6, .revision = 7 }
+                };
+                e->SetValue(std::span<const Version>(vs));
+                e->Resize(3);
+                auto grown = e->GetValue<Version>();
+                CHECK(grown.size() == 3 && grown[0].major == 1 && grown[1].major == 4
+                    && grown[2].major == 0 && !grown[2].bHasRevision);
+                e->Resize(1);
+                CHECK(e->GetValue<Version>().size() == 1 && e->GetValue<Version>()[0].major == 1);
+
+                // revision without bHasRevision is normalized to 0 on ingest
+                e->SetValue(Version{ .bHasRevision = false, .major = 9, .minor = 0, .patch = 0, .revision = 42 });
+                CHECK(e->GetValue<Version>()[0].revision == 0);
+            }
+
+            // String elements own heap chunks: shrink frees the dropped ones, grow adds empties
+            if(Entry* e = root->Emplace("strs"); CHECK(e))
+            {
+                const std::string_view names[2] = { "alpha", "beta" };
+                e->SetValue(std::span<const std::string_view>(names));
+
+                e->Resize(4);
+                auto grown = e->GetValue<String>();
+                CHECK(grown.size() == 4 && grown[0] == "alpha" && grown[1] == "beta"
+                    && grown[2] == "" && grown[3] == "");
+
+                e->Resize(1);
+                auto shrunk = e->GetValue<String>();
+                CHECK(shrunk.size() == 1 && shrunk[0] == "alpha");
+
+                // reuse path after a shrink: destroyed slots get reconstructed empty
+                e->Resize(3);
+                auto regrown = e->GetValue<String>();
+                CHECK(regrown.size() == 3 && regrown[0] == "alpha" && regrown[1] == "" && regrown[2] == "");
+                e->GetValue<String>()[1] = "beta";
+                CHECK(e->GetValue<String>()[1] == "beta");
+            }
+
+            // SetType frees the payload and empties the entry; Resize must grow cleanly from no slab
+            if(Entry* e = root->Emplace("retyped"); CHECK(e))
+            {
+                int64_t nums[5] = { 1, 2, 3, 4, 5 };
+                e->SetValue(std::span(nums, 5));
+                e->SetType(Type::Bool);
+                e->Resize(3);
+                auto v = e->GetValue<bool>();
+                CHECK(e->GetType() == Type::Bool && v.size() == 3 && v[0] == false && v[1] == false && v[2] == false);
+            }
+
+            // Hex/Timestamp reject Resize: an empty component isn't valid hex or timestamp text
+            if(UniqueEntryPtr doc = ParseBuffer(std::string("h = 0xFF|0x80\nt = 2024-01-02|2024-03-04\n")))
+            {
+                if(Entry* h = doc->GetChild("h"); CHECK(h && h->GetType() == Type::Hex))
+                {
+                    h->Resize(4);
+                    CHECK(std::as_const(*h).GetValue<String>().size() == 2);   // unchanged, Resize was a no-op
+                }
+                if(Entry* t = doc->GetChild("t"); CHECK(t && t->GetType() == Type::Timestamp))
+                {
+                    t->Resize(4);
+                    CHECK(std::as_const(*t).GetValue<String>().size() == 2);
+                }
             }
         }
 
@@ -841,8 +932,6 @@ namespace fdf::detail
 
 
 
-        // Packs across the matrix: Int/UInt/Float/Bool/String/Hex/Timestamp, 2..N components, signs
-        // in every position, widening, string escapes, SetValue/round-trip, and malformed-input recovery
         static void PackTest()
         {
             auto checkInt = [](std::string_view src, std::initializer_list<int64_t> exp)
@@ -897,6 +986,19 @@ namespace fdf::detail
                 for(std::string_view x : exp)
                     CHECK_MSG(parts[i++] == x, src);
             };
+            auto checkVersions = [](std::string_view src, std::initializer_list<Version> exp)
+            {
+                UniqueEntryPtr root = ParseBuffer(std::format("v = {}\n", src));
+                Entry* e = root? root->GetChild("v") : nullptr;
+                if(!CHECK_MSG(e && e->GetType() == Type::Version, src))
+                    return;
+                const std::span<const Version> versions = e->GetValue<Version>();
+                if(!CHECK_MSG(versions.size() == exp.size(), src))
+                    return;
+                size_t i = 0;
+                for(const Version& version : exp)
+                    CHECK_MSG(versions[i++] == version, src);
+            };
 
             // Int: dimensions 2..5, negatives in leading / middle / trailing / all positions
             checkInt("1|2",         { 1, 2 });
@@ -929,6 +1031,17 @@ namespace fdf::detail
             // bool packs
             checkBool("true|false",       { true, false });
             checkBool("true|false|true",  { true, false, true });
+
+            checkVersions("1.2.3", {
+                { .bHasRevision = false, .major = 1, .minor = 2, .patch = 3, .revision = 0 }
+            });
+            checkVersions("1.2.3|4.5.6.0", {
+                { .bHasRevision = false, .major = 1, .minor = 2, .patch = 3, .revision = 0 },
+                { .bHasRevision = true, .major = 4, .minor = 5, .patch = 6, .revision = 0 }
+            });
+            checkVersions("2147483647.4294967295.4294967295.4294967295", {
+                { .bHasRevision = true, .major = 2147483647, .minor = 4294967295U, .patch = 4294967295U, .revision = 4294967295U }
+            });
 
             // UInt component beyond INT64_MAX keeps the whole pack unsigned
             if(UniqueEntryPtr root = ParseBuffer(std::string("v = 18446744073709551615|1\n")))
@@ -1001,6 +1114,17 @@ namespace fdf::detail
                             CHECK_MSG(pa[i] == pb[i], out);
                     }
                 }
+            }
+
+            for(std::string_view src : { "v = 1.2.3|4.5.6.0\n", "v = 2147483647.4294967295.4294967295.4294967295\n" })
+            {
+                UniqueEntryPtr root = ParseBuffer(src);
+                std::string out;
+                WriteBuffer<Style{ .bCommas = false }>(*root, out);
+                UniqueEntryPtr reparsed = ParseBuffer(out);
+                const Entry* a = root->GetChild("v");
+                const Entry* b = reparsed? reparsed->GetChild("v") : nullptr;
+                CHECK_MSG(a && b && SpanEqual(a->GetValue<Version>(), b->GetValue<Version>()), out);
             }
 
             // scalar accessors on a string pack fall back to the first component
@@ -1134,7 +1258,9 @@ namespace fdf::detail
                 { DiagnosticType::InvalidPack,      "bad = 1|\nok = 7\n" },                   // dangling '|'
                 { DiagnosticType::InvalidPack,      "bad = 1|\"a\"\nok = 7\n" },              // number/string mix
                 { DiagnosticType::InvalidPack,      "bad = null|null\nok = 7\n" },            // null has no pack form
-                { DiagnosticType::InvalidPack,      "bad = 1.0.0|2.0.0\nok = 7\n" },          // version has no pack form
+                { DiagnosticType::InvalidPack,      "bad = 1.0.0|2\nok = 7\n" },              // version/number mix
+                { DiagnosticType::InvalidNumber,    "bad = 2147483648.0.0\nok = 7\n" },       // major exceeds 31 bits
+                { DiagnosticType::InvalidNumber,    "bad = 1.4294967296.0\nok = 7\n" },       // component exceeds uint32
                 { DiagnosticType::InvalidPack,      "bad = 0xFF|1\nok = 7\n" },               // hex/number mix
                 { DiagnosticType::InvalidPack,      "bad = 0xFF|2024-12-24\nok = 7\n" },      // hex/timestamp mix
                 { DiagnosticType::InvalidPack,      "bad = 2024-12-24|\"a\"\nok = 7\n" },     // timestamp/string mix
@@ -1714,7 +1840,8 @@ namespace fdf::detail
                 case Type::Null:                      return true;
                 case Type::Bool:                      return SpanEqual(a.GetValue<bool>(),     b.GetValue<bool>());
                 case Type::Int:                       return SpanEqual(a.GetValue<int64_t>(),  b.GetValue<int64_t>());
-                case Type::UInt: case Type::Version:  return SpanEqual(a.GetValue<uint64_t>(), b.GetValue<uint64_t>());
+                case Type::UInt:                       return SpanEqual(a.GetValue<uint64_t>(), b.GetValue<uint64_t>());
+                case Type::Version:                    return SpanEqual(a.GetValue<Version>(),  b.GetValue<Version>());
                 case Type::Float:                     return SpanEqual(a.GetValue<double>(),   b.GetValue<double>());
                 case Type::String: case Type::Timestamp: return SpanEqual(a.GetValue<String>(), b.GetValue<String>());
                 case Type::Hex:
@@ -2117,6 +2244,46 @@ consteval bool ResizeProbe()
 }
 static_assert(ResizeProbe(), "consteval Resize preserves and zero-fills");
 
+consteval bool ResizeStringProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::NewEntry();
+    fdf::Entry* e = root->Emplace("v");
+    if(!e)
+        return false;
+    const std::string_view names[2] = { "alpha", "beta" };
+    e->SetValue(std::span<const std::string_view>(names));
+
+    e->Resize(4);
+    auto grown = e->GetValue<fdf::String>();
+    if(grown.size() != 4 || grown[0] != "alpha" || grown[1] != "beta" || grown[2] != "" || grown[3] != "")
+        return false;
+
+    e->Resize(1);
+    auto shrunk = e->GetValue<fdf::String>();
+    if(shrunk.size() != 1 || shrunk[0] != "alpha")
+        return false;
+
+    e->Resize(3);
+    auto regrown = e->GetValue<fdf::String>();
+    return regrown.size() == 3 && regrown[0] == "alpha" && regrown[1] == "" && regrown[2] == "";
+}
+static_assert(ResizeStringProbe(), "consteval Resize handles String-backed arrays");
+
+// SetType with no SetValue leaves the union pointing at the new type's member; a stricter
+// constexpr union read here would be ill-formed if ResetDataNull didn't run
+consteval bool ResizeAfterSetTypeProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::NewEntry();
+    fdf::Entry* e = root->Emplace("v");
+    if(!e)
+        return false;
+    e->SetType(fdf::Type::Version);
+    e->Resize(2);
+    auto v = e->GetValue<fdf::Version>();
+    return e->GetType() == fdf::Type::Version && v.size() == 2 && v[0].major == 0 && v[1].major == 0;
+}
+static_assert(ResizeAfterSetTypeProbe(), "consteval SetType then Resize keeps the union member active");
+
 // ----- ISO-8601 timestamp validation -----
 static_assert(fdf::detail::IsValidTimestamp("2024-12-24"),                "date");
 static_assert(fdf::detail::IsValidTimestamp("2024-02-29"),                "leap day");
@@ -2379,8 +2546,8 @@ consteval bool VersionProbe()
     const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
     if(!e || e->GetType() != fdf::Type::Version)
         return false;
-    auto v = e->GetValue<uint64_t>();
-    return v.size() == 3 && v[0] == 1 && v[1] == 2 && v[2] == 3;
+    auto v = e->GetValue<fdf::Version>();
+    return v.size() == 1 && !v[0].bHasRevision && v[0].major == 1 && v[0].minor == 2 && v[0].patch == 3 && v[0].revision == 0;
 }
 consteval bool TimestampProbe()
 {
@@ -2490,12 +2657,19 @@ consteval bool WriteCompositeProbe()
     root->Emplace("pos")->SetValue(std::span(xyz, 3));
     const std::string_view names[2] = { "ann", "bo" };
     root->Emplace("who")->SetValue(std::span<const std::string_view>(names));
+    const fdf::Version versions[2] =
+    {
+        { .bHasRevision = false, .major = 1, .minor = 2, .patch = 3, .revision = 0 },
+        { .bHasRevision = true, .major = 4, .minor = 5, .patch = 6, .revision = 0 }
+    };
+    root->Emplace("ver")->SetValue(std::span<const fdf::Version>(versions));
 
     std::string out;
     fdf::WriteBuffer<fdf::Style{}>(*root, out);
-    return ContainsAt(out, "res=1920|1080") && ContainsAt(out, "pos=1.0|2.5|3.0") && ContainsAt(out, "who=\"ann\"|\"bo\"");
+    return ContainsAt(out, "res=1920|1080") && ContainsAt(out, "pos=1.0|2.5|3.0")
+        && ContainsAt(out, "who=\"ann\"|\"bo\"") && ContainsAt(out, "ver=1.2.3|4.5.6.0");
 }
-static_assert(WriteCompositeProbe(), "consteval write multidim int/float/string packs");
+static_assert(WriteCompositeProbe(), "consteval write numeric/string/version packs");
 
 // SetValue/GetValue round-trips exercised in a constant-evaluated context. Mirrors
 // ValueTest; covers the consteval storage path the runtime tests cannot reach
@@ -2521,6 +2695,13 @@ consteval bool ValueRoundTripProbe()
     fdf::Entry* b = root->Emplace("b");
     b->SetValue(true);
     if(b->GetType() != fdf::Type::Bool || b->GetValue<bool>()[0] != true)
+        return false;
+
+    fdf::Entry* v = root->Emplace("v");
+    const fdf::Version version{ .bHasRevision = true, .major = 1, .minor = 2, .patch = 3, .revision = 0 };
+    v->SetValue(version);
+    const std::span<const fdf::Version> versionValue = v->GetValue<fdf::Version>();
+    if(v->GetType() != fdf::Type::Version || versionValue.size() != 1 || versionValue[0] != version)
         return false;
 
     fdf::Entry* s = root->Emplace("s");

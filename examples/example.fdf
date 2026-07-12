@@ -5,6 +5,7 @@
 
 // Scalars
 appVersion=1.0.0.0   // version
+supportedVersions=1.0.0|1.1.0.0  // 3 and 4 component versions can mix
 name="MyGame"        // string
 name2='MyGame2'      // single or double quotes both work
 enabled1=true        // bool

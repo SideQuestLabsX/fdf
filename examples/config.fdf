@@ -4,6 +4,7 @@
 
 appName    = "MyGame"
 appVersion = 1.4.2.0
+compatibleVersions = 1.4.0|1.4.1|1.4.1.1
 lastOpened = 2024-12-24T15:30:00
 
 graphics

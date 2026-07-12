@@ -6,6 +6,7 @@ projects
         type="staticLibrary"
         name="fdf"
         ver=0.1.0
+        compatibleVersions=0.1.0|0.1.1.0
         language="C++"
         languageVersion=23
         dependencies=null
