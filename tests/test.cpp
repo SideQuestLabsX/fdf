@@ -89,6 +89,7 @@ namespace fdf::detail
 namespace fdf::test
 {
     inline int g_checks = 0;
+    inline bool g_bStress = false;
     inline int g_failed = 0;
     inline int g_caseChecks = 0;
     inline int g_caseFailed = 0;
@@ -1684,9 +1685,11 @@ namespace fdf::detail
                 CHECK(!root->GetChild("d") || root->GetChild("d")->GetType() != Type::Float);
 
             // Randomized fuzz: normals + subnormals through the full write/parse pipeline
+            const int randomCount = test::g_bStress? 300000 : 30000;
+            const int subnormalCount = test::g_bStress? 100000 : 10000;
             std::mt19937_64 rng(0xF0F0CABA);
             int fuzzFails = 0;
-            for(int i = 0; i < 300000; i++)
+            for(int i = 0; i < randomCount; i++)
             {
                 double x = std::bit_cast<double>(rng());
                 if(std::isnan(x) || std::isinf(x))
@@ -1694,7 +1697,7 @@ namespace fdf::detail
                 if(!roundTrip(x) && ++fuzzFails <= 5)
                     CHECK_MSG(false, std::format("fuzz {:.17g}", x));
             }
-            for(int i = 0; i < 100000; i++)
+            for(int i = 0; i < subnormalCount; i++)
             {
                 uint64_t b = rng() & ((1ull << 52) - 1);
                 if((rng() & 1) != 0)
@@ -2817,9 +2820,15 @@ static_assert(ExtractComment<COMMENT_SAMPLE>() == "TestComment", "consteval comm
 
 
 
-int main()
+int main(int argc, char** argv)
 {
     using namespace fdf::detail;
+
+    for(int i = 1; i < argc; i++)
+    {
+        if(std::string_view(argv[i]) == "--stress")
+            fdf::test::g_bStress = true;
+    }
 
     std::filesystem::path currentDesignFile = FDF_ROOT_DIRECTORY "/examples/example.fdf";
     std::filesystem::path examplesDir = FDF_ROOT_DIRECTORY "/examples";   // genuine references
@@ -2863,7 +2872,7 @@ int main()
     constexpr std::string_view separator = "--------------------------------------------------\n";
 
     using fdf::test::RunCase;
-    std::print("Running suite -- Found {} files\n{}", filesToTest.size(), separator);
+    std::print("Running suite{} -- Found {} files\n{}", fdf::test::g_bStress? " (stress)" : "", filesToTest.size(), separator);
 
     RunCase("ParseTest",           Test::ParseTest);
     RunCase("ReadTest",            Test::ReadTest);
