@@ -15,5 +15,6 @@ format and the C++ API around it.
 - [Styling](Styling.md) how documents get written back out
 - [Diagnostics](Diagnostics.md) what happens on a parse error
 - [Building](Building.md) requirements and build options
+- [FAQ](FAQ.md) common questions, quick answers
 
 For real files to copy from, see [`../examples/`](../examples/README.md).
