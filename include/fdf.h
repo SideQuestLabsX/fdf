@@ -151,6 +151,7 @@ FDF_EXPORT namespace fdf
         InvalidPack,         // malformed pack: dangling '|' or a non-widenable component mix
         InvalidTimestamp,
         InvalidToken,        // generic lexer failure with no more specific reason
+        InvalidUtf8,         // non-fatal, bytes still pass through
         InputTooLarge,       // buffer would overflow the 32-bit offsets, refused before parsing
     };
 
@@ -195,6 +196,50 @@ namespace fdf::detail
     inline constexpr auto UINT16_MAX_VALUE = std::numeric_limits<uint16_t>::max();
     inline constexpr auto UINT32_MAX_VALUE = std::numeric_limits<uint32_t>::max();
     inline constexpr auto UINT64_MAX_VALUE = std::numeric_limits<uint64_t>::max();
+
+    // Returns offset of the first ill-formed byte, or size() if all valid
+    // Rejects overlong, surrogates (U+D800-U+DFFF), and > U+10FFFF
+    [[nodiscard]] constexpr size_t Utf8FirstInvalidByte(std::string_view s) noexcept
+    {
+        const size_t n = s.size();
+        size_t i = 0;
+        while(i < n)
+        {
+            const uint8_t b0 = static_cast<uint8_t>(s[i]);
+            if(b0 < 0x80)
+            {
+                i++;
+                continue;
+            }
+
+            size_t extra = 0;
+            uint8_t lo = 0x80, hi = 0xBF;  // second-byte bounds, narrowed by lead byte
+            if(b0 >= 0xC2 && b0 <= 0xDF)       extra = 1;
+            else if(b0 == 0xE0)              { extra = 2; lo = 0xA0; }  // else overlong
+            else if(b0 >= 0xE1 && b0 <= 0xEC)  extra = 2;
+            else if(b0 == 0xED)              { extra = 2; hi = 0x9F; }  // else surrogate
+            else if(b0 >= 0xEE && b0 <= 0xEF)  extra = 2;
+            else if(b0 == 0xF0)              { extra = 3; lo = 0x90; }  // else overlong
+            else if(b0 >= 0xF1 && b0 <= 0xF3)  extra = 3;
+            else if(b0 == 0xF4)              { extra = 3; hi = 0x8F; }  // else > U+10FFFF
+            else
+                return i;  // 0xC0/0xC1, 0xF5-0xFF, stray continuation
+
+            if(i + extra >= n)
+                return i;
+
+            if(const uint8_t c1 = static_cast<uint8_t>(s[i + 1]); c1 < lo || c1 > hi)
+                return i;
+            for(size_t k = 2; k <= extra; k++)
+            {
+                const uint8_t c = static_cast<uint8_t>(s[i + k]);
+                if(c < 0x80 || c > 0xBF)
+                    return i;
+            }
+            i += extra + 1;
+        }
+        return n;
+    }
 }
 
 
@@ -646,6 +691,7 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr bool contains(std::string_view s)    const noexcept  { return View().contains(s); }
         [[nodiscard]] constexpr bool contains(char c)                const noexcept  { return View().contains(c); }
         [[nodiscard]] constexpr int  compare(std::string_view s)     const noexcept  { return View().compare(s); }
+        [[nodiscard]] constexpr bool IsValidUtf8()                   const noexcept  { return detail::Utf8FirstInvalidByte(View()) == size(); }
 
         // Returns a view into this block, dangles on the next mutation
         [[nodiscard]] constexpr std::string_view substr(size_t pos = 0, size_t count = npos) const noexcept
@@ -2179,6 +2225,11 @@ namespace fdf::detail
     FDF_EXPORT_INTERNAL [[nodiscard]] constexpr bool IsValidTimestamp(std::string_view ts) noexcept
     {
         return Timestamp::FromText(ts).IsValid();
+    }
+
+    FDF_EXPORT_INTERNAL [[nodiscard]] constexpr bool IsValidUtf8(std::string_view s) noexcept
+    {
+        return detail::Utf8FirstInvalidByte(s) == s.size();
     }
 }
 
@@ -4855,6 +4906,13 @@ namespace fdf::detail
            static_cast<uint8_t>(content[1]) == 0xBB &&
            static_cast<uint8_t>(content[2]) == 0xBF)
             content = content.substr(3);
+
+        // Bytes pass through untouched, warn when not valid UTF-8
+        if constexpr(!std::is_null_pointer_v<std::remove_cvref_t<decltype(DIAGNOSTIC_CALLBACK)>>)
+        {
+            if(const size_t badAt = detail::Utf8FirstInvalidByte(content); badAt != content.size())
+                DIAGNOSTIC_CALLBACK(Diagnostic{ DiagnosticSeverity::Warning, DiagnosticType::InvalidUtf8, {}, 0, 0, static_cast<uint32_t>(badAt) });
+        }
 
         Tokenizer tokenizer(content);
         #if !FDF_NO_COMMENTS
