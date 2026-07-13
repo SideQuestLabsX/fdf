@@ -13,6 +13,9 @@
 #if !defined(FDF_EXTENDED_NO_COMMENT_IDENTIFIERS)
     #define FDF_EXTENDED_NO_COMMENT_IDENTIFIERS false
 #endif
+#if !defined(FDF_DISABLE_SLAB_ALLOCATOR)
+    #define FDF_DISABLE_SLAB_ALLOCATOR false
+#endif
 #if FDF_EXTENDED_NO_COMMENT_IDENTIFIERS && !FDF_NO_COMMENTS
     #warning "FDF_EXTENDED_NO_COMMENT_IDENTIFIERS has no effect unless FDF_NO_COMMENTS is enabled"
 #endif
@@ -2390,6 +2393,13 @@ namespace fdf::detail
         // size = the bucket actually granted (>= request), or the exact request for the heap fallback
         [[nodiscard]] static AllocationResult AllocateAtLeast(size_t size) noexcept
         {
+            if constexpr(FDF_DISABLE_SLAB_ALLOCATOR)
+            {
+                void* p = ::operator new(size, std::nothrow);
+                assert(p && "Allocation shouldn't fail");
+                return { p, size };
+            }
+
             if(size > MAX_BUCKET)
             {
                 void* p = ::operator new(size, std::nothrow);
@@ -2415,6 +2425,12 @@ namespace fdf::detail
 
         static bool Deallocate(void* p, size_t size) noexcept
         {
+            if constexpr(FDF_DISABLE_SLAB_ALLOCATOR)
+            {
+                ::operator delete(p);
+                return true;
+            }
+
             if(size > MAX_BUCKET)
             {
                 ::operator delete(p);
@@ -2438,7 +2454,13 @@ namespace fdf::detail
         template<size_t size>
         [[nodiscard]] static void* Allocate() noexcept
         {
-            if constexpr(BucketFor(size) <= MAX_BUCKET)
+            if constexpr(FDF_DISABLE_SLAB_ALLOCATOR)
+            {
+                void* p = ::operator new(size, std::nothrow);
+                assert(p && "Allocation shouldn't fail");
+                return p;
+            }
+            else if constexpr(BucketFor(size) <= MAX_BUCKET)
                 return SlabFor<BucketFor(size)>().Allocate();
             else
             {
@@ -2451,7 +2473,12 @@ namespace fdf::detail
         template<size_t size>
         static bool Deallocate(void* p) noexcept
         {
-            if constexpr(BucketFor(size) <= MAX_BUCKET)
+            if constexpr(FDF_DISABLE_SLAB_ALLOCATOR)
+            {
+                ::operator delete(p);
+                return true;
+            }
+            else if constexpr(BucketFor(size) <= MAX_BUCKET)
                 return SlabFor<BucketFor(size)>().Deallocate(p);
             else
             {
@@ -4722,7 +4749,10 @@ namespace fdf::detail
         }
         else
         {
-            return UniqueEntryPtr(new(GlobalAllocator::ENTRY_ALLOCATOR.Allocate()) Entry{std::forward<Args>(args)...});
+            if constexpr(FDF_DISABLE_SLAB_ALLOCATOR)
+                return UniqueEntryPtr(new(GlobalAllocator::Allocate<sizeof(Entry)>()) Entry{std::forward<Args>(args)...});
+            else
+                return UniqueEntryPtr(new(GlobalAllocator::ENTRY_ALLOCATOR.Allocate()) Entry{std::forward<Args>(args)...});
         }
     }
 
@@ -4738,7 +4768,10 @@ namespace fdf::detail
             if(e)
             {
                 e->~Entry();
-                (void)GlobalAllocator::ENTRY_ALLOCATOR.Deallocate(e);
+                if constexpr(FDF_DISABLE_SLAB_ALLOCATOR)
+                    (void)GlobalAllocator::Deallocate<sizeof(Entry)>(e);
+                else
+                    (void)GlobalAllocator::ENTRY_ALLOCATOR.Deallocate(e);
             }
         }
     }

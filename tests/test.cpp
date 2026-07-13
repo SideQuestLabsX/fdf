@@ -2023,7 +2023,8 @@ namespace fdf::detail
                 Alloc::AllocationResult r = Alloc::AllocateAtLeast(request);
                 if(!CHECK_MSG(r.ptr != nullptr, std::format("request {}", request)))
                     return;
-                CHECK_MSG(r.size == expected, std::format("request {} -> granted {} (want {})", request, r.size, expected));
+                const size_t expectedGranted = FDF_DISABLE_SLAB_ALLOCATOR? request : expected;
+                CHECK_MSG(r.size == expectedGranted, std::format("request {} -> granted {} (want {})", request, r.size, expectedGranted));
                 std::memset(r.ptr, 0xAB, r.size);   // whole granted extent must be writable
                 Alloc::Deallocate(r.ptr, r.size);
             };

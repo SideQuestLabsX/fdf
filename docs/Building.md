@@ -38,3 +38,6 @@ All off by default
 | `FDF_USE_CPP_MODULES` | build the `fdf` module instead of header-only |
 | `FDF_NO_COMMENTS` | drop comment storage for a smaller node |
 | `FDF_EXTENDED_NO_COMMENT_IDENTIFIERS` | with comments off, allow 38-char identifiers instead of 30 |
+| `FDF_DISABLE_SLAB_ALLOCATOR` | use one `operator new` allocation per object; intended for sanitizer diagnostics |
+| `FDF_ENABLE_ASAN` | enable AddressSanitizer (includes leak detection on Linux) |
+| `FDF_ENABLE_LSAN` | enable standalone LeakSanitizer where supported |
