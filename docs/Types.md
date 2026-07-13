@@ -44,8 +44,10 @@ color channel set, or dimension tuple, an array for a list of distinct things.
 ## Strings
 
 - Either `"double"` or `'single'` quotes
-- Escapes like `\t`, `\n`, `\"`, `\'`, `\\`, and so on
-- UTF-8 content passes through as-is
+- Escapes like `\t`, `\n`, `\"`, `\'`, `\\`, and so on (`\u`/`\U` are kept literal, not decoded)
+- UTF-8 content passes through byte-for-byte, never normalized or re-escaped. A leading BOM gets
+  stripped, malformed UTF-8 still parses but you get a non-fatal `InvalidUtf8` warning. Want to
+  check up front, use `fdf::IsValidUtf8(sv)` or `String::IsValidUtf8()`
 
 ```fdf
 escaped1 = "She said, \"Hello.\""

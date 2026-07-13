@@ -15,3 +15,7 @@ auto root = fdf::ParseFile<&OnDiagnostic>("config.fdf");
 
 Because `DIAG` is a template argument, diagnostics work the same at runtime and at
 compile time.
+
+Some issues are warnings, not errors, they don't stop parsing or drop anything. Invalid
+UTF-8 is one: the bytes pass through untouched but you get a non-fatal `InvalidUtf8` warning
+whose `offset` points at the first bad byte.

@@ -864,6 +864,38 @@ namespace fdf::detail
                 CHECK(test::g_lastDiagnostic.type == DiagnosticType::UnterminatedString);
                 CHECK(test::g_lastDiagnostic.severity == DiagnosticSeverity::Fatal);
             }
+
+            // Invalid UTF-8 is non-fatal: warned with the bad-byte offset, bytes still pass through
+            {
+                test::g_lastDiagnostic = {};
+                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("s = \"\xFF\"\n");  // 0xFF at offset 5
+                if(CHECK(static_cast<bool>(root)))
+                {
+                    CHECK(root->GetChild("s") != nullptr);
+                    CHECK(test::g_lastDiagnostic.type == DiagnosticType::InvalidUtf8);
+                    CHECK(test::g_lastDiagnostic.severity == DiagnosticSeverity::Warning);
+                    CHECK(test::g_lastDiagnostic.offset == 5);
+                }
+            }
+
+            // Valid UTF-8 in a value raises no diagnostic
+            {
+                test::g_diagnostics = 0;
+                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("name = \"caf\xC3\xA9\"\n");
+                if(CHECK(static_cast<bool>(root)))
+                    CHECK(test::g_diagnostics == 0);
+            }
+
+            // A leading UTF-8 BOM is stripped, not folded into the first key
+            {
+                test::g_diagnostics = 0;
+                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("\xEF\xBB\xBFok = 1\n");
+                if(CHECK(static_cast<bool>(root)))
+                {
+                    CHECK(root->GetChild("ok") != nullptr);
+                    CHECK(test::g_diagnostics == 0);
+                }
+            }
         }
 
 
@@ -2311,6 +2343,24 @@ static_assert(!fdf::detail::IsValidTimestamp("25:00:00"),                 "hour 
 static_assert(!fdf::detail::IsValidTimestamp("15:60:00"),                 "minute 60");
 static_assert(!fdf::detail::IsValidTimestamp("15:30:99"),                 "second 99");
 static_assert(!fdf::detail::IsValidTimestamp("2024-12-24T15:30:00+25:00"),"offset hour 25");
+
+// ----- Strict UTF-8 validation (all escaped so the test file's own encoding can't skew it) -----
+static_assert( fdf::detail::IsValidUtf8(""),                     "empty");
+static_assert( fdf::detail::IsValidUtf8("plain ascii"),         "ascii");
+static_assert( fdf::detail::IsValidUtf8("caf\xC3\xA9"),         "2-byte");
+static_assert( fdf::detail::IsValidUtf8("\xE2\x82\xAC"),        "3-byte euro");
+static_assert( fdf::detail::IsValidUtf8("\xF0\x9F\x98\x80"),    "4-byte emoji");
+static_assert(!fdf::detail::IsValidUtf8("\x80"),                "stray continuation");
+static_assert(!fdf::detail::IsValidUtf8("\xC0\xAF"),            "overlong 2-byte");
+static_assert(!fdf::detail::IsValidUtf8("\xE0\x80\xAF"),        "overlong 3-byte");
+static_assert(!fdf::detail::IsValidUtf8("\xF0\x80\x80\xAF"),    "overlong 4-byte");
+static_assert(!fdf::detail::IsValidUtf8("\xED\xA0\x80"),        "surrogate U+D800");
+static_assert(!fdf::detail::IsValidUtf8("\xF4\x90\x80\x80"),    "above U+10FFFF");
+static_assert(!fdf::detail::IsValidUtf8("\xF5"),                "invalid lead F5");
+static_assert(!fdf::detail::IsValidUtf8("\xC2"),                "truncated 2-byte");
+static_assert(!fdf::detail::IsValidUtf8("\xE2\x82"),            "truncated 3-byte");
+static_assert(!fdf::detail::IsValidUtf8("\xC2\x20"),            "bad continuation");
+static_assert(fdf::detail::Utf8FirstInvalidByte("ok\xFF") == 2, "reports first bad offset");
 
 // ----- Timestamp struct: decode, epoch conversion, normalization (all consteval) -----
 static_assert(fdf::Timestamp::FromText("1970-01-01T00:00:00Z").ToUnixSeconds() == 0,             "epoch zero");

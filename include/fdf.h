@@ -199,7 +199,7 @@ namespace fdf::detail
 
     // Returns offset of the first ill-formed byte, or size() if all valid
     // Rejects overlong, surrogates (U+D800-U+DFFF), and > U+10FFFF
-    [[nodiscard]] constexpr size_t Utf8FirstInvalidByte(std::string_view s) noexcept
+    FDF_EXPORT_INTERNAL [[nodiscard]] constexpr size_t Utf8FirstInvalidByte(std::string_view s) noexcept
     {
         const size_t n = s.size();
         size_t i = 0;
@@ -4900,7 +4900,7 @@ namespace fdf::detail
             return nullptr;
         }
 
-        // Strip UTF-8 BOM if present
+        // Strip a leading UTF-8 BOM
         if(content.size() >= 3 &&
            static_cast<uint8_t>(content[0]) == 0xEF &&
            static_cast<uint8_t>(content[1]) == 0xBB &&
