@@ -1,7 +1,7 @@
 # fdf (Flexible Data Format)
 
 A text data format for the kind of thing you'd normally use JSON, YAML, TOML or INI for:
-config, asset metadata, and so on. Designed to be frequently read and modified by hand
+config, asset metadata and so on. Designed to be frequently read and modified by hand
 
 ```fdf
 name       = "MyGame"
@@ -45,8 +45,8 @@ Header-only, drop [`include/fdf.h`](include/fdf.h) on your include path and incl
 fdf::UniqueEntryPtr root = fdf::ParseFile("config.fdf");
 if(root)
 {
-    auto name  = root->GetChild("name")->GetValue<std::string_view>();
-    auto title = root->GetChild("window.title")->GetValue<std::string_view>();
+    auto name  = root->GetChild("name")->GetValue<fdf::String>();
+    auto title = root->GetChild("window.title")->GetValue<fdf::String>();
 
     root->ForEach<fdf::ForEachFlags::Recursive>([](const fdf::Entry& e)
     {

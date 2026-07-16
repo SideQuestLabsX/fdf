@@ -1,7 +1,8 @@
 # Styling
 
-`WriteFile` / `WriteBuffer` take a compile-time `fdf::Style`. The defaults are readable
-and keep diffs small. Pass a designated initializer to change just what you want, like
+`WriteFile` and `WriteBuffer` take a compile-time `fdf::Style`. The defaults are readable
+and keep diffs small. Use a designated initializer to change individual fields, for example:
+
 `WriteFile<fdf::Style{ .bCommas = false }>(root, "out.fdf")`
 
 | Field | Default | Effect |
@@ -20,4 +21,4 @@ and keep diffs small. Pass a designated initializer to change just what you want
 | `bUseNilInsteadOfNull` | `false` | emit `nil` instead of `null` |
 | `bAlwaysUseDoubleQuoteForStrings` | `false` | force `"` quoting |
 
-The `STYLE` is a template argument, so it's all resolved at compile time.
+`STYLE` is a template argument, so a style can't be picked at runtime.

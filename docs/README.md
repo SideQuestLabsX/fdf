@@ -11,7 +11,7 @@ format and the C++ API around it.
 
 ### The library
 
-- [API](API.md) parsing, reading values, walking, editing, and combining trees
+- [API](API.md) parsing, reading values, walking, editing and combining trees
 - [Styling](Styling.md) how documents get written back out
 - [Diagnostics](Diagnostics.md) what happens on a parse error
 - [Building](Building.md) requirements and build options

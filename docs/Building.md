@@ -1,9 +1,8 @@
 # Building
 
-The library is header only. You can copy [`fdf.h`](../include/fdf.h) into your project and include it.
-It doesn't require an implementation .cpp file.
+The library is header only. Copy [`fdf.h`](../include/fdf.h) into your project and include it.
 
-If you prefer you can also use CMake and optionally build C++ as module:
+CMake can also consume the header directly or build the optional C++ module:
 
 ```cmake
 include(FetchContent)
@@ -31,7 +30,7 @@ ctest --test-dir build --verbose
 
 ## Options
 
-All off by default
+(All off by default)
 
 | Option | What it does |
 |--------|--------------|

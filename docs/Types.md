@@ -11,43 +11,45 @@
 | String | `"text"`, `'text'` | single or double quotes |
 | Hex | `0xFF5733` | `0x`/`0X` prefix marks it as hex |
 | Version | `1.0.0`, `1.0.0.0` | three- or four-component dotted numeric version |
-| Timestamp | `2024-12-24T15:30:00`, `2024-12-24`, `15:30:00` | ISO-8601 date, time, or both |
+| Timestamp | `2024-12-24T15:30:00`, `2024-12-24`, `15:30:00` | ISO-8601 date, time or both |
 | Null / Nil | `null`, `nil` | absence of a value, `nil` is an alias of `null` |
+
+Timestamp dates may use calendar (`2024-12-24`), ordinal (`2024-359`), or ISO week
+(`2024-W52-2`) notation. Each form can include a time and zone. Week 53 is only valid in
+years that contain it.
 
 ## Packs
 
-Numbers, bools, strings, hex, versions, or timestamps joined with `|` form a pack: one atomic value with N
-uniform components. All components must share a type. They can implicitly widen from int to float for example,
-but still must be a single type. A mix that can't widen, like `1|true` or `1|"a"`, is an error.
+Numbers, bools, strings, hex, versions or timestamps joined with `|` form a pack: one atomic value with N
+uniform components. All components must share a type. Integers can widen to floats, but a mix with no common
+type, such as `1|true` or `1|"a"`, is an error.
 
 ```fdf
-resolution = 1920|1080             // 2 components
-scale      = 1.0|1.0|1.0           // 3 components
-gradient   = 1|50|10|1             // 4 components
-five       = 1|2|3|4|5             // 5 components
+resolution = 1920|1080             // one value, two components
+scale      = 1.0|1.0|1.0
+gradient   = 1|50|10|1
+five       = 1|2|3|4|5             // no fixed component cap
 offset     = 0.5|-0.5|1.0          // widening is fine
-flags      = true|false            // bool pack
-tags       = "config"|"a|b"|'x'    // string pack, a '|' inside quotes is literal
-channels   = 0xFF|0x80|0x40        // hex pack
+flags      = true|false
+tags       = "config"|"a|b"|'x'    // a '|' inside quotes is literal
+channels   = 0xFF|0x80|0x40
 versions   = 1.0.0|1.1.0.0         // 3 and 4 components can mix
-window     = 2024-12-24|2024-12-31 // timestamp pack
+window     = 2024-12-24|2024-12-31
 ```
 
 Version components are `uint32_t`, except `major` is limited to `0..2147483647`.
 `1.2.3` and `1.2.3.0` stay distinct.
 
-A pack is not an array. A pack is a single value with N interchangeable components and no element
-identity: no per-component comments, no nesting, no `Entry` per component. An array (`[ ]`) is a
-container of entries, each an addressable node in its own right. Use a pack for a coordinate,
-color channel set, or dimension tuple, an array for a list of distinct things.
+Pack components have no comments, nesting or separate `Entry` nodes. Use packs for things
+like coordinates or color channels, and arrays for lists of distinct values.
 
 ## Strings
 
 - Either `"double"` or `'single'` quotes
 - Escapes like `\t`, `\n`, `\"`, `\'`, `\\`, and so on (`\u`/`\U` are kept literal, not decoded)
-- UTF-8 content passes through byte-for-byte, never normalized or re-escaped. A leading BOM gets
-  stripped, malformed UTF-8 still parses but you get a non-fatal `InvalidUtf8` warning. Want to
-  check up front, use `fdf::IsValidUtf8(sv)` or `String::IsValidUtf8()`
+- UTF-8 content passes through byte-for-byte without normalization or re-escaping. The parser strips
+  a leading BOM. Malformed UTF-8 still parses and produces a non-fatal `InvalidUtf8` warning. Check
+  input with `fdf::IsValidUtf8(sv)` or `String::IsValidUtf8()`
 
 ```fdf
 escaped1 = "She said, \"Hello.\""

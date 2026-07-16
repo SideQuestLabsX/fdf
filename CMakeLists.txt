@@ -39,8 +39,6 @@ if(FDF_USE_CPP_MODULES)
     target_compile_definitions(fdf PUBLIC FDF_EXTENDED_NO_COMMENT_IDENTIFIERS=$<IF:$<BOOL:${FDF_EXTENDED_NO_COMMENT_IDENTIFIERS}>,true,false>)
     target_compile_definitions(fdf PUBLIC FDF_DISABLE_SLAB_ALLOCATOR=$<IF:$<BOOL:${FDF_DISABLE_SLAB_ALLOCATOR}>,true,false>)
 
-    target_compile_definitions(fdf PUBLIC FDF_ROOT_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}")
-    target_compile_definitions(fdf PUBLIC FDF_TEST_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/tests")
 else()
     add_library(fdf INTERFACE)
     target_include_directories(fdf INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -51,8 +49,6 @@ else()
     target_compile_definitions(fdf INTERFACE FDF_EXTENDED_NO_COMMENT_IDENTIFIERS=$<IF:$<BOOL:${FDF_EXTENDED_NO_COMMENT_IDENTIFIERS}>,true,false>)
     target_compile_definitions(fdf INTERFACE FDF_DISABLE_SLAB_ALLOCATOR=$<IF:$<BOOL:${FDF_DISABLE_SLAB_ALLOCATOR}>,true,false>)
 
-    target_compile_definitions(fdf INTERFACE FDF_ROOT_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}")
-    target_compile_definitions(fdf INTERFACE FDF_TEST_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/tests")
 endif()
 
 

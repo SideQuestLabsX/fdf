@@ -44,7 +44,7 @@
 
 namespace fdf::detail
 {
-    // Order must match TokenType in fdf.h
+    // order matches TokenType in fdf.h
     constexpr std::string_view TOKEN_TYPE_TO_STRING[] =
     {
         "NonExisting     ",
@@ -66,7 +66,7 @@ namespace fdf::detail
         "Atom            ",
     };
 
-    // Order must match Type in fdf.h
+    // order matches Type in fdf.h
     constexpr std::string_view ENTRY_TYPE_TO_STRING[] =
     {
         "Map      ",
@@ -95,7 +95,7 @@ namespace fdf::test
     inline int g_caseFailed = 0;
     inline std::vector<std::string> g_failedCases;
 
-    // On a tty the RUN line is rewritten in place; captured logs get the completion line only
+    // a TTY rewrites the RUN line while captured logs print only the result
 #if defined(_WIN32)
     inline const bool g_bIsTty = _isatty(_fileno(stdout)) != 0;
 #else
@@ -124,6 +124,14 @@ inline void CountDiagnostics(const fdf::Diagnostic& diagnostic) noexcept
 {
     const std::span<const fdf::String> parts = e.GetValue<fdf::String>();
     return parts.empty()? std::string_view{} : std::string_view(parts[0]);
+}
+
+[[nodiscard]] constexpr bool FirstIntEquals(const fdf::Entry* e, int64_t expected) noexcept
+{
+    if(!e)
+        return false;
+    const auto values = e->GetValue<int64_t>();
+    return values.size() == 1 && values[0] == expected;
 }
 
 namespace fdf::test
@@ -207,7 +215,9 @@ namespace fdf::detail
         TestDirectories(const std::filesystem::path& file)
         {
             inputFile = file.generic_string();
-            outputFile = FDF_OUTPUT_DIRECTORY "/" + file.stem().generic_string();
+            outputFile = FDF_OUTPUT_DIRECTORY;
+            outputFile.push_back('/');
+            outputFile.append(file.stem().generic_string());
 
             tokenizedFile = outputFile + "-Tokenized.txt";
             entriesFile = outputFile + "-Entries.txt";
@@ -235,7 +245,14 @@ namespace fdf::detail
             if(!iFile || !oFile)
                 return false;
 
-            std::string content((std::istreambuf_iterator<char>(iFile)), std::istreambuf_iterator<char>());
+            iFile.seekg(0, std::ios::end);
+            const std::streampos fileSize = iFile.tellg();
+            if(fileSize < 0 || static_cast<uintmax_t>(fileSize) > String::max_size())
+                return false;
+            String content(static_cast<size_t>(fileSize), '\0');
+            iFile.seekg(0, std::ios::beg);
+            if(!content.empty() && !iFile.read(content.data(), static_cast<std::streamsize>(content.size())))
+                return false;
             Tokenizer tokenizer = Tokenizer(content);
 
             std::vector<Token> tokens;
@@ -252,7 +269,7 @@ namespace fdf::detail
                     break;
             }
 
-            std::string buffer;
+            String buffer;
             auto addToBuffer = [&buffer](std::string_view value)
             {
                 for(char c : value)
@@ -272,7 +289,7 @@ namespace fdf::detail
                 tokenIndex++;
             }
 
-            oFile << buffer;
+            oFile << std::string_view(buffer);
             return static_cast<bool>(oFile);
         }
 
@@ -282,7 +299,7 @@ namespace fdf::detail
             if(!file)
                 return false;
 
-            std::string buffer;
+            String buffer;
             auto addToBuffer = [&buffer](std::string_view value)
             {
                 for(char c : value)
@@ -294,14 +311,14 @@ namespace fdf::detail
                 }
             };
 
-            std::string temp;
+            String temp;
             e->ForEach<ForEachFlags::Recursive | ForEachFlags::Group>([&](const Entry& entry)
             {
-                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}--Comment={}", "", 4 * entry.CalculateDepth(), ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.GetType())], entry.GetChildCount(), entry.GetFullIdentifier(), entry.DataToView(temp), std::string_view(entry.GetComment())));
+                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}--Comment={}", "", 4 * entry.CalculateDepth(), ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.GetType())], entry.GetChildCount(), std::string_view(entry.GetFullIdentifier()), entry.DataToView(temp), std::string_view(entry.GetComment())));
                 buffer.push_back('\n');
             });
 
-            file << buffer;
+            file << std::string_view(buffer);
             return static_cast<bool>(file);
         }
 
@@ -327,7 +344,9 @@ namespace fdf::detail
                 auto endTime = std::chrono::high_resolution_clock::now();
                 auto duration = duration_cast<std::chrono::nanoseconds>(endTime - startTime);
 
-                std::string durationString = std::format("{:.6f}ms", static_cast<double>(duration.count()) / 1'000'000.0);
+                String durationString;
+                std::format_to(std::back_inserter(durationString), "{:.6f}ms",
+                    static_cast<double>(duration.count()) / 1'000'000.0);
                 std::print(" -- Result: {:<7} -- Took: {:<9}", e? "SUCCESS" : "FAIL", durationString);
 
                 if(!output.empty())
@@ -351,10 +370,8 @@ namespace fdf::detail
 
 
 
-        // Structure + value assertions against an embedded document. The literal and its expected
-        // counts live side by side, so editing one forces editing the other (no coupling to a far
-        // external file). Exercises the same breadth as examples/example.fdf: every scalar type,
-        // packs, nested maps/arrays, and string escapes
+        // READ_DOC keeps structural expectations beside the fixture
+        // covers scalars, packs, containers and string escapes
         static constexpr std::string_view READ_DOC =
             "appVersion = 1.0.0.0\n"
             "name = \"MyGame\"\n"
@@ -507,12 +524,50 @@ namespace fdf::detail
                     CHECK(val.size() == 1 && val[0] == 815);
                 }
             }
+
+            const std::filesystem::path relativePath = "WriteRelative.fdf";
+            std::error_code ec;
+            std::filesystem::remove(relativePath, ec);
+            CHECK(!WriteFile(*root, relativePath, false));
+            CHECK(WriteFile(*root, relativePath, true));
+            CHECK(WriteFile(*root, relativePath, false));
+            CHECK(static_cast<bool>(ParseFile(relativePath)));
+            std::filesystem::remove(relativePath, ec);
+
+            const std::filesystem::path nestedDir = FDF_OUTPUT_DIRECTORY "/new/nested";
+            const std::filesystem::path nestedFile = nestedDir / "created.fdf";
+            std::filesystem::remove_all(FDF_OUTPUT_DIRECTORY "/new", ec);
+            CHECK(!WriteFile(*root, nestedFile, false));
+            CHECK(!std::filesystem::exists(nestedFile));
+            CHECK(WriteFile(*root, nestedFile, true));
+            CHECK(std::filesystem::is_regular_file(nestedFile));
+            CHECK(static_cast<bool>(ParseFile(nestedFile)));
+            CHECK(!WriteFile(*root, nestedDir, true));
+
+            const std::filesystem::path emptyFile = nestedDir / "empty.fdf";
+            { std::ofstream createEmpty(emptyFile, std::ios::binary); }
+            if(UniqueEntryPtr empty = ParseFile(emptyFile); CHECK(static_cast<bool>(empty)))
+                CHECK(empty->GetChildCount() == 0);
+
+            const std::filesystem::path combineFile = nestedDir / "combine.fdf";
+            {
+                std::ofstream file(combineFile, std::ios::binary);
+                file << "fromFile=7\r\nsection { nested=8 }\r\n";
+            }
+            UniqueEntryPtr combined = ParseBuffer("existing=6\n");
+            if(CHECK(combined && combined->ParseCombineFile(combineFile)))
+            {
+                CHECK(combined->GetChild("existing") && combined->GetChild("fromFile"));
+                if(Entry* nested = combined->GetChild("section.nested"); CHECK(nested))
+                    CHECK(FirstIntEquals(nested, 8));
+            }
+            std::filesystem::remove_all(FDF_OUTPUT_DIRECTORY "/new", ec);
         }
 
 
 
 
-        // SetValue/GetValue round-trips for every scalar and span overload, plus type tagging
+        // SetValue/GetValue scalar and span coverage
         static void ValueTest()
         {
             UniqueEntryPtr root = NewEntry();
@@ -621,7 +676,7 @@ namespace fdf::detail
             }
         }
 
-        // Exercises container growth, RemoveChild/OrphanChild index shifting, GetDirectChild(index)
+        // container growth, removal, orphaning and indexed lookup
         static void MutateTest()
         {
             UniqueEntryPtr root = NewEntry();
@@ -652,7 +707,7 @@ namespace fdf::detail
             CHECK(root->GetChild("k0") == nullptr);
             CHECK(root->GetChild("k19") != nullptr);
 
-            // Orphan keeps the node alive and detaches it from the parent
+            // Orphan detaches the node without destroying it
             if(UniqueEntryPtr orphan = root->OrphanChild("k10"); CHECK(static_cast<bool>(orphan)))
             {
                 CHECK(orphan->GetParent() == nullptr);
@@ -660,7 +715,33 @@ namespace fdf::detail
                 CHECK(root->GetChildCount() == count - 2);
             }
 
-            // Resize packable scalar arrays: existing elements preserved, new ones zero-filled
+            CHECK(root->ClearChildren());
+            CHECK(root->GetChildCount() == 0);
+            if(Entry* e = root->Emplace("afterClear"); CHECK(e))
+            {
+                e->SetValue(static_cast<int64_t>(42));
+                CHECK(root->GetDirectChild(0u) == e);
+            }
+
+            if(Entry* group = root->Emplace("group"); CHECK(group))
+            {
+                CHECK(group->Emplace("a"));
+                CHECK(group->Emplace("b"));
+                std::vector<UniqueEntryPtr> orphans = group->OrphanChildren();
+                CHECK(orphans.size() == 2 && !orphans[0]->GetParent() && !orphans[1]->GetParent());
+                CHECK(group->GetChildCount() == 0);
+                CHECK(group->Emplace("afterOrphan"));
+            }
+
+            // scalar storage must never be read as Entry**
+            if(Entry* scalar = root->Emplace("scalar"); CHECK(scalar))
+            {
+                scalar->SetValue(static_cast<int64_t>(7));
+                CHECK(scalar->OrphanChildren().empty());
+                CHECK(scalar->GetValue<int64_t>().size() == 1 && scalar->GetValue<int64_t>()[0] == 7);
+            }
+
+            // Resize preserves existing components and zero-fills new ones
             if(Entry* e = root->Emplace("vec"); CHECK(e))
             {
                 int64_t init[2] = {10, 20};
@@ -678,6 +759,12 @@ namespace fdf::detail
                 e->Resize(3);
                 auto regrown = e->GetValue<int64_t>();
                 CHECK(regrown.size() == 3 && regrown[0] == 10 && regrown[1] == 0 && regrown[2] == 0);
+
+                e->Resize(0);
+                CHECK(e->GetValue<int64_t>().empty());
+                e->Resize(2);
+                auto fromEmpty = e->GetValue<int64_t>();
+                CHECK(fromEmpty.size() == 2 && fromEmpty[0] == 0 && fromEmpty[1] == 0);
             }
 
             if(Entry* e = root->Emplace("flags"); CHECK(e))
@@ -730,9 +817,15 @@ namespace fdf::detail
                 CHECK(regrown.size() == 3 && regrown[0] == "alpha" && regrown[1] == "" && regrown[2] == "");
                 e->GetValue<String>()[1] = "beta";
                 CHECK(e->GetValue<String>()[1] == "beta");
+
+                e->Resize(0);
+                CHECK(e->GetValue<String>().empty());
+                e->Resize(2);
+                auto fromEmpty = e->GetValue<String>();
+                CHECK(fromEmpty.size() == 2 && fromEmpty[0] == "" && fromEmpty[1] == "");
             }
 
-            // SetType frees the payload and empties the entry; Resize must grow cleanly from no slab
+            // Resize can grow an empty payload after SetType
             if(Entry* e = root->Emplace("retyped"); CHECK(e))
             {
                 int64_t nums[5] = { 1, 2, 3, 4, 5 };
@@ -744,7 +837,7 @@ namespace fdf::detail
             }
 
             // Hex/Timestamp reject Resize: an empty component isn't valid hex or timestamp text
-            if(UniqueEntryPtr doc = ParseBuffer(std::string("h = 0xFF|0x80\nt = 2024-01-02|2024-03-04\n")))
+            if(UniqueEntryPtr doc = ParseBuffer("h = 0xFF|0x80\nt = 2024-01-02|2024-03-04\n"))
             {
                 if(Entry* h = doc->GetChild("h"); CHECK(h && h->GetType() == Type::Hex))
                 {
@@ -757,6 +850,257 @@ namespace fdf::detail
                     CHECK(std::as_const(*t).GetValue<String>().size() == 2);
                 }
             }
+
+            if(UniqueEntryPtr paths = ParseBuffer("tags [ \"a\", \"b\" ]\nplayers [ { name=\"p\" } ]\n"))
+            {
+                CHECK(paths->GetChild("tags.1")->GetFullIdentifier() == "tags.1");
+                CHECK(paths->GetChild("players.0.name")->GetFullIdentifier() == "players.0.name");
+            }
+
+            UniqueEntryPtr base = ParseBuffer("keep=1\nsection { old=2 }\n");
+            UniqueEntryPtr incoming = ParseBuffer("add=3\nsection { fresh=4 }\n");
+            if(CHECK(base && incoming && base->Combine(incoming)))
+            {
+                CHECK(!incoming);
+                CHECK(base->GetChild("keep") && base->GetChild("add"));
+                Entry* section = base->GetChild("section");
+                Entry* fresh = base->GetChild("section.fresh");
+                CHECK(section && fresh && fresh->GetParent() == section);
+                CHECK(base->GetChild("section.old") == nullptr);
+            }
+            UniqueEntryPtr empty;
+            CHECK(base && !base->Combine(empty));
+            CHECK(base && !base->ParseCombineBuffer("broken=\"unterminated"));
+        }
+
+
+
+
+        static void RegressionTest()
+        {
+            UniqueEntryPtr paths = NewEntry();
+            CHECK(paths->GetFullIdentifier().empty());
+            Entry* items = paths->Emplace("items");
+            if(CHECK(items))
+            {
+                items->SetValue(ArrayType{});
+                for(int64_t i = 0; i < 13; i++)
+                {
+                    Entry* child = items->Emplace("");
+                    CHECK(child);
+                    if(child)
+                        child->SetValue(i);
+                }
+
+                CHECK(items->GetFullIdentifier() == "items");
+                Entry* firstItem = items->GetDirectChild(0u);
+                Entry* lastItem = items->GetDirectChild(12u);
+                CHECK(firstItem && firstItem->GetFullIdentifier() == "items.0");
+                CHECK(lastItem && lastItem->GetFullIdentifier() == "items.12");
+                CHECK(paths->GetChild("items.12") == lastItem);
+                CHECK(paths->GetChild("items.4294967296") == nullptr);
+                CHECK(paths->GetChild("items.12x") == nullptr);
+                CHECK(paths->GetChild("items.") == nullptr);
+                CHECK(paths->GetChild("items..0") == nullptr);
+
+                Entry* elementMap = items->GetDirectChild(5u);
+                CHECK(elementMap);
+                if(elementMap)
+                {
+                    elementMap->SetValue(MapType{});
+                    Entry* values = elementMap->Emplace("values");
+                    CHECK(values);
+                    if(values)
+                    {
+                        values->SetValue(ArrayType{});
+                        Entry* first = values->Emplace("");
+                        Entry* second = values->Emplace("");
+                        CHECK(first && second);
+                        if(first && second)
+                        {
+                            first->SetValue(10);
+                            second->SetValue(20);
+                            CHECK(second->GetFullIdentifier() == "items.5.values.1");
+                        }
+                    }
+                    CHECK(elementMap->GetFullIdentifier() == "items.5");
+                }
+
+                UniqueEntryPtr detachedElement = items->OrphanChild(12u);
+                CHECK(detachedElement && detachedElement->GetParent() == nullptr);
+                CHECK(detachedElement && detachedElement->GetFullIdentifier().empty());
+            }
+
+            Entry* deep = paths->Emplace("a");
+            CHECK(deep);
+            if(deep)
+            {
+                deep->SetValue(MapType{});
+                deep = deep->Emplace("b");
+            }
+            if(deep)
+            {
+                deep->SetValue(MapType{});
+                deep = deep->Emplace("c");
+            }
+            if(deep)
+            {
+                deep->SetValue(MapType{});
+                deep = deep->Emplace("leaf");
+            }
+            CHECK(deep);
+            if(deep)
+            {
+                deep->SetValue(1);
+                CHECK(deep->GetFullIdentifier() == "a.b.c.leaf");
+            }
+
+            UniqueEntryPtr detachedNamed = paths->OrphanChild("a");
+            CHECK(detachedNamed && detachedNamed->GetFullIdentifier() == "a");
+            Entry* detachedLeaf = detachedNamed ? detachedNamed->GetChild("b.c.leaf") : nullptr;
+            CHECK(detachedLeaf && detachedLeaf->GetFullIdentifier() == "a.b.c.leaf");
+
+            // quote termination follows backslash parity
+            constexpr std::string_view escaped =
+                R"(one="a\"b")" "\n"
+                R"(two="a\\")" "\n"
+                R"(three="a\\\"b")" "\n"
+                R"(four="a\\\\")" "\n"
+                R"(five="a\\\\\"b")" "\n"
+                "after=1\n";
+            if(UniqueEntryPtr parsed = ParseBuffer(escaped); CHECK(static_cast<bool>(parsed)))
+            {
+                auto hasString = [&parsed](std::string_view identifier, std::string_view expected)
+                {
+                    Entry* child = parsed->GetChild(identifier);
+                    return child && FirstString(*child) == expected;
+                };
+                CHECK(hasString("one", "a\"b"));
+                CHECK(hasString("two", "a\\"));
+                CHECK(hasString("three", "a\\\"b"));
+                CHECK(hasString("four", "a\\\\"));
+                CHECK(hasString("five", "a\\\\\"b"));
+                Entry* after = parsed->GetChild("after");
+                CHECK(FirstIntEquals(after, 1));
+            }
+
+        #if !FDF_NO_COMMENTS
+            if(UniqueEntryPtr comments = ParseBuffer(
+                "/*a*/\na=1\n"
+                "/*a/b*/\nb=2\n"
+                "/**/\nc=3\n"
+                "/*trim */\nd=4\n"
+                "/*line\nnext\n*/\ne=5\n"); CHECK(static_cast<bool>(comments)))
+            {
+                auto commentIs = [&comments](std::string_view identifier, std::string_view expected)
+                {
+                    Entry* child = comments->GetChild(identifier);
+                    return child && child->GetComment() == expected;
+                };
+                CHECK(commentIs("a", "a"));
+                CHECK(commentIs("b", "a/b"));
+                CHECK(commentIs("c", ""));
+                CHECK(commentIs("d", "trim"));
+                CHECK(commentIs("e", "line\nnext"));
+            }
+
+            // CRLF input must not leak '\r' into single-line comment text or written output
+            if(UniqueEntryPtr crlf = ParseBuffer("a=1 // note\r\nb=2\r\n/*multi\r\nline*/\r\nc=3\r\n"); CHECK(static_cast<bool>(crlf)))
+            {
+                Entry* a = crlf->GetChild("a");
+                CHECK(a && a->GetComment() == "note");
+                String out = WriteBuffer<Style{ .bCommas = false }>(*crlf);
+                CHECK_MSG(out.contains("// note") && out.contains("// multi line"), out);
+                CHECK(!out.contains('\r'));
+            }
+
+            auto combinedComment = [](CommentCombineStrategy strategy, std::string_view existing, std::string_view incoming)
+            {
+                UniqueEntryPtr base = NewEntry();
+                UniqueEntryPtr other = NewEntry();
+                base->GetComment() = existing;
+                other->GetComment() = incoming;
+                Entry* a = base->Emplace("a");
+                Entry* b = other->Emplace("b");
+                if(!a || !b)
+                    return std::pair{false, String{}};
+                a->SetValue(1);
+                b->SetValue(2);
+                const bool bCombined = base->Combine(other, strategy);
+                return std::pair{bCombined && !other && base->GetChild("a") && base->GetChild("b"), base->GetComment()};
+            };
+            CHECK((combinedComment(CommentCombineStrategy::UseExisting, "old", "new") == std::pair{true, String("old")}));
+            CHECK((combinedComment(CommentCombineStrategy::UseNew, "old", "new") == std::pair{true, String("new")}));
+            CHECK((combinedComment(CommentCombineStrategy::UseNewIfExistingIsEmpty, "", "new") == std::pair{true, String("new")}));
+            CHECK((combinedComment(CommentCombineStrategy::UseNewIfExistingIsEmpty, "old", "new") == std::pair{true, String("old")}));
+            CHECK((combinedComment(CommentCombineStrategy::Merge, "old", "new") == std::pair{true, String("old\nnew")}));
+            CHECK((combinedComment(CommentCombineStrategy::Clear, "old", "new") == std::pair{true, String()}));
+        #endif
+
+            test::g_lastDiagnostic = {};
+            CHECK(static_cast<bool>(ParseBuffer<&CountDiagnostics>(
+                "s=\"first\nsecond\"\n"
+                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=1\n")));
+            CHECK(test::g_lastDiagnostic.line == 3 && test::g_lastDiagnostic.column == 1);
+
+            test::g_lastDiagnostic = {};
+            CHECK(static_cast<bool>(ParseBuffer<&CountDiagnostics>(
+                "/* first\nsecond */\n"
+                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=1\n")));
+            CHECK(test::g_lastDiagnostic.line == 3 && test::g_lastDiagnostic.column == 1);
+
+            UniqueEntryPtr left = NewEntry();
+            UniqueEntryPtr right = NewEntry();
+            left->SetValue(ArrayType{});
+            right->SetValue(ArrayType{});
+            Entry* leftValue = left->Emplace("");
+            Entry* rightValue1 = right->Emplace("");
+            Entry* rightValue2 = right->Emplace("");
+            CHECK(leftValue && rightValue1 && rightValue2);
+            if(leftValue && rightValue1 && rightValue2)
+            {
+                leftValue->SetValue(1);
+                rightValue1->SetValue(2);
+                rightValue2->SetValue(3);
+            }
+            if(CHECK(left->Combine(right)))
+            {
+                CHECK(!right && left->GetChildCount() == 3);
+                Entry* combined0 = left->GetDirectChild(0u);
+                Entry* combined1 = left->GetDirectChild(1u);
+                Entry* combined2 = left->GetDirectChild(2u);
+                CHECK(combined0 && combined1 && combined2);
+                CHECK(FirstIntEquals(combined0, 1));
+                CHECK(FirstIntEquals(combined1, 2));
+                CHECK(FirstIntEquals(combined2, 3));
+                for(Entry* child : left->GetChildren())
+                    CHECK(child->GetParent() == left.get());
+            }
+
+            UniqueEntryPtr map = ParseBuffer("stable=7\n");
+            UniqueEntryPtr incompatible = NewEntry();
+            incompatible->SetValue(ArrayType{});
+            Entry* incompatibleRaw = incompatible.get();
+            CHECK(!map->Combine(incompatible));
+            CHECK(incompatible.get() == incompatibleRaw && map->GetChild("stable"));
+            const uint32_t stableCount = map->GetChildCount();
+            CHECK(!map->ParseCombineBuffer("bad=\"unterminated"));
+            CHECK(map->GetChildCount() == stableCount && map->GetChild("stable"));
+
+            UniqueEntryPtr emptyMap = NewEntry();
+            CHECK(map->Combine(emptyMap));
+            CHECK(!emptyMap && map->GetChildCount() == stableCount);
+
+            String allocatedEmpty;
+            allocatedEmpty.reserve(32);
+            CHECK(allocatedEmpty.begin() == allocatedEmpty.end() && allocatedEmpty.data() != nullptr);
+            String movedEmpty = std::move(allocatedEmpty);
+            CHECK(allocatedEmpty.begin() == allocatedEmpty.end());
+            CHECK(movedEmpty.begin() == movedEmpty.end() && movedEmpty.data() != nullptr);
+            size_t iterations = 0;
+            for([[maybe_unused]] char c : movedEmpty)
+                iterations++;
+            CHECK(iterations == 0);
         }
 
 
@@ -792,7 +1136,7 @@ namespace fdf::detail
                 CHECK(v.size() == 1 && v[0] == 2);
             }
 
-            // Recovery inside a map must work, and identically whether single-line or multi-line
+            // map recovery is the same on one line or several
             auto checkMap = [](std::string_view src)
             {
                 UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(src);
@@ -840,6 +1184,13 @@ namespace fdf::detail
                 CHECK(test::g_sawAlreadyHasComment);
                 CHECK(root->GetChild("x") != nullptr);
             }
+
+            if(UniqueEntryPtr root = ParseBuffer("/*abc*/\nx=1\n"); CHECK(static_cast<bool>(root)))
+            {
+                Entry* x = root->GetChild("x");
+                CHECK(x && x->GetComment() == "abc");
+            }
+            CHECK(static_cast<bool>(ParseBuffer("//")));
         #endif
 
             // Diagnostic carries line / column / offset of the offending token
@@ -854,6 +1205,18 @@ namespace fdf::detail
                     CHECK(test::g_lastDiagnostic.line == 2);
                     CHECK(test::g_lastDiagnostic.column == 1);
                     CHECK(test::g_lastDiagnostic.offset == 7);
+                }
+            }
+
+            {
+                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(
+                    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx = 9\n"
+                    "ok = 1\n");
+                if(CHECK(static_cast<bool>(root)))
+                {
+                    CHECK(test::g_lastDiagnostic.line == 1);
+                    CHECK(test::g_lastDiagnostic.column == 1);
+                    CHECK(test::g_lastDiagnostic.offset == 0);
                 }
             }
 
@@ -901,16 +1264,18 @@ namespace fdf::detail
 
 
 
-        // Malformed inputs each surface the right DiagnosticType. Fatal lexer errors null the tree;
-        // recoverable parse errors skip the bad entry and keep the valid ones
+        // malformed inputs report the expected DiagnosticType
+        // fatal lexer errors return no tree and recoverable errors keep valid entries
         static void NegativeTest()
         {
-            // type, source, expectNull (fatal), and the surviving sibling for recoverable cases
+            // type, source and whether the error is fatal
             struct Case { DiagnosticType type; std::string_view src; bool bFatal; };
             constexpr Case cases[] =
             {
                 { DiagnosticType::InvalidTimestamp,    "ts = 2024-13-45\nok = 1\n",                          false },
                 { DiagnosticType::InvalidTimestamp,    "ts = 25:99:00\nok = 1\n",                            false },
+                { DiagnosticType::InvalidTimestamp,    "ts = 2014-W53-1\nok = 1\n",                          false },
+                { DiagnosticType::InvalidTimestamp,    "ts = 2024-W52-2junk\nok = 1\n",                      false },
                 { DiagnosticType::InvalidIdentifier,   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa = 1\nok = 1\n", false },  // > 30 chars
                 { DiagnosticType::InvalidIdentifier,   "true = 1\nok = 1\n",                                 false },  // keyword can't be a key
                 { DiagnosticType::InvalidIdentifier,   "ts-x = 1\nok = 1\n",                                 false },  // '-' not allowed in identifier
@@ -938,10 +1303,11 @@ namespace fdf::detail
                 }
             }
 
-            // A valid timestamp of every accepted shape parses and keeps its raw text
+            // accepted timestamp forms parse and preserve their text
             constexpr std::string_view goodTs[] =
             {
-                "2024-12-24", "2024-359", "2024-W52-2", "15:30:00",
+                "2024-12-24", "2024-359", "2024-W52-2", "2020-W53-7", "2020-W01-1", "15:30:00",
+                "2024-W52-2T15:30:00Z", "2015-W53-7T23:59:59.123+05:30",
                 "2024-12-24T15:30:00", "2024-12-24T15:30:00.123Z", "15:30:00-05:00",
             };
             for(std::string_view ts : goodTs)
@@ -951,8 +1317,7 @@ namespace fdf::detail
                     CHECK(FirstString(*e) == ts);
             }
 
-            // A buffer at/above the 32-bit offset limit is refused before parsing. The guard reads only
-            // size(), so a view that lies about its length over a tiny buffer exercises it without a 4GB alloc
+            // a fake oversized view tests the 32-bit input limit without allocating 4GB
             {
                 test::g_lastDiagnostic = {};
                 static constexpr char oneByte[1] = { 'x' };
@@ -1033,7 +1398,7 @@ namespace fdf::detail
                     CHECK_MSG(versions[i++] == version, src);
             };
 
-            // Int: dimensions 2..5, negatives in leading / middle / trailing / all positions
+            // integer packs with several sizes and negative positions
             checkInt("1|2",         { 1, 2 });
             checkInt("1|2|3",       { 1, 2, 3 });
             checkInt("1|2|3|4",     { 1, 2, 3, 4 });
@@ -1042,6 +1407,9 @@ namespace fdf::detail
             checkInt("1|-2",        { 1, -2 });
             checkInt("1|2|-3",      { 1, 2, -3 });
             checkInt("-1|-2|-3",    { -1, -2, -3 });
+            checkInt("-9223372036854775808", { std::numeric_limits<int64_t>::min() });
+            checkInt("-9223372036854775808|0|9223372036854775807",
+                { std::numeric_limits<int64_t>::min(), 0, std::numeric_limits<int64_t>::max() });
 
             // no fixed dimension cap
             checkInt("1|2|3|4|5|6", { 1, 2, 3, 4, 5, 6 });
@@ -1076,25 +1444,24 @@ namespace fdf::detail
                 { .bHasRevision = true, .major = 2147483647, .minor = 4294967295U, .patch = 4294967295U, .revision = 4294967295U }
             });
 
-            // UInt component beyond INT64_MAX keeps the whole pack unsigned
-            if(UniqueEntryPtr root = ParseBuffer(std::string("v = 18446744073709551615|1\n")))
+            // a component above INT64_MAX makes the pack unsigned
+            if(UniqueEntryPtr root = ParseBuffer("v = 1|2|18446744073709551615\n"))
             {
                 Entry* e = root->GetChild("v");
                 if(CHECK(e && e->GetType() == Type::UInt))
                 {
                     auto s = e->GetValue<uint64_t>();
-                    CHECK(s.size() == 2 && s[0] == 18446744073709551615ull && s[1] == 1);
+                    CHECK(s.size() == 3 && s[0] == 1 && s[1] == 2 && s[2] == 18446744073709551615ull);
                 }
             }
 
-            // string packs: components decode escapes like plain strings, a '|' inside quotes is
-            // literal (the lexer only splits unquoted pipes)
+            // string packs decode escapes and preserve quoted pipes
             checkStrings("\"alice\"|\"bob\"|\"carol\"",  { "alice", "bob", "carol" });
             checkStrings("\"with|pipe\"|\"b\"",          { "with|pipe", "b" });
             checkStrings("\"a\\\"q\"|'b\\tc'",           { "a\"q", "b\tc" });
             checkStrings("\"\"|\"x\"",                   { "", "x" });
 
-            // hex and timestamp packs keep each component's raw text, read through the const span
+            // hex and timestamp packs expose preserved text through a const span
             auto checkText = [](std::string_view src, Type type, std::initializer_list<std::string_view> exp)
             {
                 UniqueEntryPtr root = ParseBuffer(std::format("v = {}\n", src));
@@ -1114,7 +1481,7 @@ namespace fdf::detail
             checkText("2024-12-24T15:30:00Z|2024-359", Type::Timestamp, { "2024-12-24T15:30:00Z", "2024-359" });
 
             // GetValue<Timestamp> on a timestamp pack decodes component 0
-            if(UniqueEntryPtr root = ParseBuffer(std::string("v = 2024-12-24|15:30:00\n")))
+            if(UniqueEntryPtr root = ParseBuffer("v = 2024-12-24|15:30:00\n"))
             {
                 const Entry* e = root->GetChild("v");
                 if(CHECK(e && e->GetType() == Type::Timestamp))
@@ -1130,8 +1497,7 @@ namespace fdf::detail
                 UniqueEntryPtr root = ParseBuffer(src);
                 if(!CHECK_MSG(static_cast<bool>(root), src))
                     continue;
-                std::string out;
-                WriteBuffer<Style{ .bCommas = false }>(*root, out);
+                String out = WriteBuffer<Style{ .bCommas = false }>(*root);
                 CHECK_MSG(!out.contains('"') && !out.contains('\''), out);
 
                 UniqueEntryPtr reparsed = ParseBuffer(out);
@@ -1152,8 +1518,7 @@ namespace fdf::detail
             for(std::string_view src : { "v = 1.2.3|4.5.6.0\n", "v = 2147483647.4294967295.4294967295.4294967295\n" })
             {
                 UniqueEntryPtr root = ParseBuffer(src);
-                std::string out;
-                WriteBuffer<Style{ .bCommas = false }>(*root, out);
+                String out = WriteBuffer<Style{ .bCommas = false }>(*root);
                 UniqueEntryPtr reparsed = ParseBuffer(out);
                 const Entry* a = root->GetChild("v");
                 const Entry* b = reparsed? reparsed->GetChild("v") : nullptr;
@@ -1161,7 +1526,7 @@ namespace fdf::detail
             }
 
             // scalar accessors on a string pack fall back to the first component
-            if(UniqueEntryPtr root = ParseBuffer(std::string("v = \"first\"|\"second\"\n")))
+            if(UniqueEntryPtr root = ParseBuffer("v = \"first\"|\"second\"\n"))
             {
                 Entry* e = root->GetChild("v");
                 if(CHECK(e && e->GetType() == Type::String))
@@ -1169,7 +1534,7 @@ namespace fdf::detail
                     CHECK(FirstString(*e) == "first");
 
                     const std::span<const String> parts = e->GetValue<String>();
-                    std::string joined;
+                    String joined;
                     for(const String& part : parts)
                         joined.append(std::string_view(part));
                     CHECK(joined == "firstsecond");
@@ -1198,8 +1563,7 @@ namespace fdf::detail
                 }
             }
 
-            // mutation through the span: an edit reallocs that component's own chunk in place, the
-            // span itself never moves (valid until SetValue/ReleaseData), and a component can grow
+            // component growth may reallocate its string but not the surrounding span
             if(UniqueEntryPtr root = NewEntry())
             {
                 Entry* e = root->Emplace("v");
@@ -1219,7 +1583,7 @@ namespace fdf::detail
                 }
             }
 
-            // empty span becomes a single empty component (a string value is never zero components)
+            // an empty span becomes one empty string component
             if(UniqueEntryPtr root = NewEntry())
             {
                 Entry* e = root->Emplace("v");
@@ -1240,8 +1604,7 @@ namespace fdf::detail
                     const std::string_view parts[] = { "plain", "with|pipe", "with \"quote\"", "tab\there", "" };
                     e->SetValue(std::span<const std::string_view>(parts));
 
-                    std::string out;
-                    WriteBuffer<Style{ .bCommas = false }>(*root, out);
+                    String out = WriteBuffer<Style{ .bCommas = false }>(*root);
 
                     UniqueEntryPtr reparsed = ParseBuffer(out);
                     Entry* r = reparsed? reparsed->GetChild("v") : nullptr;
@@ -1257,13 +1620,14 @@ namespace fdf::detail
                 }
             }
 
-            // malformed packs are rejected but recoverable: bad entry skipped, sibling survives.
-            // also the heap-corruption regression, a mid-parse failure must not leave a Map-typed
-            // entry pointing at a scalar buffer
+            // malformed packs skip the bad entry without losing its sibling
+            // a parse failure must not leave scalar storage tagged as a Map
             constexpr std::string_view recover[] =
             {
                 "bad = 1|99999999999999999999999\nok = 7\n",   // component overflows u64
                 "bad = -1|99999999999999999999999\nok = 7\n",  // negative then unsigned-overflow
+                "bad = -9223372036854775809\nok = 7\n",         // one below int64 minimum
+                "bad = -9223372036854775808|9223372036854775808\nok = 7\n", // signed/unsigned mix
                 "bad = 1..0\nok = 7\n",                         // empty version component
                 "bad = -|1\nok = 7\n",                          // empty leading component
                 "bad = 1|\nok = 7\n",                           // empty trailing component
@@ -1322,10 +1686,16 @@ namespace fdf::detail
 
 
 
-        // Strings with embedded quotes survive write -> reparse. The writer picks a quote style that
-        // needs no escaping where it can, and escapes embedded double quotes otherwise
+        // strings with embedded quotes survive writing and reparsing
         static void StringRoundTripTest()
         {
+            // three backslashes means one literal backslash plus an escaped quote
+            if(UniqueEntryPtr root = ParseBuffer(R"(value = "a\\\"b")" "\n"))
+            {
+                Entry* value = root->GetChild("value");
+                CHECK(value && FirstString(*value) == "a\\\"b");
+            }
+
             constexpr std::string_view values[] =
             {
                 "no quotes here",
@@ -1346,8 +1716,7 @@ namespace fdf::detail
                 if(Entry* e = root->Emplace("s"); CHECK(e))
                     e->SetValue(want);
 
-                std::string out;
-                WriteBuffer<Style{ .bCommas = false }>(*root, out);
+                String out = WriteBuffer<Style{ .bCommas = false }>(*root);
 
                 UniqueEntryPtr reparsed = ParseBuffer(out);
                 if(Entry* e = reparsed? reparsed->GetChild("s") : nullptr; CHECK_MSG(e && e->GetType() == Type::String, out))
@@ -1358,12 +1727,12 @@ namespace fdf::detail
 
 
 
-        // fdf::String storage: scalar is a String[1], mutable via span, span stable until SetValue/ReleaseData, empty holds no allocation
+        // scalar string storage is a mutable String[1] span
         static void StringStorageTest()
         {
             CHECK(sizeof(fdf::String) == 8);
 
-            if(UniqueEntryPtr root = ParseBuffer(std::string("v = \"hello\"\n")))
+            if(UniqueEntryPtr root = ParseBuffer("v = \"hello\"\n"))
             {
                 Entry* e = root->GetChild("v");
                 if(CHECK(e && e->GetType() == Type::String))
@@ -1421,8 +1790,7 @@ namespace fdf::detail
                     e->SetValue(std::string_view("second value"));
                     CHECK(FirstString(*e) == "second value");
 
-                    std::string out;
-                    WriteBuffer<Style{ .bCommas = false }>(*root, out);
+                    String out = WriteBuffer<Style{ .bCommas = false }>(*root);
                     UniqueEntryPtr reparsed = ParseBuffer(out);
                     Entry* r = reparsed? reparsed->GetChild("v") : nullptr;
                     if(CHECK_MSG(r && r->GetType() == Type::String, out))
@@ -1430,9 +1798,8 @@ namespace fdf::detail
                 }
             }
 
-            // Hex/Timestamp are String[1] too: readable through the const span, but the mutable
-            // span is Type::String-only (writable text could break their format invariants)
-            if(UniqueEntryPtr root = ParseBuffer(std::string("h = 0xFF5733\nt = 2024-12-24T15:30:00\n")))
+            // hex and timestamps expose String[1] only through a const span
+            if(UniqueEntryPtr root = ParseBuffer("h = 0xFF5733\nt = 2024-12-24T15:30:00\n"))
             {
                 Entry* h = root->GetChild("h");
                 Entry* t = root->GetChild("t");
@@ -1451,8 +1818,7 @@ namespace fdf::detail
 
 
 
-        // fdf::String std API: terminator invariant, edit ops (growth preserves content, within-cap no
-        // realloc), read one-liners, operator+ chains incl. move-lhs reuse, comparisons, std::string + formatter
+        // fdf::String API and storage invariants
         static void StringApiTest()
         {
             using fdf::String;
@@ -1461,6 +1827,7 @@ namespace fdf::detail
             {
                 String s;
                 CHECK(s.c_str()[0] == '\0' && std::string_view(s.c_str()).empty());   // null state -> ""
+                CHECK(s.begin() == s.end() && std::as_const(s).begin() == std::as_const(s).end());
                 s.assign("hello");
                 CHECK(std::strlen(s.c_str()) == s.size() && s == "hello");
                 s.append(" world");
@@ -1522,7 +1889,7 @@ namespace fdf::detail
                 CHECK(s == "swap" && other == "Jumble!..");
             }
 
-            // read one-liners spot check
+            // read API
             {
                 String s("hello world");
                 CHECK(s.size() == 11 && s.length() == 11 && !s.empty());
@@ -1538,7 +1905,7 @@ namespace fdf::detail
                 CHECK(vowels == 2);
             }
 
-            // operator+ chains, incl. move-lhs reuse
+            // operator+ chains and rvalue buffer reuse
             {
                 String a("foo");
                 String b("bar");
@@ -1561,15 +1928,19 @@ namespace fdf::detail
                 CHECK("mid" == s && String("mid") == s);   // rewritten reversed candidates
             }
 
-            // explicit std::string conversion + std::formatter
+            // std::string conversions and formatting
             {
-                String s("convert");
-                CHECK(static_cast<std::string>(s) == "convert");
-                CHECK(std::format("[{}]", s) == "[convert]");
-                CHECK(std::format("{:>9}", s) == "  convert");   // padding rides the string_view formatter
+                const std::string source = "convert";
+                String s(source);
+                CHECK(std::string_view(s) == "convert");
+                CHECK(static_cast<std::string>(s) == source);
+                s = std::string("assigned");
+                CHECK(s == "assigned");
+                CHECK(std::format("[{}]", s) == "[assigned]");
+                CHECK(std::format("{:>10}", s) == "  assigned");   // uses the string_view formatter
             }
 
-            // self-aliasing mutations: value points into this->block, std::string guarantees these
+            // self-aliasing mutations: value points into this->block
             {
                 String s("HelloWorld");
                 s.insert(0, s.substr(5));   // no-grow, tail shifts over the source region
@@ -1606,9 +1977,8 @@ namespace fdf::detail
 
 
 
-        // Shortest round-trip floats: write(x) then reparse must reproduce x bitwise, for every
-        // finite double. Covers the hand-rolled Dragon4 writer + AlgorithmM parser, both used at
-        // compile time and runtime. Also checks scientific/exponent input forms
+        // writing and reparsing any finite double must reproduce its bits
+        // covers the Dragon4 writer and AlgorithmM parser at compile time and runtime
         static void FloatRoundTripTest()
         {
             auto roundTrip = [](double x) -> bool
@@ -1618,8 +1988,7 @@ namespace fdf::detail
                     return false;
                 if(Entry* e = root->Emplace("v"))
                     e->SetValue(x);
-                std::string out;
-                WriteBuffer<Style{ .bCommas = false }>(*root, out);
+                String out = WriteBuffer<Style{ .bCommas = false }>(*root);
 
                 UniqueEntryPtr re = ParseBuffer(out);
                 Entry* e = re? re->GetChild("v") : nullptr;
@@ -1629,12 +1998,11 @@ namespace fdf::detail
                 return span.size() == 1 && std::bit_cast<uint64_t>(span[0]) == std::bit_cast<uint64_t>(x);
             };
 
-            // Compile-time proof that the shared write/parse path round-trips in a consteval context
-            // (Subnormal/edge constexpr cases are covered by the runtime fuzz below to keep the
-            // static_assert's constexpr step count modest for MSVC.)
+            // consteval coverage stays small enough for MSVC
+            // runtime fuzz handles subnormal and edge cases
             static_assert(std::bit_cast<uint64_t>([]
             {
-                std::string s;
+                String s;
                 fdf::detail::AppendDouble(s, 3.141592653589793);
                 bool bOk = false;
                 return fdf::detail::ParseDouble(s.data(), s.data() + s.size(), &bOk);
@@ -1676,11 +2044,11 @@ namespace fdf::detail
             }
 
             // Malformed exponent must not parse as a float
-            if(UniqueEntryPtr root = ParseBuffer(std::string("v = 1.0e\n")))
+            if(UniqueEntryPtr root = ParseBuffer("v = 1.0e\n"))
                 CHECK(!root->GetChild("v") || root->GetChild("v")->GetType() != Type::Float);
 
             // Multi-dimensional float with an exponent component
-            if(UniqueEntryPtr root = ParseBuffer(std::string("d = 1.5|2.0e3|0.001\n")))
+            if(UniqueEntryPtr root = ParseBuffer("d = 1.5|2.0e3|0.001\n"))
             {
                 Entry* e = root->GetChild("d");
                 if(CHECK(e && e->GetType() == Type::Float))
@@ -1691,7 +2059,7 @@ namespace fdf::detail
             }
 
             // Multi-dimensional float with negative components
-            if(UniqueEntryPtr root = ParseBuffer(std::string("d = 0.5|-0.5|1.0\n")))
+            if(UniqueEntryPtr root = ParseBuffer("d = 0.5|-0.5|1.0\n"))
             {
                 Entry* e = root->GetChild("d");
                 if(CHECK(e && e->GetType() == Type::Float))
@@ -1702,7 +2070,7 @@ namespace fdf::detail
             }
 
             // Negative component alongside an exponent
-            if(UniqueEntryPtr root = ParseBuffer(std::string("d = 1.5e3|-2.5\n")))
+            if(UniqueEntryPtr root = ParseBuffer("d = 1.5e3|-2.5\n"))
             {
                 Entry* e = root->GetChild("d");
                 if(CHECK(e && e->GetType() == Type::Float))
@@ -1713,7 +2081,7 @@ namespace fdf::detail
             }
 
             // A dash not immediately after '|' is not a valid float component
-            if(UniqueEntryPtr root = ParseBuffer(std::string("d = 1.0-2.0\n")))
+            if(UniqueEntryPtr root = ParseBuffer("d = 1.0-2.0\n"))
                 CHECK(!root->GetChild("d") || root->GetChild("d")->GetType() != Type::Float);
 
             // Randomized fuzz: normals + subnormals through the full write/parse pipeline
@@ -1746,8 +2114,7 @@ namespace fdf::detail
 
 
 
-        // GetValue<Timestamp> decodes the raw text; SetValue(Timestamp) injects it back as canonical
-        // ISO text. Covers field extraction, epoch conversion, ordinal/week normalization, and inject
+        // timestamp decoding, canonical injection and epoch conversion
         static void TimestampTest()
         {
             // Field extraction from a fully-specified value
@@ -1785,10 +2152,25 @@ namespace fdf::detail
             {
                 Timestamp ord  = ParseBuffer("t = 2024-359\n")->GetChild("t")->GetValue<Timestamp>();
                 Timestamp week = ParseBuffer("t = 2024-W52-2\n")->GetChild("t")->GetValue<Timestamp>();
+                Timestamp weekTime = ParseBuffer("t = 2024-W52-2T15:30:00Z\n")->GetChild("t")->GetValue<Timestamp>();
                 CHECK(ord.year == 2024 && ord.month == 12 && ord.day == 24);
                 CHECK(week.year == 2024 && week.month == 12 && week.day == 24);
+                CHECK(weekTime.year == 2024 && weekTime.month == 12 && weekTime.day == 24
+                    && weekTime.hour == 15 && weekTime.tzKind == Timestamp::TzKind::Utc);
                 CHECK(ord.dateKind == Timestamp::DateKind::Ordinal);
                 CHECK(week.dateKind == Timestamp::DateKind::Week);
+            }
+
+            // ISO week years can cross calendar-year boundaries
+            {
+                const Timestamp first = Timestamp::FromText("2020-W01-1");
+                const Timestamp last = Timestamp::FromText("2020-W53-7T23:59:59.123+05:30");
+                CHECK(first.IsValid() && first.year == 2019 && first.month == 12 && first.day == 30);
+                CHECK(last.IsValid() && last.year == 2021 && last.month == 1 && last.day == 3);
+                CHECK(last.hour == 23 && last.minute == 59 && last.second == 59);
+                CHECK(last.nanosecond == 123'000'000 && last.tzOffsetMin == 330);
+                CHECK(!Timestamp::FromText("2014-W53-1").IsValid());
+                CHECK(!Timestamp::FromText("2021-W53-7T00:00:00Z").IsValid());
             }
 
             // Time-only: no date present
@@ -1822,17 +2204,16 @@ namespace fdf::detail
                 }
             }
 
-            // Epoch -> struct -> epoch is lossless across a spread of instants (incl. pre-1970)
+            // epoch conversion is lossless, including before 1970
             for(int64_t s : { int64_t(0), int64_t(1'000'000'000), int64_t(1'700'000'000), int64_t(-86400), int64_t(-1) })
                 CHECK_MSG(Timestamp::FromUnixSeconds(s).ToUnixSeconds() == s, std::format("epoch {}", s));
 
-            // Parsed values keep their exact original text through write (ordinal/week NOT normalized);
-            // GetValue<Timestamp> decodes on demand without touching storage
+            // parsed timestamps preserve ordinal and week notation through writes
+            // GetValue<Timestamp> decodes without changing stored text
             for(std::string_view raw : { "2024-359", "2024-W52-2", "15:30:00", "2024-12-24T15:30:00.123Z" })
             {
                 UniqueEntryPtr root = ParseBuffer(std::format("t = {}\n", raw));
-                std::string out;
-                WriteBuffer<Style{ .bCommas = false }>(*root, out);
+                String out = WriteBuffer<Style{ .bCommas = false }>(*root);
                 CHECK_MSG(out.contains(raw), out);
             }
         }
@@ -1925,13 +2306,12 @@ namespace fdf::detail
             return true;
         }
 
-        // parse -> write<STYLE> -> parse, assert the tree survived; then write the reparsed tree again
-        // and assert byte-stability (the writer is idempotent once the text is in canonical form)
+        // parse, write and reparse without changing the tree
+        // canonical output stays byte-stable on the second write
         template<Style STYLE>
         static void RoundTrip(const Entry& original, std::string_view label, bool bCheckStable)
         {
-            std::string out;
-            WriteBuffer<STYLE>(original, out);
+            String out = WriteBuffer<STYLE>(original);
 
             UniqueEntryPtr rt = ParseBuffer(out);
             if(!CHECK_MSG(rt && TreeEqual(original, *rt), std::format("[{}] tree mismatch:\n{}", label, out)))
@@ -1939,14 +2319,12 @@ namespace fdf::detail
 
             if(bCheckStable)
             {
-                std::string out2;
-                WriteBuffer<STYLE>(*rt, out2);
+                String out2 = WriteBuffer<STYLE>(*rt);
                 CHECK_MSG(out == out2, std::format("[{}] writer not idempotent", label));
             }
         }
 
-        // Every type, multi-dim, empty/quoted/escaped strings, nested containers, and timestamps,
-        // round-tripped through a spread of Style permutations
+        // round trips every value shape through several writer styles
         static void RoundTripTest()
         {
             constexpr std::string_view source =
@@ -2010,7 +2388,7 @@ namespace fdf::detail
                     RoundTrip<Style{}>(*o, std::format("empty: {}", src), false);
             }
 
-            // The real canonical design file across a few styles (exercises comments + deep nesting)
+            // the canonical example across several styles
             // Stability is skipped because comment whitespace is normalized on the first write
             if(!filesToTest.empty())
             {
@@ -2052,16 +2430,16 @@ namespace fdf::detail
 
             auto checkBucket = [](size_t request, size_t expected)
             {
-                Alloc::AllocationResult r = Alloc::AllocateAtLeast(request);
-                if(!CHECK_MSG(r.ptr != nullptr, std::format("request {}", request)))
+                Alloc::AllocationResult r = Alloc::Allocate(request);
+                if(!CHECK_MSG(r.Ptr() != nullptr, std::format("request {}", request)))
                     return;
                 const size_t expectedGranted = FDF_DISABLE_SLAB_ALLOCATOR? request : expected;
-                CHECK_MSG(r.size == expectedGranted, std::format("request {} -> granted {} (want {})", request, r.size, expectedGranted));
-                std::memset(r.ptr, 0xAB, r.size);   // whole granted extent must be writable
-                Alloc::Deallocate(r.ptr, r.size);
+                CHECK_MSG(r.Size() == expectedGranted, std::format("request {} -> granted {} (want {})", request, r.Size(), expectedGranted));
+                std::memset(r.Ptr(), 0xAB, r.Size());   // whole granted extent must be writable
+                Alloc::Deallocate(r.Ptr(), r.Size());
             };
 
-            // bit_ceil ladder with an 8-byte floor, boundaries either side of each bucket
+            // bucket boundaries on both sides of each power of two
             checkBucket(1, 8);
             checkBucket(8, 8);
             checkBucket(9, 16);
@@ -2080,38 +2458,48 @@ namespace fdf::detail
             checkBucket(257, 257);
             checkBucket(1000, 1000);
 
-            // Round-trip through Allocate(size)/Deallocate(size) at each bucket boundary
             for(size_t size : { size_t(8), size_t(16), size_t(32), size_t(64), size_t(128), size_t(256), size_t(4096) })
             {
-                void* p = Alloc::Allocate(size);
-                if(CHECK_MSG(p != nullptr, std::format("Allocate({})", size)))
+                const Alloc::AllocationResult allocation = Alloc::Allocate(size);
+                if(CHECK_MSG(allocation.Ptr() != nullptr, std::format("Allocate({})", size)))
                 {
-                    std::memset(p, 0xCD, size);
-                    CHECK(Alloc::Deallocate(p, size));
+                    std::memset(allocation.Ptr(), 0xCD, allocation.Size());
+                    CHECK(Alloc::Deallocate(allocation.Ptr(), allocation.Size()));
                 }
             }
 
             // Distinct live requests hand back distinct, independently writable blocks
             {
-                void* a = Alloc::Allocate(65);
-                void* b = Alloc::Allocate(65);
-                void* c = Alloc::Allocate(200);
-                CHECK(a != b && a != c && b != c);
-                if(a && b && c)
+                const Alloc::AllocationResult a = Alloc::Allocate(65);
+                const Alloc::AllocationResult b = Alloc::Allocate(65);
+                const Alloc::AllocationResult c = Alloc::Allocate(200);
+                CHECK(a.Ptr() != b.Ptr() && a.Ptr() != c.Ptr() && b.Ptr() != c.Ptr());
+                if(a.Ptr() && b.Ptr() && c.Ptr())
                 {
-                    std::memset(a, 1, 65);
-                    std::memset(b, 2, 65);
-                    std::memset(c, 3, 200);
-                    CHECK(*static_cast<unsigned char*>(a) == 1);
-                    CHECK(*static_cast<unsigned char*>(b) == 2);
-                    CHECK(*static_cast<unsigned char*>(c) == 3);
+                    std::memset(a.Ptr(), 1, a.Size());
+                    std::memset(b.Ptr(), 2, b.Size());
+                    std::memset(c.Ptr(), 3, c.Size());
+                    CHECK(*static_cast<unsigned char*>(a.Ptr()) == 1);
+                    CHECK(*static_cast<unsigned char*>(b.Ptr()) == 2);
+                    CHECK(*static_cast<unsigned char*>(c.Ptr()) == 3);
                 }
-                Alloc::Deallocate(a, 65);
-                Alloc::Deallocate(b, 65);
-                Alloc::Deallocate(c, 200);
+                Alloc::Deallocate(a.Ptr(), a.Size());
+                Alloc::Deallocate(b.Ptr(), b.Size());
+                Alloc::Deallocate(c.Ptr(), c.Size());
             }
 
-            // Child vector regrowth across every bucket into the heap fallback (40 * 8B > 256)
+            {
+                Vector<uint64_t> values;
+                for(uint64_t i = 0; i < 40; i++)
+                    values.emplace_back(i * 3);
+                CHECK(values.size() == 40 && values[0] == 0 && values[39] == 117);
+                values.erase(5);
+                CHECK(values.size() == 39 && values[5] == 18 && values.back() == 117);
+                values.pop_back();
+                CHECK(values.size() == 38 && values.back() == 114);
+            }
+
+            // child storage grows through every bucket and into the heap fallback
             {
                 UniqueEntryPtr root = NewEntry();
                 if(CHECK(static_cast<bool>(root)))
@@ -2135,7 +2523,7 @@ namespace fdf::detail
             }
 
 #if !FDF_NO_COMMENTS
-            // Comment replacement: shrink in place, regrow within the granted slack, then force heap
+            // comments shrink, reuse slab slack and then grow onto the heap
             {
                 UniqueEntryPtr root = NewEntry();
                 Entry* e = root? root->Emplace("a") : nullptr;
@@ -2148,7 +2536,7 @@ namespace fdf::detail
                     CHECK(e->GetComment() == "ab");
                     e->GetComment() = "0123456789ABCDEF012";
                     CHECK(e->GetComment() == "0123456789ABCDEF012");
-                    const std::string longComment(300, 'x');
+                    const String longComment(300, 'x');
                     e->GetComment() = longComment;
                     CHECK(e->GetComment() == longComment);
                 }
@@ -2168,9 +2556,8 @@ namespace fdf::detail
 
             // Aligned: short comments are inline and their '//' share a column
             {
-                std::string out;
-                WriteBuffer<Style{ .bAlignCloseComments = true, .bCommas = false }>(*root, out);
-                CHECK(out.find('\x01') == std::string::npos);  // no pad placeholder leaks
+                String out = WriteBuffer<Style{ .bAlignCloseComments = true, .bCommas = false }>(*root);
+                CHECK(out.find('\x01') == String::npos);  // no pad placeholder leaks
                 CHECK(out.contains("// first") && out.contains("// second") && out.contains("// third"));
                 auto cols = InlineCommentColumns(out);
                 if(CHECK(cols.size() == 3))
@@ -2179,8 +2566,7 @@ namespace fdf::detail
 
             // Unaligned: still inline, but each '//' just one space after its value (varying columns)
             {
-                std::string out;
-                WriteBuffer<Style{ .bAlignCloseComments = false, .bCommas = false }>(*root, out);
+                String out = WriteBuffer<Style{ .bAlignCloseComments = false, .bCommas = false }>(*root);
                 auto cols = InlineCommentColumns(out);
                 if(CHECK(cols.size() == 3))
                     CHECK(cols[0] != cols[2]);  // a=1 vs ccc=333 differ in width
@@ -2188,13 +2574,11 @@ namespace fdf::detail
 
             // bEntryComment = false suppresses comments entirely
             {
-                std::string out;
-                WriteBuffer<Style{ .bEntryComment = false }>(*root, out);
+                String out = WriteBuffer<Style{ .bEntryComment = false }>(*root);
                 CHECK(!out.contains("//"));
             }
 
-            // Raw storage: GetComment hands out the stored text unchanged, the mutable ref edits
-            // in place, and the writer collapses newlines + leading whitespace at emit
+            // GetComment exposes raw mutable text and the writer normalizes it on output
             {
                 UniqueEntryPtr r = NewEntry();
                 Entry* e = r? r->Emplace("k") : nullptr;
@@ -2206,8 +2590,7 @@ namespace fdf::detail
                     e->GetComment().append("\nmore");               // in-place edit through the mutable ref
                     CHECK(e->GetComment() == "  lead\n\t\ttail\nmore");
 
-                    std::string out;
-                    WriteBuffer<Style{ .bCommas = false }>(*r, out);
+                    String out = WriteBuffer<Style{ .bCommas = false }>(*r);
                     CHECK_MSG(out.contains("// lead tail more"), out);
 
                     UniqueEntryPtr re = ParseBuffer(out);
@@ -2217,8 +2600,7 @@ namespace fdf::detail
                 }
             }
 
-            // File comment: stored raw, the block emit strips per-line leading whitespace, drops
-            // blank lines, neutralizes a contained close sequence, and the written form is stable
+            // file comments normalize whitespace and contained close sequences on output
             {
                 UniqueEntryPtr r = NewEntry();
                 if(CHECK(static_cast<bool>(r)))
@@ -2227,8 +2609,7 @@ namespace fdf::detail
                     r->GetComment() = "   header line\n\n   evil */ inside";
                     CHECK(r->GetComment() == "   header line\n\n   evil */ inside");   // raw
 
-                    std::string out1;
-                    WriteBuffer<Style{ .bCommas = false }>(*r, out1);
+                    String out1 = WriteBuffer<Style{ .bCommas = false }>(*r);
                     CHECK_MSG(out1.starts_with("/*#\n"), out1);
                     CHECK_MSG(out1.contains("    header line\n"), out1);   // leading whitespace stripped, newline kept
                     CHECK_MSG(out1.contains("evil * / inside"), out1);     // '*/' broken so the block can't close early
@@ -2236,8 +2617,7 @@ namespace fdf::detail
                     UniqueEntryPtr re = ParseBuffer(out1);
                     if(CHECK(static_cast<bool>(re)))
                     {
-                        std::string out2;
-                        WriteBuffer<Style{ .bCommas = false }>(*re, out2);
+                        String out2 = WriteBuffer<Style{ .bCommas = false }>(*re);
                         CHECK_MSG(out1 == out2, "file comment emit is round-trip stable");
                     }
                 }
@@ -2276,7 +2656,14 @@ consteval bool ResizeProbe()
     e->SetValue(static_cast<int64_t>(7));
     e->Resize(3);
     auto s = e->GetValue<int64_t>();
-    return s.size() == 3 && s[0] == 7 && s[1] == 0 && s[2] == 0;
+    if(s.size() != 3 || s[0] != 7 || s[1] != 0 || s[2] != 0)
+        return false;
+    e->Resize(0);
+    if(!e->GetValue<int64_t>().empty())
+        return false;
+    e->Resize(2);
+    s = e->GetValue<int64_t>();
+    return s.size() == 2 && s[0] == 0 && s[1] == 0;
 }
 static_assert(ResizeProbe(), "consteval Resize preserves and zero-fills");
 
@@ -2301,12 +2688,18 @@ consteval bool ResizeStringProbe()
 
     e->Resize(3);
     auto regrown = e->GetValue<fdf::String>();
-    return regrown.size() == 3 && regrown[0] == "alpha" && regrown[1] == "" && regrown[2] == "";
+    if(regrown.size() != 3 || regrown[0] != "alpha" || regrown[1] != "" || regrown[2] != "")
+        return false;
+    e->Resize(0);
+    if(!e->GetValue<fdf::String>().empty())
+        return false;
+    e->Resize(2);
+    regrown = e->GetValue<fdf::String>();
+    return regrown.size() == 2 && regrown[0] == "" && regrown[1] == "";
 }
 static_assert(ResizeStringProbe(), "consteval Resize handles String-backed arrays");
 
-// SetType with no SetValue leaves the union pointing at the new type's member; a stricter
-// constexpr union read here would be ill-formed if ResetDataNull didn't run
+// SetType activates the new type's union member even without SetValue
 consteval bool ResizeAfterSetTypeProbe()
 {
     fdf::UniqueEntryPtr root = fdf::NewEntry();
@@ -2320,11 +2713,57 @@ consteval bool ResizeAfterSetTypeProbe()
 }
 static_assert(ResizeAfterSetTypeProbe(), "consteval SetType then Resize keeps the union member active");
 
+consteval bool ChildStorageProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::NewEntry();
+    constexpr std::string_view names[] = { "a", "b", "c", "d", "e", "f" };
+    for(uint32_t i = 0; i < static_cast<uint32_t>(std::size(names)); i++)
+    {
+        fdf::Entry* child = root->Emplace(names[i]);
+        if(!child)
+            return false;
+        child->SetValue(static_cast<int64_t>(i));
+    }
+
+    if(root->GetChildCount() != static_cast<uint32_t>(std::size(names)) || root->GetDirectChild(5u)->GetIdentifier() != "f")
+        return false;
+    if(!root->RemoveChild("b") || root->GetDirectChild(1)->GetIdentifier() != "c")
+        return false;
+
+    fdf::UniqueEntryPtr orphan = root->OrphanChild("d");
+    if(!orphan || orphan->GetParent() || root->GetChild("d"))
+        return false;
+    if(!root->ClearChildren() || root->GetChildCount() != 0)
+        return false;
+
+    fdf::Entry* regrown = root->Emplace("again");
+    return regrown && root->GetDirectChild(0u) == regrown;
+}
+static_assert(ChildStorageProbe(), "consteval child array grows, shifts, clears, and reuses capacity");
+
+consteval bool VectorProbe()
+{
+    fdf::detail::Vector<uint64_t> values;
+    for(uint64_t i = 0; i < 20; i++)
+        values.emplace_back(i + 1);
+    if(values.size() != 20 || values[0] != 1 || values.back() != 20)
+        return false;
+    values.erase(3);
+    if(values.size() != 19 || values[3] != 5)
+        return false;
+    values.pop_back();
+    return values.size() == 18 && values.back() == 19;
+}
+static_assert(VectorProbe(), "consteval internal storage grows and preserves live elements");
+
 // ----- ISO-8601 timestamp validation -----
 static_assert(fdf::detail::IsValidTimestamp("2024-12-24"),                "date");
 static_assert(fdf::detail::IsValidTimestamp("2024-02-29"),                "leap day");
 static_assert(fdf::detail::IsValidTimestamp("2024-359"),                  "ordinal");
 static_assert(fdf::detail::IsValidTimestamp("2024-W52-2"),                "week date");
+static_assert(fdf::detail::IsValidTimestamp("2020-W53-7"),                "valid week 53");
+static_assert(fdf::detail::IsValidTimestamp("2024-W52-2T15:30:00Z"),      "week date + time");
+static_assert(fdf::detail::IsValidTimestamp("2015-W53-7T23:59:59+05:30"), "week 53 + time + offset");
 static_assert(fdf::detail::IsValidTimestamp("15:30:00"),                  "time only");
 static_assert(fdf::detail::IsValidTimestamp("2024-12-24T15:30:00"),       "date + time");
 static_assert(fdf::detail::IsValidTimestamp("2024-12-24T15:30:00Z"),      "utc");
@@ -2338,11 +2777,15 @@ static_assert(!fdf::detail::IsValidTimestamp("2024-12-32"),               "day 3
 static_assert(!fdf::detail::IsValidTimestamp("2023-02-29"),               "non-leap feb 29");
 static_assert(!fdf::detail::IsValidTimestamp("2024-367"),                 "ordinal 367");
 static_assert(!fdf::detail::IsValidTimestamp("2024-W54-1"),               "week 54");
+static_assert(!fdf::detail::IsValidTimestamp("2021-W53-1"),               "invalid week 53 for year");
+static_assert(!fdf::detail::IsValidTimestamp("2014-W53-1"),               "another invalid week 53 year");
 static_assert(!fdf::detail::IsValidTimestamp("2024-W52-8"),               "weekday 8");
 static_assert(!fdf::detail::IsValidTimestamp("25:00:00"),                 "hour 25");
 static_assert(!fdf::detail::IsValidTimestamp("15:60:00"),                 "minute 60");
 static_assert(!fdf::detail::IsValidTimestamp("15:30:99"),                 "second 99");
 static_assert(!fdf::detail::IsValidTimestamp("2024-12-24T15:30:00+25:00"),"offset hour 25");
+static_assert(fdf::Timestamp::FromText("2020-W01-1").year == 2019,        "week 1 crosses calendar year");
+static_assert(fdf::Timestamp::FromText("2020-W53-7").year == 2021,        "week 53 crosses calendar year");
 
 // ----- Strict UTF-8 validation (all escaped so the test file's own encoding can't skew it) -----
 static_assert( fdf::detail::IsValidUtf8(""),                     "empty");
@@ -2486,9 +2929,13 @@ consteval bool StringParseMutateProbe()
 }
 static_assert(StringParseMutateProbe(), "consteval string parse + mutate through the span");
 
-// The std edit + read surface must fold at constant evaluation, terminator maintained throughout
+// the string edit and read API preserves its terminator at constant evaluation
 consteval bool StringApiProbe()
 {
+    fdf::String empty;
+    if(empty.begin() != empty.end() || std::as_const(empty).begin() != std::as_const(empty).end())
+        return false;
+
     fdf::String s("abc");
     s.append("def");         // "abcdef"
     s.insert(0, "[");        // "[abcdef"
@@ -2510,8 +2957,7 @@ consteval bool StringApiProbe()
 }
 static_assert(StringApiProbe(), "consteval String edit/read/operator+ surface");
 
-// Self-aliasing edits: constant evaluation rejects reads of freed memory, so a growing
-// self-append/assign that frees the source block before copying fails to compile on the bug
+// constant evaluation catches freed reads in self-aliasing edits
 consteval bool StringSelfAliasProbe()
 {
     fdf::String s("0123456789ABCDEFGHIJ");
@@ -2547,8 +2993,7 @@ consteval bool HexTimestampStringViewProbe()
 }
 static_assert(HexTimestampStringViewProbe(), "consteval hex/timestamp String[1] round-trip");
 
-// Every scalar type parsed at compile time. One self-contained probe per type so a failure points
-// at the exact case. Each verifies the value parses to a single leaf child of the expected type
+// one consteval parse probe per scalar type
 consteval bool IntProbe()
 {
     fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = -42\n");
@@ -2560,6 +3005,26 @@ consteval bool UIntProbe()
     fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 18446744073709551615\n");
     const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
     return e && e->GetType() == fdf::Type::UInt && e->GetValue<uint64_t>()[0] == 18446744073709551615ull;
+}
+consteval bool MinIntProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = -9223372036854775808|0|9223372036854775807\n");
+    const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
+    if(!e || e->GetType() != fdf::Type::Int)
+        return false;
+    const std::span<const int64_t> values = e->GetValue<int64_t>();
+    return values.size() == 3 && values[0] == std::numeric_limits<int64_t>::min()
+        && values[1] == 0 && values[2] == std::numeric_limits<int64_t>::max();
+}
+consteval bool UIntPromotionProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 1|2|18446744073709551615\n");
+    const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
+    if(!e || e->GetType() != fdf::Type::UInt)
+        return false;
+    const std::span<const uint64_t> values = e->GetValue<uint64_t>();
+    return values.size() == 3 && values[0] == 1 && values[1] == 2
+        && values[2] == 18446744073709551615ull;
 }
 consteval bool FloatProbe()
 {
@@ -2611,7 +3076,9 @@ consteval bool TimestampProbe()
 }
 
 static_assert(IntProbe(),       "consteval int parse");
+static_assert(MinIntProbe(),    "consteval minimum int64 parse");
 static_assert(UIntProbe(),      "consteval uint (max u64) parse");
+static_assert(UIntPromotionProbe(), "consteval int pack promotion preserves earlier components");
 static_assert(FloatProbe(),     "consteval float parse");
 static_assert(StringProbe(),    "consteval string parse");
 static_assert(BoolProbe(),      "consteval bool parse");
@@ -2639,18 +3106,86 @@ consteval bool ParseContainerProbe()
     if(!arr || arr->GetType() != fdf::Type::Array || arr->GetChildCount() != 3)
         return false;
     const fdf::Entry* third = arr->GetDirectChild(2u);
-    return third && third->GetValue<int64_t>()[0] == 30;
+    return third && third->GetValue<int64_t>()[0] == 30 && third->GetFullIdentifier() == "arr.2";
 }
 static_assert(ParseContainerProbe(), "consteval map + array parse");
+
+static_assert(std::is_same_v<decltype(std::declval<const fdf::Entry&>().GetFullIdentifier()), fdf::String>,
+    "full identifiers use fdf::String storage");
+
+consteval bool FullIdentifierProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::NewEntry();
+    fdf::Entry* items = root->Emplace("items");
+    if(!items)
+        return false;
+    items->SetValue(fdf::ArrayType{});
+    for(int64_t i = 0; i < 13; i++)
+        items->Emplace("")->SetValue(i);
+
+    fdf::Entry* map = items->GetDirectChild(5u);
+    map->SetValue(fdf::MapType{});
+    fdf::Entry* nested = map->Emplace("nested");
+    nested->SetValue(fdf::ArrayType{});
+    nested->Emplace("")->SetValue(1);
+    nested->Emplace("")->SetValue(2);
+
+    if(!root->GetFullIdentifier().empty() || items->GetFullIdentifier() != "items"
+        || items->GetDirectChild(0u)->GetFullIdentifier() != "items.0"
+        || items->GetDirectChild(12u)->GetFullIdentifier() != "items.12"
+        || nested->GetDirectChild(1u)->GetFullIdentifier() != "items.5.nested.1")
+        return false;
+
+    fdf::UniqueEntryPtr detached = items->OrphanChild(12u);
+    return detached && detached->GetParent() == nullptr && detached->GetFullIdentifier().empty();
+}
+static_assert(FullIdentifierProbe(), "consteval full identifiers cover direct, nested, and multi-digit array indices");
+
+consteval bool CombineProbe()
+{
+    fdf::UniqueEntryPtr base = fdf::ParseBuffer("keep=1\nsection { old=2 }\n");
+    fdf::UniqueEntryPtr incoming = fdf::ParseBuffer("add=3\nsection { fresh=4 }\n");
+    if(!base || !incoming || !base->Combine(incoming) || incoming)
+        return false;
+    const fdf::Entry* section = base->GetChild("section");
+    const fdf::Entry* fresh = base->GetChild("section.fresh");
+    if(!base->GetChild("keep") || !base->GetChild("add") || !section || !fresh
+        || fresh->GetParent() != section || base->GetChild("section.old"))
+        return false;
+
+    fdf::UniqueEntryPtr left = fdf::NewEntry();
+    fdf::UniqueEntryPtr right = fdf::NewEntry();
+    left->SetValue(fdf::ArrayType{});
+    right->SetValue(fdf::ArrayType{});
+    left->Emplace("")->SetValue(1);
+    right->Emplace("")->SetValue(2);
+    if(!left->Combine(right) || right || left->GetChildCount() != 2)
+        return false;
+    return left->GetDirectChild(0u)->GetValue<int64_t>()[0] == 1
+        && left->GetDirectChild(1u)->GetValue<int64_t>()[0] == 2
+        && left->GetDirectChild(1u)->GetParent() == left.get();
+}
+static_assert(CombineProbe(), "consteval combine merges roots and repairs parent links");
 
 // String escape decoding (\t -> tab, \\ -> backslash, \" -> quote) at compile time
 consteval bool EscapeProbe()
 {
-    fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = \"a\\tb\\\\c\\\"d\"\n");
+    constexpr std::string_view source =
+        R"(one="a\"b")" "\n"
+        R"(two="a\\")" "\n"
+        R"(three="a\\\"b")" "\n"
+        R"(four="a\\\\")" "\n"
+        R"(five="a\\\\\"b")" "\n"
+        "after=1\n";
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer(source);
     if(!root)
         return false;
-    const fdf::Entry* v = root->GetDirectChild("value");
-    return v && FirstString(*v) == "a\tb\\c\"d";
+    return FirstString(*root->GetDirectChild("one")) == "a\"b"
+        && FirstString(*root->GetDirectChild("two")) == "a\\"
+        && FirstString(*root->GetDirectChild("three")) == "a\\\"b"
+        && FirstString(*root->GetDirectChild("four")) == "a\\\\"
+        && FirstString(*root->GetDirectChild("five")) == "a\\\\\"b"
+        && root->GetDirectChild("after")->GetValue<int64_t>()[0] == 1;
 }
 static_assert(EscapeProbe(), "consteval string escape decoding");
 
@@ -2689,8 +3224,7 @@ consteval bool WriteScalarsProbe()
     root->Emplace("s")->SetValue("hi");
     root->Emplace("n")->SetValue(fdf::NullType{});
 
-    std::string out;
-    fdf::WriteBuffer<fdf::Style{}>(*root, out);
+    fdf::String out = fdf::WriteBuffer<fdf::Style{}>(*root);
 
     return ContainsAt(out, "i=-42")
         && ContainsAt(out, "u=18446744073709551615")
@@ -2718,15 +3252,55 @@ consteval bool WriteCompositeProbe()
     };
     root->Emplace("ver")->SetValue(std::span<const fdf::Version>(versions));
 
-    std::string out;
-    fdf::WriteBuffer<fdf::Style{}>(*root, out);
+    fdf::String out = fdf::WriteBuffer<fdf::Style{}>(*root);
     return ContainsAt(out, "res=1920|1080") && ContainsAt(out, "pos=1.0|2.5|3.0")
         && ContainsAt(out, "who=\"ann\"|\"bo\"") && ContainsAt(out, "ver=1.2.3|4.5.6.0");
 }
 static_assert(WriteCompositeProbe(), "consteval write numeric/string/version packs");
 
-// SetValue/GetValue round-trips exercised in a constant-evaluated context. Mirrors
-// ValueTest; covers the consteval storage path the runtime tests cannot reach
+#if !FDF_NO_COMMENTS
+consteval bool WriteCommentAlignmentProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer(
+        "a=1 // first\n"
+        "longer=2 // second\n");
+    if(!root)
+        return false;
+
+    fdf::String aligned = fdf::WriteBuffer<fdf::Style{ .bAlignCloseComments = true, .bCommas = false }>(*root);
+    const size_t first = aligned.find("// first");
+    const size_t second = aligned.find("// second");
+    if(first == fdf::String::npos || second == fdf::String::npos || aligned.find('\x01') != fdf::String::npos)
+        return false;
+    const size_t firstLine = aligned.rfind('\n', first);
+    const size_t secondLine = aligned.rfind('\n', second);
+    const size_t firstColumn = firstLine == fdf::String::npos? first : first - firstLine - 1;
+    const size_t secondColumn = secondLine == fdf::String::npos? second : second - secondLine - 1;
+    if(firstColumn != secondColumn)
+        return false;
+
+    fdf::String unaligned = fdf::WriteBuffer<fdf::Style{ .bAlignCloseComments = false, .bCommas = false }>(*root);
+    if(unaligned.find('\x01') != fdf::String::npos || !unaligned.contains("1 // first")
+       || !unaligned.contains("2 // second"))
+        return false;
+
+    fdf::UniqueEntryPtr controls = fdf::NewEntry();
+    fdf::Entry* control = controls->Emplace("control");
+    constexpr std::string_view CONTROL_VALUE{"a\x01// b", 6};
+    constexpr std::string_view CONTROL_COMMENT{"note\x01// keep", 12};
+    control->SetValue(CONTROL_VALUE);
+    control->GetComment() = CONTROL_COMMENT;
+
+    fdf::String controlOut = fdf::WriteBuffer<fdf::Style{ .bAlignCloseComments = true, .bCommas = false }>(*controls);
+    size_t controlByteCount = 0;
+    for(char c : controlOut)
+        controlByteCount += c == '\x01';
+    return controlByteCount == 2 && controlOut.contains(CONTROL_VALUE) && controlOut.contains(CONTROL_COMMENT);
+}
+static_assert(WriteCommentAlignmentProbe(), "consteval inline-comment padding avoids staging allocations");
+#endif
+
+// consteval SetValue/GetValue coverage for the compile-time storage path
 consteval bool ValueRoundTripProbe()
 {
     fdf::UniqueEntryPtr root = fdf::NewEntry();
@@ -2800,14 +3374,13 @@ consteval bool WriteContainerProbe()
     m->SetValue(fdf::MapType{});
     m->Emplace("k")->SetValue(true);
 
-    std::string out;
-    fdf::WriteBuffer<fdf::Style{}>(*root, out);
+    fdf::String out = fdf::WriteBuffer<fdf::Style{}>(*root);
     return ContainsAt(out, "arr") && ContainsAt(out, "10") && ContainsAt(out, "20")
         && ContainsAt(out, "m") && ContainsAt(out, "k=true");
 }
 static_assert(WriteContainerProbe(), "consteval write containers");
 
-// Full round-trip at compile time: build -> write -> parse -> verify values survive
+// full build, write and parse round trip at compile time
 consteval bool WriteRoundTripProbe()
 {
     fdf::UniqueEntryPtr root = fdf::NewEntry();
@@ -2818,8 +3391,7 @@ consteval bool WriteRoundTripProbe()
     arr->Emplace("")->SetValue(static_cast<int64_t>(7));
     arr->Emplace("")->SetValue(static_cast<int64_t>(8));
 
-    std::string out;
-    fdf::WriteBuffer<fdf::Style{}>(*root, out);
+    fdf::String out = fdf::WriteBuffer<fdf::Style{}>(*root);
 
     fdf::UniqueEntryPtr re = fdf::ParseBuffer(out);
     if(!re)
@@ -2866,6 +3438,16 @@ constexpr auto ExtractComment()
 
 constexpr char COMMENT_SAMPLE[] = "//TestComment\nvalue = 0";
 static_assert(ExtractComment<COMMENT_SAMPLE>() == "TestComment", "consteval comment parse");
+constexpr char COMPACT_BLOCK_COMMENT_SAMPLE[] = "/*abc*/\nvalue = 0";
+static_assert(ExtractComment<COMPACT_BLOCK_COMMENT_SAMPLE>() == "abc", "consteval compact block comment parse");
+constexpr char EMPTY_BLOCK_COMMENT_SAMPLE[] = "/**/\nvalue = 0";
+static_assert(ExtractComment<EMPTY_BLOCK_COMMENT_SAMPLE>().empty(), "consteval empty block comment parse");
+constexpr char SLASH_BLOCK_COMMENT_SAMPLE[] = "/*a/b*/\nvalue = 0";
+static_assert(ExtractComment<SLASH_BLOCK_COMMENT_SAMPLE>() == "a/b", "consteval slash in block comment");
+constexpr char SPACED_BLOCK_COMMENT_SAMPLE[] = "/*trim */\nvalue = 0";
+static_assert(ExtractComment<SPACED_BLOCK_COMMENT_SAMPLE>() == "trim", "consteval block close spacing");
+constexpr char MULTILINE_BLOCK_COMMENT_SAMPLE[] = "/*line\nnext\n*/\nvalue = 0";
+static_assert(ExtractComment<MULTILINE_BLOCK_COMMENT_SAMPLE>() == "line\nnext", "consteval multiline block comment");
 #endif
 
 
@@ -2930,6 +3512,7 @@ int main(int argc, char** argv)
     RunCase("WriteTest",           Test::WriteTest);
     RunCase("ValueTest",           Test::ValueTest);
     RunCase("MutateTest",          Test::MutateTest);
+    RunCase("RegressionTest",      Test::RegressionTest);
     RunCase("RecoveryTest",        Test::RecoveryTest);
     RunCase("NegativeTest",        Test::NegativeTest);
     RunCase("PackTest",            Test::PackTest);

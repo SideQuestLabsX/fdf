@@ -67,4 +67,8 @@ endfunction()
 
 add_fdf_test(Test test.cpp)
 
-target_compile_definitions(Test PRIVATE FDF_OUTPUT_DIRECTORY="${CMAKE_CURRENT_BINARY_DIR}/output")
+target_compile_definitions(Test PRIVATE
+    FDF_ROOT_DIRECTORY="${PROJECT_SOURCE_DIR}"
+    FDF_TEST_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}"
+    FDF_OUTPUT_DIRECTORY="${CMAKE_CURRENT_BINARY_DIR}/output"
+)

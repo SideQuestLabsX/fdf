@@ -6,13 +6,12 @@ Common questions about fdf. If something here is out of date or missing, the oth
 
 ## What is fdf, and why not just use JSON or YAML or TOML?
 
-fdf is a text data format for the stuff you'd normally reach for JSON, YAML, TOML, or INI for:
+fdf is a text data format for the stuff you'd normally reach for JSON, YAML, TOML or INI for:
 config, asset metadata, that kind of thing. The difference is it's built to be read and edited by
-hand first. Comments stick around instead of getting thrown away, it has real types for things like
-versions and timestamps so you're not quoting everything, and the whole parser and writer run at C++
-compile time. If a file is mostly written and reviewed by people, that's the case fdf is for.
+hand first. Comments stick around instead of getting thrown away. Types such as versions and timestamps
+are first class citizens. The entire library (minus file IO) can run at compile time.
 
-It's not trying to be a wire format or a database. It's a human-facing config format, but a binary format is planned.
+fdf is a human-facing config format, not a wire format or database. A binary format is planned.
 
 ## What does a file actually look like?
 
@@ -32,21 +31,23 @@ graphics
 ```
 
 Top level is a map. An entry is a name, then either a scalar after `=`, a map in `{ }`, or an array
-in `[ ]`. Whitespace outside strings doesn't matter, lay it out however reads best.
+in `[ ]`. Whitespace outside strings does not matter. Lay out the file however it reads best.
 
 ## What types are there?
 
 fdf figures out the type from the value, there is no type annotation.
 
-- **Bool** `true`, `false`
-- **Int** `12345`, `-7` (signed 64-bit)
-- **UInt** `9223372036854775808` (unsigned 64-bit)
-- **Float** `3.14`, `1.0e21` (64-bit)
-- **String** `"text"` or `'text'`
-- **Hex** `0xFF5733`
-- **Version** `1.2.3` or `1.2.3.0`
-- **Timestamp** `2024-12-24T15:30:00`, or just a date, or just a time (ISO-8601)
-- **Null / Nil** `null`, `nil` (same thing)
+| Type | Example |
+|------|---------|
+| Bool | `true`, `false` |
+| Int | `12345`, `-7` (signed 64-bit) |
+| UInt | `9223372036854775808` (unsigned 64-bit) |
+| Float | `3.14`, `1.0e21` (64-bit) |
+| String | `"text"` or `'text'` |
+| Hex | `0xFF5733` |
+| Version | `1.2.3` or `1.2.3.0` |
+| Timestamp | `2024-12-24T15:30:00`, or just a date or time (ISO-8601) |
+| Null / Nil | `null`, `nil` (same thing) |
 
 Plus packs, below.
 
@@ -59,17 +60,15 @@ resolution = 1920|1080      // one value, two components
 color      = 0xFF|0x80|0x40
 ```
 
-`resolution` isn't an array of two entries, it's a single value with two components. It's intended for
-coordinates, colors, dimensions, and other homogeneous values. All the parts have to be the same type
-(ints will widen to floats, but you can't mix something like `1|true`). That's the difference from an array:
-an array `[ ]` holds separate indexed entries, you can comment and nest, in contrast a pack is one atomic value.
+`resolution` is one value with two components, not an array of two entries. Packs suit values like
+coordinates or color channels. All components must share a type. Integers can widen to floats, but
+`1|true` is invalid. When the parts need comments, nesting or individual addressing, use an array
+instead.
 
 ## Does it keep my comments?
 
-Yes. Comments stay attached to the entry they belong to and survive a parse-then-write round-trip, so
-loading a file and saving it again won't quietly eat them. You can read and edit them from the API
-too. The only exception is if you build with `FDF_NO_COMMENTS`, which drops comment storage entirely
-for a smaller footprint.
+Yes. Comments stay attached to their entries through a parse and write. The API can read and edit
+them too. Building with `FDF_NO_COMMENTS` removes comment storage for a smaller footprint.
 
 Comments are `//` for a line and `/* */` for a block. A block comment starting with `#`
 (`/*# ... */`) at the very top of the file is the file comment.
@@ -79,8 +78,7 @@ Comments are `//` for a line and `/* */` for a block. A block comment starting w
 Your data and comments, yes. Your exact spacing and brace placement, no, and that's on purpose. When
 you write a document back out it gets re-emitted in a consistent style that you control (see
 [Styling](Styling.md)). Write it, parse it, write it again with the same style and you get identical
-text, so diffs stay clean and reviewable. If you were hoping for a byte-for-byte formatter that leaves
-your whitespace exactly as typed, that's explicitly not what fdf does.
+text, so diffs stay clean and reviewable.
 
 ## How do I read a file from C++?
 
@@ -103,12 +101,12 @@ if(auto* e = doc->GetChild("graphics.resolution"))
 }
 ```
 
-Always check for null, `GetChild` returns `nullptr` when the path isn't there.
+Always check for null. `GetChild` returns `nullptr` when the path isn't there.
 
 ## Can I really parse it at compile time?
 
-Yeah. `ParseBuffer`, the writer, and the whole `Entry` API are `constexpr`, so you can parse, poke
-at, and serialize a document inside a `consteval` function:
+Yeah. `ParseBuffer`, the writer and the whole `Entry` API are `constexpr`, so you can parse, poke
+at and serialize a document inside a `consteval` function:
 
 ```cpp
 consteval int64_t ReadScore()
@@ -119,8 +117,8 @@ consteval int64_t ReadScore()
 static_assert(ReadScore() == 42);
 ```
 
-Note that's `ParseBuffer`, not `ParseFile`. File IO is not allowed at compile time. That's a limitation
-of the language, not the library.
+Use `ParseBuffer`, not `ParseFile`, at compile time. C++ does not allow file I/O during constant
+evaluation.
 
 ## How do I build a document and write it out?
 
@@ -155,10 +153,9 @@ Same callback works at compile time. See [Diagnostics](Diagnostics.md).
 
 ## How does it handle Unicode and non-ASCII text?
 
-fdf files are UTF-8, and your bytes pass through untouched, nothing gets normalized or re-escaped. A
-leading byte-order mark is stripped. If the file isn't valid UTF-8 it still parses (fdf doesn't mangle
-your bytes either way), but you'll get a non-fatal warning through the diagnostic callback. Want to
-check yourself, there's `fdf::IsValidUtf8(text)` and `String::IsValidUtf8()`.
+fdf files are UTF-8. The parser preserves their bytes without normalization or re-escaping and strips
+a leading byte-order mark. Invalid UTF-8 still parses unchanged, but the diagnostic callback receives
+a non-fatal warning. Check input with `fdf::IsValidUtf8(text)` or `String::IsValidUtf8()`.
 
 One thing to know: `\u`/`\U` escapes are kept as literal text right now, they aren't decoded into
 characters. Write the actual UTF-8 character if you want it in the value.
@@ -170,13 +167,13 @@ which means even parsing two separate files on two threads can race.
 
 ## Is there a binary format?
 
-Not yet. fdf is text-only today. A compact binary form for embedding and network transfer is a
-planned goal, but it isn't implemented, so don't count on it if you need it now.
+Not yet. fdf is text-only. A compact binary form for embedding and network transfer is planned but
+not implemented.
 
-## Can I use it from C, Python, or another language?
+## Can I use it from C, Python or another language?
 
-Not yet, the library is C++ only today and needs a C++26 capable compiler. A stable C ABI is planned
-as the foundation for other language bindings, but the API and value layouts need to settle first.
+Not yet. The library is C++ only and requires a C++26-capable compiler. A stable C ABI is planned as
+the base for other language bindings, after the API and value layouts settle.
 
 ## Is the format stable?
 
@@ -185,19 +182,16 @@ but if you want to start using it, pin to a release version. A spec is also plan
 
 ## How do I add it to my project?
 
-fdf is a single header. Drop [fdf.h](../include/fdf.h) into a directory on your project's include path,
-then `#include "fdf.h"`, and build with a C++26-capable compiler. There's also an optional C++ module
-build if you'd rather `import fdf;`. [Building](Building.md) covers the requirements and the build options (like `FDF_NO_COMMENTS`).
+fdf is a single header. Put [fdf.h](../include/fdf.h) on your project's include path, then
+`#include "fdf.h"` and build with a C++26-capable compiler. The optional module build supports
+`import fdf;`. [Building](Building.md) covers requirements and options such as `FDF_NO_COMMENTS`.
 
 ## Why the 30-character limit on names?
 
-It's a deliberate tradeoff. Identifiers are stored inline right next to the node, which keeps lookups
-cache-friendly and nodes a fixed small size, and 30 characters is what fits. 30 chars is a reasonable
-limit for most use cases. If you hit that limit, you might choose to shorten your names or nest them
-for more context. You can also get to 38 chars, if you disable comments, but that's not recommended,
-if the only purpose is to get longer identifiers.
+Identifiers are stored inline with each node, which keeps nodes small and lookups cache-friendly.
+The layout has room for 30 characters. If that is not enough, shorten the name or add another nesting
+level. Disabling comments raises the limit to 38, but do not disable them solely for longer names.
 
 ## Does FDF support schemas or automatic struct serialization?
 
-Not yet, but they are planned. We plan to leverage C++26 reflection for this. Other means of
-achieving such feature can be discussed.
+Not yet. Both features are planned around C++26 reflection, but the design is still open.

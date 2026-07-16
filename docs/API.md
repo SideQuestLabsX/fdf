@@ -18,13 +18,16 @@ UniqueEntryPtr ParseBuffer(std::string_view);               // constexpr-friendl
 template<Style STYLE = {}>
 bool WriteFile(const Entry&, const std::filesystem::path&, bool bCreateIfNotExists = true);
 template<Style STYLE = {}>
-void WriteBuffer(const Entry& root, std::string& out);
+fdf::String WriteBuffer(const Entry& root);
 ```
 
-`ParseBuffer`, `WriteBuffer`, `NewEntry` and the whole `Entry` interface are `constexpr`,
-so you can parse, inspect and serialize inside a `consteval` function. The optional
-`DIAG` template argument is a compile-time diagnostic callback, see
+`ParseBuffer`, `WriteBuffer`, `NewEntry` and the whole `Entry` interface are `constexpr`
+and work inside a `consteval` function. The optional
+`DIAG` template argument is a compile-time diagnostic callback. See
 [Diagnostics](Diagnostics.md).
+
+`WriteFile(..., false)` only overwrites an existing regular file. The default creates the
+file and missing parent directories. Bare filenames use the current directory.
 
 `Type` is the tag every entry carries
 
@@ -35,14 +38,14 @@ enum class Type : uint8_t { Map, Array, Null, Nil = Null, Bool, Int, UInt, Float
 
 ## Reading values
 
-`GetChild` looks up by a dotted path, map keys and array indices both work. It returns
-`nullptr` when the path doesn't exist
+`GetChild` accepts a dotted path containing map keys and array indices. It returns
+`nullptr` when the path doesn't exist.
 
 ```cpp
 Entry*       GetChild(path...);          // "window.title", "items.0.name"
 Entry*       GetDirectChild(key);        // single level, by name or index
 std::string_view GetIdentifier()  const; // this node's key
-std::string  GetFullIdentifier()  const; // dotted path from the root
+fdf::String  GetFullIdentifier()  const; // dotted path from the root
 fdf::String& GetComment();               // + const overload, converts to std::string_view
 Type         GetType()            const;
 uint32_t     GetChildCount()      const;
@@ -83,8 +86,15 @@ template<auto FLAGS = ForEachFlags::None>
 void ForEach(auto&& callback);   // callback(Entry&) or callback(const Entry&)
 ```
 
-`ForEachFlags` are bit flags you can combine, `Recursive`, `Group` (visit similar types
-together), `IncludeSelf`, plus `None` and `All`
+`ForEachFlags` are bit flags, combined with `|`:
+
+| Flag | Effect |
+|------|--------|
+| `None` | visit direct children only |
+| `Recursive` | descend into nested containers |
+| `Group` | visit entries of similar type together |
+| `IncludeSelf` | visit the starting node too |
+| `All` | all of the above |
 
 ```cpp
 root->ForEach<fdf::ForEachFlags::Recursive>([](const fdf::Entry& e)
@@ -100,8 +110,8 @@ Entry* Emplace(std::string_view key);    // add a child, returns it ("" for arra
 Entry* AddChild(UniqueEntryPtr& e);      // adopt an existing node
 
 void SetValue(value);                    // bool, integer, float, string, Version, Timestamp...
-                                         // std::span for a pack OR you could just GetValue() and
-                                         // edit each member separately. (Can't change member count) 
+                                         // pass std::span for a pack, or edit components through
+                                         // GetValue(); the component count stays fixed
 bool SetIdentifier(std::string_view);
 void SetType(Type);
 void Resize(uint32_t);                   // grow/shrink a bool/int/uint/float/version/string pack; tail zero/empty
@@ -113,7 +123,7 @@ std::vector<UniqueEntryPtr> OrphanChildren();
 ```
 
 `SetValue(fdf::ArrayType{})` / `SetValue(fdf::MapType{})` turn a node into an empty
-container, then `Emplace` its children
+container. Then use `Emplace` to add its children.
 
 ```cpp
 UniqueEntryPtr root = fdf::NewEntry();
@@ -134,20 +144,19 @@ Writing the tree back out is covered in [Styling](Styling.md).
 ## fdf::String
 
 The string value type. 8 bytes: a single pointer to a `[u32 size][u32 capacity][chars…][\0]` block.
-It mirrors most of the `std::string`'s API for edit and delegates most of the read operations to std::string_view.
+It mirrors most of `std::string`'s mutable API and delegates most reads to `std::string_view`.
+It can be converted to/from `std::string`.
 
-Deliberate divergences from `std::string`:
+Deliberate differences from `std::string`:
 
-- **`substr` returns a `std::string_view`** into the block, not a new `String`. That view, like
+- `substr` returns a `std::string_view` into the block, not a new `String`. That view, like
   any `string_view`, `data()`, `c_str()`, iterator or `operator[]` reference, dangles the moment
   the string is mutated or destroyed.
-- **Everything is `noexcept` and nothing throws.** Out-of-range access asserts, so there is no
-  `at()`.
-- **Sizes are `size_t` on the interface, storage stays `uint32_t`,** so a size past 4GB asserts.
+- All operations are `noexcept`. Out-of-range access asserts, so there is no `at()`.
+- Sizes are `size_t` on the interface, storage stays `uint32_t`, so a size past 4GB asserts.
   `npos` is `std::string_view::npos`.
-- **No allocator surface, no `shrink_to_fit`, no SSO.** The slab allocator makes the first two
-  no-ops.
-- **Free `operator+` covers every `String`/`string_view`/`char` mix,** with `String&&` overloads
+- No allocator API, `shrink_to_fit`, or SSO. Slab buckets make `shrink_to_fit` a no-op.
+- Free `operator+` covers every `String`/`string_view`/`char` mix, with `String&&` overloads
   on either side that grow an existing buffer in place instead of allocating fresh.
 
 ```cpp
@@ -159,8 +168,8 @@ if(s.ends_with("config") && s.contains("-"))
 
 ## Combining documents
 
-Merge a second document into an existing tree. Comment conflicts are resolved by
-`fdf::CommentCombineStrategy`
+Merge a second document into an existing tree. `fdf::CommentCombineStrategy` resolves
+comment conflicts.
 
 ```cpp
 template<auto DIAG = nullptr>
@@ -169,6 +178,10 @@ template<auto DIAG = nullptr>
 bool ParseCombineBuffer(std::string_view, CommentCombineStrategy = UseNewIfExistingIsEmpty);
 bool Combine(UniqueEntryPtr& other, CommentCombineStrategy = UseNewIfExistingIsEmpty);
 ```
+
+When `Combine` succeeds, it consumes `other`. Incoming values replace matching map keys,
+while unrelated keys stay in place. Invalid or incompatible input returns `false` without
+consuming `other`.
 
 | Strategy | Behavior |
 |----------|----------|

@@ -45,6 +45,7 @@
     #include <ranges>
     #include <span>
     #include <string>
+    #include <string_view>
     #include <type_traits>
     #include <utility>
     #include <vector>
@@ -162,11 +163,12 @@ FDF_EXPORT namespace fdf
         DiagnosticType     type     = DiagnosticType::UnexpectedToken;
         std::string_view   message;     // offending text, or a short description
         uint32_t           line   = 0;  // 1-based line number
-        uint32_t           column = 0;
+        uint32_t           column = 0;  // 1-based byte column
         uint32_t           offset = 0;  // byte offset into the source buffer
     };
 
     class Entry;
+    class String;
 }
 
 
@@ -177,6 +179,8 @@ namespace fdf::detail
 {
     template<auto DIAGNOSTIC_CALLBACK = nullptr>
     struct Utils;
+
+    FDF_EXPORT_INTERNAL class GlobalAllocator;
 
     template<typename T>
     concept IsValidIDType = std::integral<std::remove_cvref_t<T>> || std::convertible_to<std::remove_cvref_t<T>, std::string_view>;
@@ -197,8 +201,8 @@ namespace fdf::detail
     inline constexpr auto UINT32_MAX_VALUE = std::numeric_limits<uint32_t>::max();
     inline constexpr auto UINT64_MAX_VALUE = std::numeric_limits<uint64_t>::max();
 
-    // Returns offset of the first ill-formed byte, or size() if all valid
-    // Rejects overlong, surrogates (U+D800-U+DFFF), and > U+10FFFF
+    // returns the first ill-formed byte offset or size() when valid
+    // rejects overlong encodings, surrogates and code points above U+10FFFF
     FDF_EXPORT_INTERNAL [[nodiscard]] constexpr size_t Utf8FirstInvalidByte(std::string_view s) noexcept
     {
         const size_t n = s.size();
@@ -373,7 +377,7 @@ FDF_EXPORT namespace fdf
 
         // --- Parse / serialize -----------------------------------------------------------------
         [[nodiscard]] static constexpr Timestamp FromText(std::string_view ts) noexcept;
-        constexpr void AppendTo(std::string& out) const noexcept;
+        constexpr void AppendTo(String& out) const noexcept;
 
     private:
         [[nodiscard]] static constexpr bool IsLeap(int y) noexcept  { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
@@ -403,7 +407,7 @@ FDF_EXPORT namespace fdf
             m = static_cast<uint8_t>(mm);
             d = static_cast<uint8_t>(dd);
         }
-        static constexpr void AppendPadded(std::string& out, uint32_t v, uint8_t width) noexcept
+        static constexpr void AppendPadded(auto& out, uint32_t v, uint8_t width) noexcept
         {
             char buf[10];
             uint8_t n = 0;
@@ -416,8 +420,8 @@ FDF_EXPORT namespace fdf
     };
 
 
-    // Parse + validate in one pass (the single source of truth; IsValidTimestamp wraps this)
-    // Returns a Timestamp with bValid == false on any structural or range error
+    // parses and validates in one pass
+    // IsValidTimestamp delegates here and errors leave bValid false
     constexpr Timestamp Timestamp::FromText(std::string_view ts) noexcept
     {
         Timestamp t;
@@ -451,11 +455,16 @@ FDF_EXPORT namespace fdf
             if(pos < ts.size() && ts[pos] == 'W')
             {
                 if(!(digitsAt(pos + 1, 2) && pos + 3 < ts.size() && ts[pos + 3] == '-' &&
-                     digitsAt(pos + 4, 1) && pos + 5 == ts.size()))
+                     digitsAt(pos + 4, 1)))
                     return t;
                 const int week    = num(pos + 1, 2);
                 const int weekday  = num(pos + 4, 1);
                 if(week < 1 || week > 53 || weekday < 1 || weekday > 7)
+                    return t;
+
+                const int64_t jan1 = DaysFromCivil(t.year, 1, 1);
+                const int jan1Mon0 = static_cast<int>(((jan1 % 7) + 7 + 3) % 7);
+                if(week == 53 && jan1Mon0 != 3 && !(jan1Mon0 == 2 && IsLeap(t.year)))
                     return t;
 
                 // ISO week date -> the Monday of week 1 is the Monday on/before Jan 4
@@ -463,40 +472,41 @@ FDF_EXPORT namespace fdf
                 const int     jan4Mon0 = static_cast<int>(((jan4 % 7) + 7 + 3) % 7);
                 CivilFromDays(jan4 - jan4Mon0 + int64_t(week - 1) * 7 + (weekday - 1), t.year, t.month, t.day);
                 t.dateKind = DateKind::Week;
-                t.bValid = true;
-                return t;
-            }
-
-            if(!digitsAt(pos, 2))
-                return t;
-
-            if(pos + 2 < ts.size() && ts[pos + 2] == '-')
-            {
-                if(!digitsAt(pos + 3, 2))
-                    return t;
-                const int month = num(pos, 2);
-                const int day   = num(pos + 3, 2);
-                constexpr int DAYS_IN_MONTH[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-                if(month < 1 || month > 12)
-                    return t;
-                const int maxDay = (month == 2 && IsLeap(t.year))? 29 : DAYS_IN_MONTH[month - 1];
-                if(day < 1 || day > maxDay)
-                    return t;
-                t.month = static_cast<uint8_t>(month);
-                t.day   = static_cast<uint8_t>(day);
                 pos += 5;
             }
-            else if(pos + 2 < ts.size() && digit(ts[pos + 2]))
-            {
-                const int ordinal = num(pos, 3);
-                if(ordinal < 1 || ordinal > (IsLeap(t.year)? 366 : 365))
-                    return t;
-                CivilFromDays(DaysFromCivil(t.year, 1, 1) + (ordinal - 1), t.year, t.month, t.day);
-                t.dateKind = DateKind::Ordinal;
-                pos += 3;
-            }
             else
-                return t;
+            {
+                if(!digitsAt(pos, 2))
+                    return t;
+
+                if(pos + 2 < ts.size() && ts[pos + 2] == '-')
+                {
+                    if(!digitsAt(pos + 3, 2))
+                        return t;
+                    const int month = num(pos, 2);
+                    const int day   = num(pos + 3, 2);
+                    constexpr int DAYS_IN_MONTH[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+                    if(month < 1 || month > 12)
+                        return t;
+                    const int maxDay = (month == 2 && IsLeap(t.year))? 29 : DAYS_IN_MONTH[month - 1];
+                    if(day < 1 || day > maxDay)
+                        return t;
+                    t.month = static_cast<uint8_t>(month);
+                    t.day   = static_cast<uint8_t>(day);
+                    pos += 5;
+                }
+                else if(pos + 2 < ts.size() && digit(ts[pos + 2]))
+                {
+                    const int ordinal = num(pos, 3);
+                    if(ordinal < 1 || ordinal > (IsLeap(t.year)? 366 : 365))
+                        return t;
+                    CivilFromDays(DaysFromCivil(t.year, 1, 1) + (ordinal - 1), t.year, t.month, t.day);
+                    t.dateKind = DateKind::Ordinal;
+                    pos += 3;
+                }
+                else
+                    return t;
+            }
 
             if(pos == ts.size()) { t.bValid = true; return t; }
             if(ts[pos] != 'T') return t;
@@ -570,9 +580,405 @@ FDF_EXPORT namespace fdf
         return t;
     }
 
+    using UniqueEntryPtr = std::unique_ptr<Entry, detail::EntryDeleter>;
+
+    // 8-byte slab-backed mutable string, no SSO: [u32 size][u32 capacity][chars...]['\0']
+    class String
+    {
+    public:
+        using value_type = char;
+        static constexpr size_t npos = std::string_view::npos;
+
+        constexpr String() noexcept = default;
+        constexpr String(std::string_view value) noexcept  { assign(value); }
+        constexpr String(size_t count, char ch) noexcept  { resize(count, ch); }
+        constexpr String(const String& other) noexcept  { assign(other); }
+        constexpr String(String&& other) noexcept
+            : ptr(other.ptr)
+        {
+            other.ptr = nullptr;
+        }
+        constexpr ~String() noexcept  { Free(); }
+
+        constexpr String& operator=(std::string_view value) noexcept  { return assign(value); }
+        constexpr String& operator=(const String& other) noexcept
+        {
+            if(this != &other)
+                assign(other);
+            return *this;
+        }
+        constexpr String& operator=(String&& other) noexcept
+        {
+            if(this != &other)
+            {
+                Free();
+                ptr = other.ptr;
+                other.ptr = nullptr;
+            }
+            return *this;
+        }
+
+        [[nodiscard]] constexpr operator std::string_view() const noexcept  { return View(); }
+        [[nodiscard]] explicit operator std::string() const  { return std::string(View()); }
+
+        // Reads
+        [[nodiscard]] constexpr size_t      size()     const noexcept  { return View().size(); }
+        [[nodiscard]] constexpr size_t      length()   const noexcept  { return View().size(); }
+        [[nodiscard]] constexpr bool        empty()    const noexcept  { return View().empty(); }
+        [[nodiscard]] constexpr size_t      capacity() const noexcept  { return Capacity(); }
+        [[nodiscard]] static constexpr size_t max_size() noexcept  { return detail::UINT32_MAX_VALUE - HEADER_SIZE - 1; }
+        [[nodiscard]] constexpr const char* data()     const noexcept  { return View().data(); }
+        [[nodiscard]] constexpr char*       data()           noexcept  { return ptr? ptr + HEADER_SIZE : nullptr; }
+        [[nodiscard]] constexpr const char* c_str()    const noexcept  { return ptr? ptr + HEADER_SIZE : ""; }
+
+        [[nodiscard]] constexpr char&       operator[](size_t index)       noexcept  { assert(index < size() && "String index out of range"); return ptr[HEADER_SIZE + index]; }
+        [[nodiscard]] constexpr const char& operator[](size_t index) const noexcept  { assert(index < size() && "String index out of range"); return ptr[HEADER_SIZE + index]; }
+        [[nodiscard]] constexpr char&       front()       noexcept  { assert(!empty() && "front on empty String"); return (*this)[0]; }
+        [[nodiscard]] constexpr const char& front() const noexcept  { assert(!empty() && "front on empty String"); return (*this)[0]; }
+        [[nodiscard]] constexpr char&       back()        noexcept  { assert(!empty() && "back on empty String"); return (*this)[size() - 1]; }
+        [[nodiscard]] constexpr const char& back()  const noexcept  { assert(!empty() && "back on empty String"); return (*this)[size() - 1]; }
+
+        [[nodiscard]] constexpr char*       begin()        noexcept  { return data(); }
+        [[nodiscard]] constexpr char*       end()          noexcept  { return empty()? data() : data() + size(); }
+        [[nodiscard]] constexpr const char* begin()  const noexcept  { return View().data(); }
+        [[nodiscard]] constexpr const char* end()    const noexcept  { const auto v = View(); return v.empty()? v.data() : v.data() + v.size(); }
+        [[nodiscard]] constexpr const char* cbegin() const noexcept  { return begin(); }
+        [[nodiscard]] constexpr const char* cend()   const noexcept  { return end(); }
+
+        [[nodiscard]] constexpr size_t find(std::string_view s, size_t pos = 0)    const noexcept  { return View().find(s, pos); }
+        [[nodiscard]] constexpr size_t find(char c, size_t pos = 0)                const noexcept  { return View().find(c, pos); }
+        [[nodiscard]] constexpr size_t rfind(std::string_view s, size_t pos = npos) const noexcept  { return View().rfind(s, pos); }
+        [[nodiscard]] constexpr size_t rfind(char c, size_t pos = npos)             const noexcept  { return View().rfind(c, pos); }
+        [[nodiscard]] constexpr size_t find_first_of(std::string_view s, size_t pos = 0)     const noexcept  { return View().find_first_of(s, pos); }
+        [[nodiscard]] constexpr size_t find_first_of(char c, size_t pos = 0)                 const noexcept  { return View().find_first_of(c, pos); }
+        [[nodiscard]] constexpr size_t find_last_of(std::string_view s, size_t pos = npos)   const noexcept  { return View().find_last_of(s, pos); }
+        [[nodiscard]] constexpr size_t find_last_of(char c, size_t pos = npos)               const noexcept  { return View().find_last_of(c, pos); }
+        [[nodiscard]] constexpr size_t find_first_not_of(std::string_view s, size_t pos = 0)   const noexcept  { return View().find_first_not_of(s, pos); }
+        [[nodiscard]] constexpr size_t find_first_not_of(char c, size_t pos = 0)               const noexcept  { return View().find_first_not_of(c, pos); }
+        [[nodiscard]] constexpr size_t find_last_not_of(std::string_view s, size_t pos = npos) const noexcept  { return View().find_last_not_of(s, pos); }
+        [[nodiscard]] constexpr size_t find_last_not_of(char c, size_t pos = npos)             const noexcept  { return View().find_last_not_of(c, pos); }
+        [[nodiscard]] constexpr bool starts_with(std::string_view s) const noexcept  { return View().starts_with(s); }
+        [[nodiscard]] constexpr bool starts_with(char c)             const noexcept  { return View().starts_with(c); }
+        [[nodiscard]] constexpr bool ends_with(std::string_view s)   const noexcept  { return View().ends_with(s); }
+        [[nodiscard]] constexpr bool ends_with(char c)               const noexcept  { return View().ends_with(c); }
+        [[nodiscard]] constexpr bool contains(std::string_view s)    const noexcept  { return View().contains(s); }
+        [[nodiscard]] constexpr bool contains(char c)                const noexcept  { return View().contains(c); }
+        [[nodiscard]] constexpr int  compare(std::string_view s)     const noexcept  { return View().compare(s); }
+        [[nodiscard]] constexpr int  compare(size_t pos, size_t count, std::string_view s) const noexcept  { return substr(pos, count).compare(s); }
+        [[nodiscard]] constexpr bool IsValidUtf8()                   const noexcept  { return detail::Utf8FirstInvalidByte(View()) == size(); }
+
+        // Returns a view into this block, dangles on the next mutation
+        [[nodiscard]] constexpr std::string_view substr(size_t pos = 0, size_t count = npos) const noexcept
+        {
+            std::string_view v = View();
+            if(pos > v.size())
+            {
+                assert(false && "substr pos out of range");
+                pos = v.size();
+            }
+            return v.substr(pos, count);
+        }
+
+        // exact String overloads avoid MSVC C2666 from rewritten reversed candidates
+        [[nodiscard]] constexpr bool operator==(const String& other) const noexcept  { return View() == std::string_view(other); }
+        [[nodiscard]] constexpr std::strong_ordering operator<=>(const String& other) const noexcept  { return View() <=> std::string_view(other); }
+        [[nodiscard]] constexpr bool operator==(std::string_view value) const noexcept  { return View() == value; }
+        [[nodiscard]] constexpr std::strong_ordering operator<=>(std::string_view value) const noexcept  { return View() <=> value; }
+
+        // Edits
+        constexpr String& assign(std::string_view value) noexcept
+        {
+            assert(value.size() <= max_size() && "String size overflow");
+            if(AliasesBlock(value))
+            {
+                const size_t sourceOffset = static_cast<size_t>(value.data() - data());
+                const uint32_t newSize = static_cast<uint32_t>(value.size());
+                for(uint32_t i = 0; i < newSize; i++)
+                    ptr[HEADER_SIZE + i] = ptr[HEADER_SIZE + sourceOffset + i];
+                StoreU32(0, newSize);
+                ptr[HEADER_SIZE + newSize] = '\0';
+                return *this;
+            }
+            const uint32_t newSize = static_cast<uint32_t>(value.size());
+            if(newSize > Capacity())
+                Grow(newSize);
+            for(uint32_t i = 0; i < newSize; i++)
+                ptr[HEADER_SIZE + i] = value[i];
+            if(ptr)
+            {
+                StoreU32(0, newSize);
+                ptr[HEADER_SIZE + newSize] = '\0';
+            }
+            return *this;
+        }
+
+        constexpr String& append(std::string_view value) noexcept
+        {
+            if(value.empty())
+                return *this;
+            const bool bAliasesBlock = AliasesBlock(value);
+            const size_t sourceOffset = bAliasesBlock? static_cast<size_t>(value.data() - data()) : 0;
+            const size_t oldSize = size();
+            const size_t newSize = oldSize + value.size();
+            assert(newSize <= max_size() && "String size overflow");
+            if(newSize > Capacity())
+                Grow(static_cast<uint32_t>(newSize));
+            const char* const source = bAliasesBlock? data() + sourceOffset : value.data();
+            for(size_t i = 0; i < value.size(); i++)
+                ptr[HEADER_SIZE + oldSize + i] = source[i];
+            StoreU32(0, static_cast<uint32_t>(newSize));
+            ptr[HEADER_SIZE + newSize] = '\0';
+            return *this;
+        }
+
+        constexpr String& append(const char* first, const char* last) noexcept
+        {
+            assert(first <= last);
+            return append(std::string_view(first, static_cast<size_t>(last - first)));
+        }
+
+        constexpr String& append(size_t count, char ch) noexcept
+        {
+            return insert(size(), count, ch);
+        }
+
+        constexpr void push_back(char c) noexcept  { (void)append(std::string_view(&c, 1)); }
+        constexpr void pop_back() noexcept
+        {
+            assert(!empty() && "pop_back on empty String");
+            const uint32_t newSize = static_cast<uint32_t>(size()) - 1;
+            StoreU32(0, newSize);
+            ptr[HEADER_SIZE + newSize] = '\0';
+        }
+
+        constexpr String& operator+=(std::string_view value) noexcept  { return append(value); }
+        constexpr String& operator+=(char c) noexcept  { push_back(c); return *this; }
+
+        constexpr String& insert(size_t pos, std::string_view value) noexcept
+        {
+            assert(pos <= size() && "insert pos out of range");
+            if(value.empty())
+                return *this;
+            if(AliasesBlock(value))
+            {
+                String temp(value);
+                return insert(pos, std::string_view(temp));
+            }
+            const size_t oldSize = size();
+            const size_t newSize = oldSize + value.size();
+            assert(newSize <= max_size() && "String size overflow");
+            if(newSize > Capacity())
+                Grow(static_cast<uint32_t>(newSize));
+            for(size_t i = oldSize; i > pos; i--)
+                ptr[HEADER_SIZE + i - 1 + value.size()] = ptr[HEADER_SIZE + i - 1];
+            for(size_t i = 0; i < value.size(); i++)
+                ptr[HEADER_SIZE + pos + i] = value[i];
+            StoreU32(0, static_cast<uint32_t>(newSize));
+            ptr[HEADER_SIZE + newSize] = '\0';
+            return *this;
+        }
+
+        constexpr String& insert(size_t pos, size_t count, char ch) noexcept
+        {
+            assert(pos <= size() && "insert pos out of range");
+            if(count == 0)
+                return *this;
+            const size_t oldSize = size();
+            const size_t newSize = oldSize + count;
+            assert(newSize <= max_size() && "String size overflow");
+            if(newSize > Capacity())
+                Grow(static_cast<uint32_t>(newSize));
+            for(size_t i = oldSize; i > pos; i--)
+                ptr[HEADER_SIZE + i - 1 + count] = ptr[HEADER_SIZE + i - 1];
+            for(size_t i = 0; i < count; i++)
+                ptr[HEADER_SIZE + pos + i] = ch;
+            StoreU32(0, static_cast<uint32_t>(newSize));
+            ptr[HEADER_SIZE + newSize] = '\0';
+            return *this;
+        }
+
+        constexpr String& erase(size_t pos = 0, size_t count = npos) noexcept
+        {
+            assert(pos <= size() && "erase pos out of range");
+            const size_t oldSize = size();
+            const size_t removed = std::min(count, oldSize - pos);
+            for(size_t i = pos + removed; i < oldSize; i++)
+                ptr[HEADER_SIZE + i - removed] = ptr[HEADER_SIZE + i];
+            if(ptr)
+            {
+                const uint32_t newSize = static_cast<uint32_t>(oldSize - removed);
+                StoreU32(0, newSize);
+                ptr[HEADER_SIZE + newSize] = '\0';
+            }
+            return *this;
+        }
+
+        constexpr String& replace(size_t pos, size_t count, std::string_view value) noexcept
+        {
+            assert(pos <= size() && "replace pos out of range");
+            if(AliasesBlock(value))
+            {
+                String temp(value);
+                return replace(pos, count, std::string_view(temp));
+            }
+            const size_t oldSize = size();
+            const size_t removed = std::min(count, oldSize - pos);
+            const size_t tailStart = pos + removed;
+            const size_t tailLen = oldSize - tailStart;
+            const size_t newSize = oldSize - removed + value.size();
+            assert(newSize <= max_size() && "String size overflow");
+            if(newSize > Capacity())
+                Grow(static_cast<uint32_t>(newSize));
+            if(value.size() > removed)
+            {
+                for(size_t i = 0; i < tailLen; i++)
+                    ptr[HEADER_SIZE + newSize - 1 - i] = ptr[HEADER_SIZE + oldSize - 1 - i];
+            }
+            else if(value.size() < removed)
+            {
+                for(size_t i = 0; i < tailLen; i++)
+                    ptr[HEADER_SIZE + pos + value.size() + i] = ptr[HEADER_SIZE + tailStart + i];
+            }
+            for(size_t i = 0; i < value.size(); i++)
+                ptr[HEADER_SIZE + pos + i] = value[i];
+            if(ptr)
+            {
+                StoreU32(0, static_cast<uint32_t>(newSize));
+                ptr[HEADER_SIZE + newSize] = '\0';
+            }
+            return *this;
+        }
+
+        constexpr String& replace(size_t pos, size_t count, size_t replacementCount, char ch) noexcept
+        {
+            assert(pos <= size() && "replace pos out of range");
+            const size_t oldSize = size();
+            const size_t removed = std::min(count, oldSize - pos);
+            const size_t tailStart = pos + removed;
+            const size_t tailLen = oldSize - tailStart;
+            const size_t newSize = oldSize - removed + replacementCount;
+            assert(newSize <= max_size() && "String size overflow");
+            if(newSize > Capacity())
+                Grow(static_cast<uint32_t>(newSize));
+            if(replacementCount > removed)
+            {
+                for(size_t i = 0; i < tailLen; i++)
+                    ptr[HEADER_SIZE + newSize - 1 - i] = ptr[HEADER_SIZE + oldSize - 1 - i];
+            }
+            else if(replacementCount < removed)
+            {
+                for(size_t i = 0; i < tailLen; i++)
+                    ptr[HEADER_SIZE + pos + replacementCount + i] = ptr[HEADER_SIZE + tailStart + i];
+            }
+            for(size_t i = 0; i < replacementCount; i++)
+                ptr[HEADER_SIZE + pos + i] = ch;
+            if(ptr)
+            {
+                StoreU32(0, static_cast<uint32_t>(newSize));
+                ptr[HEADER_SIZE + newSize] = '\0';
+            }
+            return *this;
+        }
+
+        constexpr void clear() noexcept
+        {
+            if(ptr)
+            {
+                StoreU32(0, 0);
+                ptr[HEADER_SIZE] = '\0';
+            }
+        }
+
+        constexpr void resize(size_t n, char ch = ' ') noexcept
+        {
+            assert(n <= max_size() && "String size overflow");
+            const size_t oldSize = size();
+            if(n > Capacity())
+                Grow(static_cast<uint32_t>(n));
+            for(size_t i = oldSize; i < n; i++)
+                ptr[HEADER_SIZE + i] = ch;
+            if(ptr)
+            {
+                StoreU32(0, static_cast<uint32_t>(n));
+                ptr[HEADER_SIZE + n] = '\0';
+            }
+        }
+
+        constexpr void reserve(size_t newCapacity) noexcept
+        {
+            assert(newCapacity <= max_size() && "String capacity overflow");
+            if(newCapacity > Capacity())
+                Grow(static_cast<uint32_t>(newCapacity));
+        }
+
+        constexpr void swap(String& other) noexcept
+        {
+            std::swap(ptr, other.ptr);
+        }
+
+    private:
+        static constexpr uint32_t HEADER_SIZE = 2 * sizeof(uint32_t);
+
+        [[nodiscard]] constexpr std::string_view View() const noexcept  { return ptr? std::string_view{ptr + HEADER_SIZE, LoadU32(0)} : std::string_view{}; }
+
+        // detects source views that a mutation may move or free
+        [[nodiscard]] constexpr bool AliasesBlock(std::string_view value) const noexcept
+        {
+            if(!ptr || value.empty())
+                return false;
+            const char* const first = ptr + HEADER_SIZE;
+            const char* const last = first + Capacity() + 1;
+            if consteval
+            {
+                // constexpr cannot order pointers from different allocations
+                for(const char* p = first; p != last; ++p)
+                    if(p == value.data())
+                        return true;
+                return false;
+            }
+            return value.data() >= first && value.data() < last;
+        }
+
+        [[nodiscard]] constexpr uint32_t LoadU32(uint32_t offset) const noexcept
+        {
+            return  static_cast<uint32_t>(static_cast<unsigned char>(ptr[offset]))
+                 | (static_cast<uint32_t>(static_cast<unsigned char>(ptr[offset + 1])) << 8)
+                 | (static_cast<uint32_t>(static_cast<unsigned char>(ptr[offset + 2])) << 16)
+                 | (static_cast<uint32_t>(static_cast<unsigned char>(ptr[offset + 3])) << 24);
+        }
+        constexpr void StoreU32(uint32_t offset, uint32_t value) noexcept
+        {
+            ptr[offset]     = static_cast<char>(value & 0xFFu);
+            ptr[offset + 1] = static_cast<char>((value >> 8) & 0xFFu);
+            ptr[offset + 2] = static_cast<char>((value >> 16) & 0xFFu);
+            ptr[offset + 3] = static_cast<char>((value >> 24) & 0xFFu);
+        }
+
+        [[nodiscard]] constexpr uint32_t Capacity() const noexcept  { return ptr? LoadU32(sizeof(uint32_t)) : 0; }
+
+        constexpr char* AppendUninitialized(size_t count) noexcept
+        {
+            assert(count != 0 && "Cannot append an empty uninitialized range");
+            const size_t oldSize = size();
+            const size_t newSize = oldSize + count;
+            assert(newSize <= max_size() && "String size overflow");
+            if(newSize > Capacity())
+                Grow(static_cast<uint32_t>(newSize));
+            StoreU32(0, static_cast<uint32_t>(newSize));
+            ptr[HEADER_SIZE + newSize] = '\0';
+            return ptr + HEADER_SIZE + oldSize;
+        }
+
+        constexpr void Grow(uint32_t minCapacity) noexcept;
+        constexpr void Free() noexcept;
+
+        friend class Entry;
+        char* ptr = nullptr;
+    };
+
     // Serialize to canonical ISO-8601 calendar text (used when injecting a Timestamp value)
     // Ordinal/week origins are emitted as the equivalent calendar date
-    constexpr void Timestamp::AppendTo(std::string& out) const noexcept
+    constexpr void Timestamp::AppendTo(String& out) const noexcept
     {
         if(bHasDate)
         {
@@ -612,319 +1018,6 @@ FDF_EXPORT namespace fdf
         }
     }
 
-
-
-    using UniqueEntryPtr = std::unique_ptr<Entry, detail::EntryDeleter>;
-
-    // 8-byte slab-backed mutable string, no SSO: [u32 size][u32 capacity][chars...]['\0']
-    class String
-    {
-    public:
-        static constexpr size_t npos = std::string_view::npos;
-
-        constexpr String() noexcept = default;
-        constexpr String(std::string_view value) noexcept  { assign(value); }
-        constexpr String(const String& other) noexcept  { assign(other); }
-        constexpr String(String&& other) noexcept
-            : ptr(other.ptr)
-        {
-            other.ptr = nullptr;
-        }
-        constexpr ~String() noexcept  { Free(); }
-
-        constexpr String& operator=(std::string_view value) noexcept  { return assign(value); }
-        constexpr String& operator=(const String& other) noexcept
-        {
-            if(this != &other)
-                assign(other);
-            return *this;
-        }
-        constexpr String& operator=(String&& other) noexcept
-        {
-            if(this != &other)
-            {
-                Free();
-                ptr = other.ptr;
-                other.ptr = nullptr;
-            }
-            return *this;
-        }
-
-        [[nodiscard]] constexpr operator std::string_view() const noexcept  { return View(); }
-        [[nodiscard]] explicit operator std::string() const  { return std::string(View()); }
-
-        // Reads
-        [[nodiscard]] constexpr size_t      size()     const noexcept  { return View().size(); }
-        [[nodiscard]] constexpr size_t      length()   const noexcept  { return View().size(); }
-        [[nodiscard]] constexpr bool        empty()    const noexcept  { return View().empty(); }
-        [[nodiscard]] constexpr size_t      capacity() const noexcept  { return Capacity(); }
-        [[nodiscard]] constexpr const char* data()     const noexcept  { return View().data(); }
-        [[nodiscard]] constexpr char*       data()           noexcept  { return ptr? ptr + HEADER_SIZE : nullptr; }
-        [[nodiscard]] constexpr const char* c_str()    const noexcept  { return ptr? ptr + HEADER_SIZE : ""; }
-
-        [[nodiscard]] constexpr char&       operator[](size_t index)       noexcept  { assert(index < size() && "String index out of range"); return ptr[HEADER_SIZE + index]; }
-        [[nodiscard]] constexpr const char& operator[](size_t index) const noexcept  { assert(index < size() && "String index out of range"); return ptr[HEADER_SIZE + index]; }
-        [[nodiscard]] constexpr char&       front()       noexcept  { assert(!empty() && "front on empty String"); return (*this)[0]; }
-        [[nodiscard]] constexpr const char& front() const noexcept  { assert(!empty() && "front on empty String"); return (*this)[0]; }
-        [[nodiscard]] constexpr char&       back()        noexcept  { assert(!empty() && "back on empty String"); return (*this)[size() - 1]; }
-        [[nodiscard]] constexpr const char& back()  const noexcept  { assert(!empty() && "back on empty String"); return (*this)[size() - 1]; }
-
-        [[nodiscard]] constexpr char*       begin()        noexcept  { return data(); }
-        [[nodiscard]] constexpr char*       end()          noexcept  { return data() + size(); }
-        [[nodiscard]] constexpr const char* begin()  const noexcept  { return View().data(); }
-        [[nodiscard]] constexpr const char* end()    const noexcept  { return View().data() + View().size(); }
-        [[nodiscard]] constexpr const char* cbegin() const noexcept  { return begin(); }
-        [[nodiscard]] constexpr const char* cend()   const noexcept  { return end(); }
-
-        [[nodiscard]] constexpr size_t find(std::string_view s, size_t pos = 0)    const noexcept  { return View().find(s, pos); }
-        [[nodiscard]] constexpr size_t find(char c, size_t pos = 0)                const noexcept  { return View().find(c, pos); }
-        [[nodiscard]] constexpr size_t rfind(std::string_view s, size_t pos = npos) const noexcept  { return View().rfind(s, pos); }
-        [[nodiscard]] constexpr size_t rfind(char c, size_t pos = npos)             const noexcept  { return View().rfind(c, pos); }
-        [[nodiscard]] constexpr size_t find_first_of(std::string_view s, size_t pos = 0)     const noexcept  { return View().find_first_of(s, pos); }
-        [[nodiscard]] constexpr size_t find_last_of(std::string_view s, size_t pos = npos)   const noexcept  { return View().find_last_of(s, pos); }
-        [[nodiscard]] constexpr size_t find_first_not_of(std::string_view s, size_t pos = 0)   const noexcept  { return View().find_first_not_of(s, pos); }
-        [[nodiscard]] constexpr size_t find_last_not_of(std::string_view s, size_t pos = npos) const noexcept  { return View().find_last_not_of(s, pos); }
-        [[nodiscard]] constexpr bool starts_with(std::string_view s) const noexcept  { return View().starts_with(s); }
-        [[nodiscard]] constexpr bool starts_with(char c)             const noexcept  { return View().starts_with(c); }
-        [[nodiscard]] constexpr bool ends_with(std::string_view s)   const noexcept  { return View().ends_with(s); }
-        [[nodiscard]] constexpr bool ends_with(char c)               const noexcept  { return View().ends_with(c); }
-        [[nodiscard]] constexpr bool contains(std::string_view s)    const noexcept  { return View().contains(s); }
-        [[nodiscard]] constexpr bool contains(char c)                const noexcept  { return View().contains(c); }
-        [[nodiscard]] constexpr int  compare(std::string_view s)     const noexcept  { return View().compare(s); }
-        [[nodiscard]] constexpr bool IsValidUtf8()                   const noexcept  { return detail::Utf8FirstInvalidByte(View()) == size(); }
-
-        // Returns a view into this block, dangles on the next mutation
-        [[nodiscard]] constexpr std::string_view substr(size_t pos = 0, size_t count = npos) const noexcept
-        {
-            std::string_view v = View();
-            if(pos > v.size())
-            {
-                assert(false && "substr pos out of range");
-                pos = v.size();
-            }
-            return v.substr(pos, count);
-        }
-
-        // The String overloads are exact matches, so String-vs-String never trips MSVC's C2666 (ambiguous with the rewritten reversed candidate)
-        [[nodiscard]] constexpr bool operator==(const String& other) const noexcept  { return View() == std::string_view(other); }
-        [[nodiscard]] constexpr std::strong_ordering operator<=>(const String& other) const noexcept  { return View() <=> std::string_view(other); }
-        [[nodiscard]] constexpr bool operator==(std::string_view value) const noexcept  { return View() == value; }
-        [[nodiscard]] constexpr std::strong_ordering operator<=>(std::string_view value) const noexcept  { return View() <=> value; }
-
-        // Edits
-        constexpr String& assign(std::string_view value) noexcept
-        {
-            if(AliasesBlock(value))
-            {
-                String temp(value);
-                return assign(std::string_view(temp));
-            }
-            const uint32_t newSize = static_cast<uint32_t>(value.size());
-            assert(value.size() <= detail::UINT32_MAX_VALUE && "String size overflow");
-            if(newSize > Capacity())
-                Grow(newSize);
-            for(uint32_t i = 0; i < newSize; i++)
-                ptr[HEADER_SIZE + i] = value[i];
-            if(ptr)
-            {
-                StoreU32(0, newSize);
-                ptr[HEADER_SIZE + newSize] = '\0';
-            }
-            return *this;
-        }
-
-        constexpr String& append(std::string_view value) noexcept
-        {
-            if(value.empty())
-                return *this;
-            if(AliasesBlock(value))
-            {
-                String temp(value);
-                return append(std::string_view(temp));
-            }
-            const size_t oldSize = size();
-            const size_t newSize = oldSize + value.size();
-            assert(newSize <= detail::UINT32_MAX_VALUE && "String size overflow");
-            if(newSize > Capacity())
-                Grow(static_cast<uint32_t>(newSize));
-            for(size_t i = 0; i < value.size(); i++)
-                ptr[HEADER_SIZE + oldSize + i] = value[i];
-            StoreU32(0, static_cast<uint32_t>(newSize));
-            ptr[HEADER_SIZE + newSize] = '\0';
-            return *this;
-        }
-
-        constexpr void push_back(char c) noexcept  { (void)append(std::string_view(&c, 1)); }
-        constexpr void pop_back() noexcept
-        {
-            assert(!empty() && "pop_back on empty String");
-            const uint32_t newSize = static_cast<uint32_t>(size()) - 1;
-            StoreU32(0, newSize);
-            ptr[HEADER_SIZE + newSize] = '\0';
-        }
-
-        constexpr String& operator+=(std::string_view value) noexcept  { return append(value); }
-        constexpr String& operator+=(char c) noexcept  { push_back(c); return *this; }
-
-        constexpr String& insert(size_t pos, std::string_view value) noexcept
-        {
-            assert(pos <= size() && "insert pos out of range");
-            if(value.empty())
-                return *this;
-            if(AliasesBlock(value))
-            {
-                String temp(value);
-                return insert(pos, std::string_view(temp));
-            }
-            const size_t oldSize = size();
-            const size_t newSize = oldSize + value.size();
-            assert(newSize <= detail::UINT32_MAX_VALUE && "String size overflow");
-            if(newSize > Capacity())
-                Grow(static_cast<uint32_t>(newSize));
-            for(size_t i = oldSize; i > pos; i--)
-                ptr[HEADER_SIZE + i - 1 + value.size()] = ptr[HEADER_SIZE + i - 1];
-            for(size_t i = 0; i < value.size(); i++)
-                ptr[HEADER_SIZE + pos + i] = value[i];
-            StoreU32(0, static_cast<uint32_t>(newSize));
-            ptr[HEADER_SIZE + newSize] = '\0';
-            return *this;
-        }
-
-        constexpr String& erase(size_t pos = 0, size_t count = npos) noexcept
-        {
-            assert(pos <= size() && "erase pos out of range");
-            const size_t oldSize = size();
-            const size_t removed = std::min(count, oldSize - pos);
-            for(size_t i = pos + removed; i < oldSize; i++)
-                ptr[HEADER_SIZE + i - removed] = ptr[HEADER_SIZE + i];
-            if(ptr)
-            {
-                const uint32_t newSize = static_cast<uint32_t>(oldSize - removed);
-                StoreU32(0, newSize);
-                ptr[HEADER_SIZE + newSize] = '\0';
-            }
-            return *this;
-        }
-
-        constexpr String& replace(size_t pos, size_t count, std::string_view value) noexcept
-        {
-            assert(pos <= size() && "replace pos out of range");
-            if(AliasesBlock(value))
-            {
-                String temp(value);
-                return replace(pos, count, std::string_view(temp));
-            }
-            const size_t oldSize = size();
-            const size_t removed = std::min(count, oldSize - pos);
-            const size_t tailStart = pos + removed;
-            const size_t tailLen = oldSize - tailStart;
-            const size_t newSize = oldSize - removed + value.size();
-            assert(newSize <= detail::UINT32_MAX_VALUE && "String size overflow");
-            if(newSize > Capacity())
-                Grow(static_cast<uint32_t>(newSize));
-            if(value.size() > removed)
-            {
-                for(size_t i = 0; i < tailLen; i++)
-                    ptr[HEADER_SIZE + newSize - 1 - i] = ptr[HEADER_SIZE + oldSize - 1 - i];
-            }
-            else if(value.size() < removed)
-            {
-                for(size_t i = 0; i < tailLen; i++)
-                    ptr[HEADER_SIZE + pos + value.size() + i] = ptr[HEADER_SIZE + tailStart + i];
-            }
-            for(size_t i = 0; i < value.size(); i++)
-                ptr[HEADER_SIZE + pos + i] = value[i];
-            if(ptr)
-            {
-                StoreU32(0, static_cast<uint32_t>(newSize));
-                ptr[HEADER_SIZE + newSize] = '\0';
-            }
-            return *this;
-        }
-
-        constexpr void clear() noexcept
-        {
-            if(ptr)
-            {
-                StoreU32(0, 0);
-                ptr[HEADER_SIZE] = '\0';
-            }
-        }
-
-        constexpr void resize(size_t n, char ch = ' ') noexcept
-        {
-            assert(n <= detail::UINT32_MAX_VALUE && "String size overflow");
-            const size_t oldSize = size();
-            if(n > Capacity())
-                Grow(static_cast<uint32_t>(n));
-            for(size_t i = oldSize; i < n; i++)
-                ptr[HEADER_SIZE + i] = ch;
-            if(ptr)
-            {
-                StoreU32(0, static_cast<uint32_t>(n));
-                ptr[HEADER_SIZE + n] = '\0';
-            }
-        }
-
-        constexpr void reserve(size_t newCapacity) noexcept
-        {
-            assert(newCapacity <= detail::UINT32_MAX_VALUE && "String capacity overflow");
-            if(newCapacity > Capacity())
-                Grow(static_cast<uint32_t>(newCapacity));
-        }
-
-        constexpr void swap(String& other) noexcept
-        {
-            char* temp = ptr;
-            ptr = other.ptr;
-            other.ptr = temp;
-        }
-
-    private:
-        static constexpr uint32_t HEADER_SIZE = 2 * sizeof(uint32_t);
-
-        [[nodiscard]] constexpr std::string_view View() const noexcept  { return ptr? std::string_view{ptr + HEADER_SIZE, LoadU32(0)} : std::string_view{}; }
-
-        // True when value points into this block, so a mutation would read bytes it is about to move or free
-        [[nodiscard]] constexpr bool AliasesBlock(std::string_view value) const noexcept
-        {
-            if(!ptr || value.empty())
-                return false;
-            const char* const last = ptr + HEADER_SIZE + Capacity() + 1;
-            if consteval
-            {
-                // relational comparison of pointers into different allocations is not a constant expression, scan by equality instead
-                for(const char* p = ptr; p != last; ++p)
-                    if(p == value.data())
-                        return true;
-                return false;
-            }
-            return value.data() >= ptr && value.data() < last;
-        }
-
-        [[nodiscard]] constexpr uint32_t LoadU32(uint32_t offset) const noexcept
-        {
-            return  static_cast<uint32_t>(static_cast<unsigned char>(ptr[offset]))
-                 | (static_cast<uint32_t>(static_cast<unsigned char>(ptr[offset + 1])) << 8)
-                 | (static_cast<uint32_t>(static_cast<unsigned char>(ptr[offset + 2])) << 16)
-                 | (static_cast<uint32_t>(static_cast<unsigned char>(ptr[offset + 3])) << 24);
-        }
-        constexpr void StoreU32(uint32_t offset, uint32_t value) noexcept
-        {
-            ptr[offset]     = static_cast<char>(value & 0xFFu);
-            ptr[offset + 1] = static_cast<char>((value >> 8) & 0xFFu);
-            ptr[offset + 2] = static_cast<char>((value >> 16) & 0xFFu);
-            ptr[offset + 3] = static_cast<char>((value >> 24) & 0xFFu);
-        }
-
-        [[nodiscard]] constexpr uint32_t Capacity() const noexcept  { return ptr? LoadU32(sizeof(uint32_t)) : 0; }
-
-        constexpr void Grow(uint32_t minCapacity) noexcept;
-        constexpr void Free() noexcept;
-
-        char* ptr = nullptr;
-    };
-
     [[nodiscard]] constexpr String operator+(const String& a, const String& b) noexcept
     {
         String result;
@@ -951,7 +1044,9 @@ FDF_EXPORT namespace fdf
     }
     [[nodiscard]] constexpr String operator+(const String& a, char b) noexcept
     {
-        String result(a);
+        String result;
+        result.reserve(a.size() + 1);
+        result.append(a);
         result.push_back(b);
         return result;
     }
@@ -972,14 +1067,14 @@ FDF_EXPORT namespace fdf
     class Entry
     {
     public:
+        // value moves would invalidate raw parent/child links
         Entry(const Entry&) = delete;
         Entry& operator=(const Entry&) = delete;
+        Entry(Entry&&) = delete;
+        Entry& operator=(Entry&&) = delete;
 
-        constexpr Entry(Entry&& other) noexcept;
-        constexpr Entry& operator=(Entry&& other) noexcept;
-
-        // Public so constexpr `new Entry{}` works on MSVC (no friend access to a private ctor in
-        // constant eval). Dtor stays private, so construct via NewEntry/Emplace
+        // public because MSVC rejects friend access to a private ctor in constexpr new
+        // the dtor stays private, construct through NewEntry/Emplace
         constexpr Entry() noexcept;
 
     private:
@@ -990,25 +1085,26 @@ FDF_EXPORT namespace fdf
         template<auto DIAGNOSTIC_CALLBACK>
         friend struct detail::Utils;
 
+        friend class detail::GlobalAllocator;
+
     private:
         char identifier[detail::MAX_IDENTIFIER_LENGTH + 1] = {};
         Type type = Type::Map;
         uint32_t size = 0;
-        uint32_t capacity = 0;  // runtime slab element capacity; 0 means the slab holds exactly `size`
+        uint32_t capacity = 0;  // runtime may exceed the request by slab bucket slack
         Entry* parent = nullptr;
 
         // Union of typed pointers, constexpr can't cast void*->T* (MSVC)
         // TODO: collapse to `void* data` once MSVC allows void*->T* in constant expressions
         union DataPtr
         {
-            void* raw = nullptr;
-            bool* boolArray;
-            std::vector<int64_t>* vInt;
-            std::vector<uint64_t>* vUInt;
-            std::vector<Version>* vVersion;
-            std::vector<double>* vFloat;
-            std::vector<String>* vString;
-            std::vector<Entry*>* vEntry;
+            Entry** e = nullptr;
+            bool* b;
+            int64_t* i;
+            uint64_t* u;
+            Version* v;
+            double* f;
+            String* s;
         };
         DataPtr data;
     #if !FDF_NO_COMMENTS
@@ -1016,85 +1112,36 @@ FDF_EXPORT namespace fdf
     #endif
 
     private:
-        template<typename T>
-        [[nodiscard]] constexpr std::vector<T>*& GetDataVector() noexcept
-        {
-            if constexpr(std::is_same_v<T, int64_t>)       return data.vInt;
-            else if constexpr(std::is_same_v<T, uint64_t>) return data.vUInt;
-            else if constexpr(std::is_same_v<T, Version>)  return data.vVersion;
-            else if constexpr(std::is_same_v<T, double>)   return data.vFloat;
-            else if constexpr(std::is_same_v<T, String>)   return data.vString;
-            else                                           return data.vEntry;   // Entry*
-        }
-        template<typename T>
-        [[nodiscard]] constexpr const std::vector<T>* GetDataVector() const noexcept
-        {
-            if constexpr(std::is_same_v<T, int64_t>)       return data.vInt;
-            else if constexpr(std::is_same_v<T, uint64_t>) return data.vUInt;
-            else if constexpr(std::is_same_v<T, Version>)  return data.vVersion;
-            else if constexpr(std::is_same_v<T, double>)   return data.vFloat;
-            else if constexpr(std::is_same_v<T, String>)   return data.vString;
-            else                                           return data.vEntry;
-        }
-
-        // runtime scalar alloc; records the granted bucket count in `capacity` so frees hit the same bucket
-        template<typename T>
-        constexpr T* AllocateSlab(uint32_t count) noexcept;
-
-        // grow/shrink the storage for one stored type; Resize dispatches to it per `type`
-        template<typename T>
-        constexpr void ResizeStorage(uint32_t _size) noexcept;
-
-        // consteval-only; runtime casts data.raw at the call site
-        template<typename T>
-        [[nodiscard]] constexpr T*& GetDataAs() noexcept
-        {
-            static_assert(std::is_same_v<T, bool>, "GetDataAs is bool-only");
-            return data.boolArray;
-        }
-        template<typename T>
-        [[nodiscard]] constexpr const T* GetDataAs() const noexcept
-        {
-            static_assert(std::is_same_v<T, bool>, "GetDataAs is bool-only");
-            return data.boolArray;
-        }
-
-        // Null-check the data union through the member matching `type` (the active one at constexpr)
+        // read the active union member selected by type
         [[nodiscard]] constexpr bool IsDataNull() const noexcept
         {
             switch(type)
             {
-                case Type::Bool:                                          return !data.boolArray;
-                case Type::Int:                                           return !data.vInt;
-                case Type::UInt:                                          return !data.vUInt;
-                case Type::Version:                                       return !data.vVersion;
-                case Type::Float:                                         return !data.vFloat;
-                case Type::String: case Type::Hex: case Type::Timestamp:  return !data.vString;
-                case Type::Array:  case Type::Map:                        return !data.vEntry;
+                case Type::Bool:                                          return !data.b;
+                case Type::Int:                                           return !data.i;
+                case Type::UInt:                                          return !data.u;
+                case Type::Version:                                       return !data.v;
+                case Type::Float:                                         return !data.f;
+                case Type::String: case Type::Hex: case Type::Timestamp:  return !data.s;
+                case Type::Array:  case Type::Map:                        return !data.e;
                 default:                                                  return true;   // Null / Nil hold no data
             }
         }
 
-        // Null the data pointer. At runtime `.raw` is the live member; at consteval there's no
-        // void*->T* cast, so activate the member matching `type` (reads there go through it)
+        // match the active union member to type for constexpr reads
         constexpr void ResetDataNull() noexcept
         {
-            if consteval
+            switch(type)
             {
-                switch(type)
-                {
-                    case Type::Bool:                                         data.boolArray = nullptr; break;
-                    case Type::Int:                                          data.vInt = nullptr;      break;
-                    case Type::UInt:                                         data.vUInt = nullptr;     break;
-                    case Type::Version:                                      data.vVersion = nullptr;  break;
-                    case Type::Float:                                        data.vFloat = nullptr;    break;
-                    case Type::String: case Type::Hex: case Type::Timestamp: data.vString = nullptr;   break;
-                    case Type::Array:  case Type::Map:                       data.vEntry = nullptr;    break;
-                    default:                                                 data.raw = nullptr;       break;
-                }
+                case Type::Bool:                                         data.b = nullptr; break;
+                case Type::Int:                                          data.i = nullptr; break;
+                case Type::UInt:                                         data.u = nullptr; break;
+                case Type::Version:                                      data.v = nullptr; break;
+                case Type::Float:                                        data.f = nullptr; break;
+                case Type::String: case Type::Hex: case Type::Timestamp: data.s = nullptr; break;
+                case Type::Array:  case Type::Map:                       data.e = nullptr; break;
+                default:                                                 data.e = nullptr; break;
             }
-            else
-                { data.raw = nullptr; }
         }
 
 
@@ -1123,44 +1170,59 @@ FDF_EXPORT namespace fdf
         }
 
         [[nodiscard]] constexpr std::string_view GetIdentifier() const noexcept  { return {identifier, GetIdentifierSize()}; }
-        [[nodiscard]] constexpr std::string GetFullIdentifier() const noexcept
+        [[nodiscard]] constexpr String GetFullIdentifier() const noexcept
         {
-            const Entry* prev = this;
-            const Entry* cur = parent;
-            std::string temp = std::string(GetIdentifier());
-            while(cur)
+            String result;
+            bool bHasSegment = false;
+            for(const Entry* current = this; current; current = current->parent)
             {
-                if(cur->GetIdentifierSize() == 0)
+                if(!current->parent && current->GetIdentifierSize() == 0)
+                    break;
+
+                const uint8_t identifierSize = current->GetIdentifierSize();
+                if(identifierSize != 0)
                 {
-                    if(cur->parent)
+                    char* destination = result.AppendUninitialized(identifierSize + (bHasSegment? 1U : 0U));
+                    if(bHasSegment)
+                        *destination++ = '.';
+                    for(uint8_t i = 0; i < identifierSize; i++)
+                        destination[i] = current->identifier[identifierSize - i - 1];
+                }
+                else if(current->parent && current->parent->type == Type::Array)
+                {
+                    const uint32_t index = current->parent->FindChildIndex(*current);
+                    assert(index != detail::UINT32_MAX_VALUE && "Index must be valid!");
+                    uint32_t remaining = index;
+                    uint8_t digitCount = 1;
+                    while(remaining >= 10)
                     {
-                        if(cur->parent->type == Type::Array)
-                        {
-                            const uint32_t index = cur->FindChildIndex(*prev);
-                            assert(index != detail::UINT32_MAX_VALUE && "Index must be valid!");
-                            temp = std::format("{}.{}", index, temp);
-                        }
-                        else
-                        {
-                            assert(false && "If it has a parent and no identifier, it must be a Type::Array element!");
-                            return temp;
-                        }
+                        remaining /= 10;
+                        digitCount++;
                     }
-                    else
+
+                    char* destination = result.AppendUninitialized(digitCount + (bHasSegment? 1U : 0U));
+                    if(bHasSegment)
+                        *destination++ = '.';
+                    remaining = index;
+                    for(uint8_t i = 0; i < digitCount; i++)
                     {
-                        assert(cur->type == Type::Map && "If it has no identifier and no parent, it must be a Type::Map! (Specifically the root map)");
-                        return temp;
+                        destination[i] = static_cast<char>('0' + remaining % 10);
+                        remaining /= 10;
                     }
                 }
                 else
                 {
-                    temp = std::format("{}.{}", cur->GetIdentifier(), temp);
+                    assert(false && "Only array elements may have an empty identifier");
+                    result.clear();
+                    return result;
                 }
-
-                prev = cur;
-                cur = cur->parent;
+                bHasSegment = true;
             }
-            return temp;
+
+            const size_t resultSize = result.size();
+            for(size_t i = 0; i < resultSize / 2; i++)
+                std::swap(result[i], result[resultSize - i - 1]);
+            return result;
         }
 
         [[nodiscard]] constexpr const String& GetComment() const noexcept;
@@ -1197,8 +1259,6 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr Entry* OrphanChild_INTERNAL(Entry& e) noexcept;
         [[nodiscard]] constexpr Entry* OrphanChild_INTERNAL(std::string_view _identifier) noexcept;
         [[nodiscard]] constexpr Entry* OrphanChild_INTERNAL(uint32_t index) noexcept;
-        [[nodiscard]] constexpr std::span<Entry*> OrphanChildren_INTERNAL() noexcept;
-
     public:
         template<detail::IsValidIDType T, detail::IsValidIDType... Args>
         [[nodiscard]] constexpr       Entry* GetChild(T&& param, Args&&... args) noexcept;
@@ -1219,6 +1279,10 @@ FDF_EXPORT namespace fdf
     private:
         [[nodiscard]] constexpr std::span<Entry*>         GetChildren_INTERNAL() noexcept;
         [[nodiscard]] constexpr std::span<const Entry*>   GetChildren_INTERNAL() const noexcept;
+        template<typename Self>
+        [[nodiscard]] static constexpr auto GetChildrenRecursiveImpl(Self& self) noexcept;
+        template<std::underlying_type_t<ForEachFlags::Flag> FLAGS, typename Self, typename Callable>
+        static constexpr void ForEachImpl(Self& self, Callable& callback) noexcept(std::is_nothrow_invocable_v<Callable, Self&>);
 
 
     public:
@@ -1262,7 +1326,7 @@ FDF_EXPORT namespace fdf
         constexpr void SetValue(std::span<T> value) noexcept;
 
         template<Style STYLE = {}>
-        [[nodiscard]] constexpr std::string_view DataToView(std::string& temp) const noexcept;
+        [[nodiscard]] constexpr std::string_view DataToView(String& temp) const noexcept;
 
     public:
         template<auto DIAGNOSTIC_CALLBACK = nullptr>
@@ -1293,7 +1357,7 @@ FDF_EXPORT namespace fdf
     template<Style STYLE = {}>
     [[nodiscard]] bool WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists = true) noexcept;
     template<Style STYLE = {}>
-    constexpr void WriteBuffer(const Entry& root, std::string& buffer) noexcept;
+    [[nodiscard]] constexpr String WriteBuffer(const Entry& root) noexcept;
 
     [[nodiscard]] constexpr UniqueEntryPtr NewEntry() noexcept;
 }
@@ -1316,8 +1380,8 @@ namespace fdf::detail
     inline constexpr size_t INITIAL_PARENT_DATA_SIZE = DATA_OVERHEAD_SIZE + (4 * sizeof(void*));
 
 
-    inline constexpr auto KEYWORDS = std::to_array<std::string_view>(
-    {
+    inline constexpr auto KEYWORDS = std::to_array<std::string_view>
+    ({
         "null", "nil",
         "true", "false"
     });
@@ -1340,7 +1404,7 @@ namespace fdf::detail
         SquareBraceClose,
 
         StringLiteral,  // Quoted "Foo" or 'Foo'
-        Atom,           // Any unquoted character sequence, key or value. 'IsValidIdentifier()' and 'ClassifyAtom()' adds required context in the parser
+        Atom,           // unquoted key or value; the parser validates and classifies it
     };
 
     FDF_EXPORT_INTERNAL struct Token
@@ -1360,7 +1424,7 @@ namespace fdf::detail
     FDF_EXPORT_INTERNAL struct Tokenizer
     {
         explicit constexpr Tokenizer(std::string_view content_) noexcept
-            : content(content_), index(0), line(1), lastNewLineIndex(0), currentToken(GetNextToken())  { }
+            : content(content_), index(0), line(1), lastNewLineIndex(detail::UINT32_MAX_VALUE), currentToken(GetNextToken())  { }
 
         [[nodiscard]] constexpr Token Current() const noexcept  { return currentToken; }
         [[nodiscard]] constexpr Token Advance()       noexcept  { currentToken = GetNextToken(); return currentToken; }
@@ -1370,12 +1434,12 @@ namespace fdf::detail
     private:
         [[nodiscard]] constexpr Token GetNextToken() noexcept;
 
-        // Build a token at the current position, set its line/column, and advance past it
+        // Build a token at the current position, set its line/column and advance past it
         [[nodiscard]] constexpr Token MakeToken(TokenType type, uint32_t count) noexcept
         {
             Token token = Token(type, index, count);
             token.line = line;
-            token.column = static_cast<uint32_t>(index - lastNewLineIndex);
+            token.column = index - lastNewLineIndex;
             index += count;
             return token;
         }
@@ -1386,7 +1450,7 @@ namespace fdf::detail
         {
             Token token = Token(TokenType::Invalid, index);
             token.line = line;
-            token.column = static_cast<uint32_t>(index - lastNewLineIndex);
+            token.column = index - lastNewLineIndex;
             token.extra8 = static_cast<uint8_t>(reason);
             return token;
         }
@@ -1413,13 +1477,13 @@ namespace fdf::detail
 
     // Constexpr number -> string appenders, so the writer can run at compile time (std::format isn't
     // constexpr). std::to_chars is constexpr for integers
-    constexpr void AppendInt(std::string& s, int64_t v) noexcept
+    constexpr void AppendInt(String& s, int64_t v) noexcept
     {
         char b[24];
         const auto r = std::to_chars(b, b + sizeof(b), v);
         s.append(b, r.ptr);
     }
-    constexpr void AppendUInt(std::string& s, uint64_t v) noexcept
+    constexpr void AppendUInt(String& s, uint64_t v) noexcept
     {
         char b[24];
         const auto r = std::to_chars(b, b + sizeof(b), v);
@@ -1683,7 +1747,7 @@ namespace fdf::detail
 
     // Shortest round-trip text for any finite double (and inf/nan sentinels). Always emits a '.' or
     // 'e' so the value re-parses as a Float, never an Int
-    FDF_EXPORT_INTERNAL constexpr void AppendDouble(std::string& s, double v) noexcept
+    FDF_EXPORT_INTERNAL constexpr void AppendDouble(String& s, double v) noexcept
     {
         const uint64_t bits = std::bit_cast<uint64_t>(v);
         const bool bNeg = (bits >> 63) != 0;
@@ -2099,7 +2163,7 @@ namespace fdf::detail
             i++;
         for(; i < raw.size(); i++)
         {
-            if(raw[i] != '\n')
+            if(raw[i] != '\n' && raw[i] != '\r')
                 writeChar(raw[i]);
             else
             {
@@ -2219,9 +2283,7 @@ namespace fdf::detail
     [[nodiscard]] constexpr bool IsSquareBrace(const char c) noexcept  { return c == '[' || c == ']'; }
     [[nodiscard]] constexpr bool IsBrace(const char c)       noexcept  { return c == '{' || c == '}' || c == '[' || c == ']'; }
 
-    // Validates ISO-8601 timestamps (structure AND value ranges). Defers to Timestamp::FromText, the
-    // single parse/validate implementation. Accepts: YYYY-MM-DD, YYYY-DDD (ordinal), YYYY-Www-D
-    // (week), an optional Thh:mm:ss after a date, a bare hh:mm:ss, fractional seconds, Z / +-hh:mm
+    // validates ISO-8601 structure and ranges through Timestamp::FromText
     FDF_EXPORT_INTERNAL [[nodiscard]] constexpr bool IsValidTimestamp(std::string_view ts) noexcept
     {
         return Timestamp::FromText(ts).IsValid();
@@ -2322,7 +2384,18 @@ namespace fdf::detail
 
 
 
-        [[nodiscard]] void* Allocate() noexcept
+        // a slab grant's size is the block size, known at compile time
+        struct AllocationResult
+        {
+            constexpr AllocationResult(void* ptr_) noexcept : ptr(ptr_)  { }
+            [[nodiscard]] constexpr void* Ptr() const noexcept  { return ptr; }
+            [[nodiscard]] static consteval size_t Size() noexcept  { return BLOCK_SIZE; }
+
+        private:
+            void* ptr;
+        };
+
+        [[nodiscard]] AllocationResult Allocate() noexcept
         {
             for(Chunk* chunk = head; chunk; chunk = chunk->next)
             {
@@ -2381,20 +2454,6 @@ namespace fdf::detail
 
 
 
-        template<typename T, typename... Args>
-        [[nodiscard]] T* Create(Args&&... args) noexcept(std::is_nothrow_constructible_v<T, Args...>)
-        {
-            static_assert(sizeof(T) <= BLOCK_SIZE, "T is too large for this SlabAllocator.");
-            return new(Allocate()) T(std::forward<Args>(args)...);
-        }
-
-        template<typename T>
-        [[nodiscard]] bool Destroy(T* obj) noexcept(std::is_nothrow_destructible_v<T>)
-        {
-            static_assert(sizeof(T) <= BLOCK_SIZE, "T is too large for this SlabAllocator.");
-            obj->~T();
-            return Deallocate(obj);
-        }
     };
 
 
@@ -2408,41 +2467,97 @@ namespace fdf::detail
 
     FDF_EXPORT_INTERNAL class GlobalAllocator
     {
-        template<auto DIAGNOSTIC_CALLBACK>
-        friend struct detail::Utils;
-
-        inline static constinit SlabAllocator<8U>   B8;
-        inline static constinit SlabAllocator<16U>  B16;
-        inline static constinit SlabAllocator<32U>  B32;
-        inline static constinit SlabAllocator<64U>  B64;
-        inline static constinit SlabAllocator<128U> B128;
-        inline static constinit SlabAllocator<256U> B256;
-        inline static constinit SlabAllocator<sizeof(Entry), alignof(Entry)>  ENTRY_ALLOCATOR;
-
+        // bucket ladder bounds, MIN_BUCKET leaves room for a free-list pointer
+        static constexpr size_t MIN_BUCKET = 8U;
         static constexpr size_t MAX_BUCKET = 256U;
 
-        // Smallest bucket that fits size, clamped to the 8-byte floor (SlabAllocator needs room for a free-list pointer)
+        // constinit skips the magic-static guard on the hot allocation path
+        template<size_t BLOCK_SIZE, size_t BLOCK_ALIGNMENT = BLOCK_SIZE>
+        inline static constinit SlabAllocator<BLOCK_SIZE, BLOCK_ALIGNMENT> SLAB{};
+
+        inline static constinit SlabAllocator<sizeof(Entry), alignof(Entry)> ENTRY_SLAB{};
+
+        // smallest bucket that fits size
         [[nodiscard]] static constexpr size_t BucketFor(size_t size) noexcept
         {
-            return std::bit_ceil(std::max<size_t>(size, 8U));
+            return std::bit_ceil(std::max(size, MIN_BUCKET));
         }
 
-        template<size_t BUCKET>
-        [[nodiscard]] static auto& SlabFor() noexcept
+        // runs op on the smallest bucket slab that fits size, the only spelling of the ladder
+        [[nodiscard]] static decltype(auto) SlabOp(size_t size, auto&& op) noexcept
         {
-            if constexpr(BUCKET == 8U)        return B8;
-            else if constexpr(BUCKET == 16U)  return B16;
-            else if constexpr(BUCKET == 32U)  return B32;
-            else if constexpr(BUCKET == 64U)  return B64;
-            else if constexpr(BUCKET == 128U) return B128;
-            else                              return B256;
+            static_assert(MIN_BUCKET == 8u && MAX_BUCKET == 256u, "Bucket mismatch");  // Replace with template-for
+            switch(BucketFor(size))
+            {
+                case 8u:            return op(SLAB<8u>);
+                case 16u:           return op(SLAB<16u>);
+                case 32u:           return op(SLAB<32u>);
+                case 64u:           return op(SLAB<64u>);
+                case 128u:          return op(SLAB<128u>);
+                case 256u: default: return op(SLAB<256u>);
+            }
+        }
+
+        template<typename T>
+        static constexpr void ValidateStorageType() noexcept
+        {
+            static_assert(std::is_same_v<T, Entry> || std::is_nothrow_default_constructible_v<T>);
+            static_assert(std::is_same_v<T, Entry> || std::is_nothrow_destructible_v<T>);
+        }
+
+        template<typename T>
+        [[nodiscard]] static constexpr T* GetData(Entry& entry) noexcept
+        {
+                 if constexpr(std::is_same_v<T, Entry*  >) return entry.data.e;
+            else if constexpr(std::is_same_v<T, bool    >) return entry.data.b;
+            else if constexpr(std::is_same_v<T, int64_t >) return entry.data.i;
+            else if constexpr(std::is_same_v<T, uint64_t>) return entry.data.u;
+            else if constexpr(std::is_same_v<T, Version >) return entry.data.v;
+            else if constexpr(std::is_same_v<T, double  >) return entry.data.f;
+            else if constexpr(std::is_same_v<T, String  >) return entry.data.s;
+            else static_assert(false);
+        }
+
+        template<typename T>
+        static constexpr void SetData(Entry& entry, T* value) noexcept
+        {
+                 if constexpr(std::is_same_v<T, Entry*  >) entry.data.e = value;
+            else if constexpr(std::is_same_v<T, bool    >) entry.data.b = value;
+            else if constexpr(std::is_same_v<T, int64_t >) entry.data.i = value;
+            else if constexpr(std::is_same_v<T, uint64_t>) entry.data.u = value;
+            else if constexpr(std::is_same_v<T, Version >) entry.data.v = value;
+            else if constexpr(std::is_same_v<T, double  >) entry.data.f = value;
+            else if constexpr(std::is_same_v<T, String  >) entry.data.s = value;
+            else static_assert(false);
         }
 
     public:
-        struct AllocationResult { void* ptr; size_t size; };
+        struct AllocationResult
+        {
+            constexpr AllocationResult(void* ptr_, size_t size_) noexcept : ptr(ptr_), size(size_)  { }
+
+            template<typename GRANT> requires requires(const GRANT& grant) { { grant.Ptr() } -> std::same_as<void*>; { GRANT::Size() } -> std::same_as<size_t>; }
+            constexpr AllocationResult(const GRANT& grant) noexcept : ptr(grant.Ptr()), size(GRANT::Size())  { }
+
+            [[nodiscard]] constexpr void*  Ptr()  const noexcept  { return ptr; }
+            [[nodiscard]] constexpr size_t Size() const noexcept  { return size; }
+
+        private:
+            void* ptr;
+            size_t size;
+        };
+
+        template<typename T>
+        struct TypedAllocationResult
+        {
+            T* ptr;
+            uint32_t capacity;
+        };
+
+
 
         // size = the bucket actually granted (>= request), or the exact request for the heap fallback
-        [[nodiscard]] static AllocationResult AllocateAtLeast(size_t size) noexcept
+        [[nodiscard]] static AllocationResult Allocate(size_t size) noexcept
         {
             if constexpr(FDF_DISABLE_SLAB_ALLOCATOR)
             {
@@ -2450,28 +2565,18 @@ namespace fdf::detail
                 assert(p && "Allocation shouldn't fail");
                 return { p, size };
             }
-
-            if(size > MAX_BUCKET)
+            else
             {
-                void* p = ::operator new(size, std::nothrow);
-                assert(p && "Allocation shouldn't fail");
-                return { p, size };
-            }
+                if(size > MAX_BUCKET)
+                {
+                    void* p = ::operator new(size, std::nothrow);
+                    assert(p && "Allocation shouldn't fail");
+                    return { p, size };
+                }
 
-            switch(BucketFor(size))
-            {
-                case 8U:   return { B8.Allocate(),   8U };
-                case 16U:  return { B16.Allocate(),  16U };
-                case 32U:  return { B32.Allocate(),  32U };
-                case 64U:  return { B64.Allocate(),  64U };
-                case 128U: return { B128.Allocate(), 128U };
-                default:   return { B256.Allocate(), 256U };
+                // explicit return type, each bucket grant is a distinct type and the arms must agree
+                return SlabOp(size, [](auto& slab) -> AllocationResult { return slab.Allocate(); });
             }
-        }
-
-        [[nodiscard]] static void* Allocate(size_t size) noexcept
-        {
-            return AllocateAtLeast(size).ptr;
         }
 
         static bool Deallocate(void* p, size_t size) noexcept
@@ -2481,21 +2586,15 @@ namespace fdf::detail
                 ::operator delete(p);
                 return true;
             }
-
-            if(size > MAX_BUCKET)
+            else
             {
-                ::operator delete(p);
-                return true;
-            }
+                if(size > MAX_BUCKET)
+                {
+                    ::operator delete(p);
+                    return true;
+                }
 
-            switch(BucketFor(size))
-            {
-                case 8U:   return B8.Deallocate(p);
-                case 16U:  return B16.Deallocate(p);
-                case 32U:  return B32.Deallocate(p);
-                case 64U:  return B64.Deallocate(p);
-                case 128U: return B128.Deallocate(p);
-                default:   return B256.Deallocate(p);
+                return SlabOp(size, [p](auto& slab)  { return slab.Deallocate(p); });
             }
         }
 
@@ -2512,7 +2611,7 @@ namespace fdf::detail
                 return p;
             }
             else if constexpr(BucketFor(size) <= MAX_BUCKET)
-                return SlabFor<BucketFor(size)>().Allocate();
+                return SLAB<BucketFor(size)>.Allocate().Ptr();
             else
             {
                 void* p = ::operator new(size, std::nothrow);
@@ -2530,7 +2629,7 @@ namespace fdf::detail
                 return true;
             }
             else if constexpr(BucketFor(size) <= MAX_BUCKET)
-                return SlabFor<BucketFor(size)>().Deallocate(p);
+                return SLAB<BucketFor(size)>.Deallocate(p);
             else
             {
                 ::operator delete(p);
@@ -2538,35 +2637,294 @@ namespace fdf::detail
             }
         }
 
-
-
-
         template<typename T, typename... Args>
-        [[nodiscard]] static T* Create(Args&&... args) noexcept(std::is_nothrow_constructible_v<T, Args...>)
+        [[nodiscard]] static constexpr T* Create(Args&&... args) noexcept
         {
-            if constexpr(BucketFor(sizeof(T)) <= MAX_BUCKET)
-                return SlabFor<BucketFor(sizeof(T))>().template Create<T>(std::forward<Args>(args)...);
+            ValidateStorageType<T>();
+            T* ptr;
+            if consteval
+            {
+                ptr = std::allocator<T>{}.allocate(1);
+            }
             else
             {
-                T* p = new (std::nothrow) T(std::forward<Args>(args)...);
-                assert(p && "Allocation shouldn't fail");
-                return p;
+                if constexpr(std::is_same_v<T, Entry> && !FDF_DISABLE_SLAB_ALLOCATOR)
+                    ptr = static_cast<T*>(ENTRY_SLAB.Allocate().Ptr());
+                else
+                    ptr = static_cast<T*>(Allocate<sizeof(T)>());
+            }
+            return std::construct_at(ptr, std::forward<Args>(args)...);
+        }
+
+        template<typename T>
+        static constexpr void Destroy(T* ptr) noexcept
+        {
+            ValidateStorageType<T>();
+            if(!ptr)
+                return;
+
+            ptr->~T();
+            if consteval
+            {
+                std::allocator<T>{}.deallocate(ptr, 1);
+            }
+            else
+            {
+                if constexpr(std::is_same_v<T, Entry> && !FDF_DISABLE_SLAB_ALLOCATOR)
+                    (void)ENTRY_SLAB.Deallocate(ptr);
+                else
+                    (void)Deallocate<sizeof(T)>(ptr);
             }
         }
 
         template<typename T>
-        [[nodiscard]] static bool Destroy(T* obj) noexcept(std::is_nothrow_destructible_v<T>)
+        [[nodiscard]] static constexpr TypedAllocationResult<T> Allocate(const uint32_t requestedCapacity, const uint32_t liveCount) noexcept
         {
-            if constexpr(BucketFor(sizeof(T)) <= MAX_BUCKET)
-                return SlabFor<BucketFor(sizeof(T))>().Destroy(obj);
+            ValidateStorageType<T>();
+            assert(liveCount <= requestedCapacity);
+            if(requestedCapacity == 0)
+                return { nullptr, 0 };
+
+            if constexpr(std::is_same_v<T, Entry>)
+            {
+                assert(requestedCapacity == 1 && liveCount == 1);
+                return { Create<T>(), 1 };
+            }
+
+            T* ptr;
+            uint32_t capacity;
+            if consteval
+            {
+                ptr = std::allocator<T>{}.allocate(requestedCapacity);
+                capacity = requestedCapacity;
+            }
             else
             {
-                delete obj;
-                return true;
+                const AllocationResult allocation = Allocate(static_cast<size_t>(requestedCapacity) * sizeof(T));
+                ptr = static_cast<T*>(allocation.Ptr());
+                capacity = static_cast<uint32_t>(allocation.Size() / sizeof(T));
+            }
+
+            if constexpr(std::is_same_v<T, char>)
+            {
+                if consteval
+                {
+                    // Clang requires explicit char lifetimes before constexpr header writes
+                    for(uint32_t i = 0; i < capacity; i++)
+                        std::construct_at(ptr + i);
+                }
+            }
+            else
+            {
+                for(uint32_t i = 0; i < liveCount; i++)
+                    std::construct_at(ptr + i);
+            }
+            return { ptr, capacity };
+        }
+
+        template<typename T>
+        [[nodiscard]] static constexpr TypedAllocationResult<T> Allocate(const uint32_t count) noexcept
+        {
+            return Allocate<T>(count, count);
+        }
+
+        template<typename T>
+        static constexpr void Release(T* ptr, const uint32_t liveCount, const uint32_t allocatedCapacity) noexcept
+        {
+            ValidateStorageType<T>();
+            if(!ptr)
+                return;
+
+            if constexpr(std::is_same_v<T, Entry>)
+            {
+                assert(liveCount == 1 && allocatedCapacity == 1);
+                Destroy<T>(ptr);
+            }
+            else
+            {
+                if constexpr(!std::is_same_v<T, char>)
+                {
+                    for(uint32_t i = 0; i < liveCount; i++)
+                        std::destroy_at(ptr + i);
+                }
+                if consteval
+                {
+                    std::allocator<T>{}.deallocate(ptr, allocatedCapacity);
+                }
+                else
+                {
+                    (void)Deallocate(static_cast<void*>(ptr),
+                        static_cast<size_t>(allocatedCapacity) * sizeof(T));
+                }
             }
         }
+
+        template<typename T>
+        static constexpr void Allocate(Entry& entry, const uint32_t count) noexcept
+        {
+            assert(entry.size == 0 && entry.capacity == 0 && "Release existing storage before allocating");
+            const TypedAllocationResult<T> allocation = Allocate<T>(count);
+            SetData<T>(entry, allocation.ptr);
+            entry.size = count;
+            entry.capacity = allocation.capacity;
+        }
+
+        template<typename T>
+        static constexpr void Reserve(Entry& entry, const uint32_t minimumCapacity) noexcept
+        {
+            static_assert(std::is_nothrow_move_assignable_v<T>);
+            if(minimumCapacity <= entry.capacity)
+                return;
+
+            uint32_t requestedCapacity = minimumCapacity;
+            if(entry.capacity == 0)
+                requestedCapacity = std::max(4U, minimumCapacity);
+            else if(entry.capacity <= UINT32_MAX_VALUE / 2)
+                requestedCapacity = std::max(entry.capacity * 2, minimumCapacity);
+
+            T* oldData = GetData<T>(entry);
+            const TypedAllocationResult<T> allocation = Allocate<T>(requestedCapacity, entry.size);
+
+            for(uint32_t i = 0; i < entry.size; i++)
+                allocation.ptr[i] = std::move(oldData[i]);
+
+            Release<T>(oldData, entry.size, entry.capacity);
+            SetData<T>(entry, allocation.ptr);
+            entry.capacity = allocation.capacity;
+        }
+
+        template<typename T>
+        static constexpr void Release(Entry& entry) noexcept
+        {
+            T* oldData = GetData<T>(entry);
+            Release<T>(oldData, entry.size, entry.capacity);
+            SetData<T>(entry, nullptr);
+            entry.size = 0;
+            entry.capacity = 0;
+        }
+
+        template<typename T>
+        static constexpr void Resize(Entry& entry, const uint32_t newSize) noexcept
+        {
+            static_assert(std::is_nothrow_move_assignable_v<T>);
+            if(entry.size == newSize)
+                return;
+
+            T* oldData = GetData<T>(entry);
+            if(newSize <= entry.capacity)
+            {
+                for(uint32_t i = newSize; i < entry.size; i++)
+                    std::destroy_at(oldData + i);
+                for(uint32_t i = entry.size; i < newSize; i++)
+                    std::construct_at(oldData + i);
+                entry.size = newSize;
+                return;
+            }
+
+            const TypedAllocationResult<T> allocation = Allocate<T>(newSize);
+
+            for(uint32_t i = 0; i < entry.size; i++)
+                allocation.ptr[i] = std::move(oldData[i]);
+
+            Release<T>(oldData, entry.size, entry.capacity);
+            SetData<T>(entry, allocation.ptr);
+            entry.size = newSize;
+            entry.capacity = allocation.capacity;
+        }
+
+        template<typename T, typename U>
+        static constexpr void ConvertFrom(Entry& entry, const uint32_t initializedCount) noexcept
+        {
+            static_assert(!std::is_same_v<T, U>);
+            assert(initializedCount <= entry.size);
+
+            U* oldData = GetData<U>(entry);
+            const uint32_t oldSize = entry.size;
+            const uint32_t oldCapacity = entry.capacity;
+
+            const TypedAllocationResult<T> allocation = Allocate<T>(oldSize);
+
+            for(uint32_t i = 0; i < initializedCount; i++)
+                allocation.ptr[i] = static_cast<T>(oldData[i]);
+
+            Release<U>(oldData, oldSize, oldCapacity);
+            SetData<T>(entry, allocation.ptr);
+            entry.capacity = allocation.capacity;
+        }
+    };
+
+
+    FDF_EXPORT_INTERNAL
+    template<typename T>
+    class Vector
+    {
+        static_assert(std::is_nothrow_move_assignable_v<T>);
+
+    public:
+        constexpr Vector() noexcept = default;
+        Vector(const Vector&) = delete;
+        Vector& operator=(const Vector&) = delete;
+        constexpr ~Vector() noexcept
+        {
+            GlobalAllocator::Release<T>(data, size_, capacity_);
+        }
+
+        [[nodiscard]] constexpr bool empty() const noexcept  { return size_ == 0; }
+        [[nodiscard]] constexpr size_t size() const noexcept  { return size_; }
+        [[nodiscard]] constexpr T& back() noexcept  { assert(size_ > 0); return data[size_ - 1]; }
+        [[nodiscard]] constexpr const T& back() const noexcept  { assert(size_ > 0); return data[size_ - 1]; }
+        [[nodiscard]] constexpr T& operator[](size_t index) noexcept  { assert(index < size_); return data[index]; }
+        [[nodiscard]] constexpr const T& operator[](size_t index) const noexcept  { assert(index < size_); return data[index]; }
+
+        template<typename... Args>
+        constexpr T& emplace_back(Args&&... args) noexcept
+        {
+            if(size_ == capacity_)
+                Grow();
+
+            std::construct_at(data + size_, std::forward<Args>(args)...);
+            return data[size_++];
+        }
+
+        constexpr void push_back(const T& value) noexcept  { (void)emplace_back(value); }
+        constexpr void push_back(T&& value) noexcept  { (void)emplace_back(std::move(value)); }
+
+        constexpr void pop_back() noexcept
+        {
+            assert(size_ > 0);
+            size_--;
+            std::destroy_at(data + size_);
+        }
+
+        constexpr void erase(size_t index) noexcept
+        {
+            assert(index < size_);
+            for(size_t i = index; i + 1 < size_; i++)
+                data[i] = std::move(data[i + 1]);
+            pop_back();
+        }
+
+    private:
+        constexpr void Grow() noexcept
+        {
+            const uint32_t requestedCapacity = capacity_ == 0? 8
+                : capacity_ <= detail::UINT32_MAX_VALUE / 2? capacity_ * 2
+                : detail::UINT32_MAX_VALUE;
+            const auto allocation = GlobalAllocator::Allocate<T>(requestedCapacity, size_);
+            for(uint32_t i = 0; i < size_; i++)
+                allocation.ptr[i] = std::move(data[i]);
+            GlobalAllocator::Release<T>(data, size_, capacity_);
+            data = allocation.ptr;
+            capacity_ = allocation.capacity;
+        }
+
+        T* data = nullptr;
+        uint32_t size_ = 0;
+        uint32_t capacity_ = 0;
     };
 }
+
+
 
 
 
@@ -2590,7 +2948,7 @@ namespace fdf::detail
             {
                 Token token = Token(TokenType::NewLine, index);
                 token.line = line;
-                token.column = static_cast<uint32_t>(token.startPosition - lastNewLineIndex);
+                token.column = token.startPosition - lastNewLineIndex;
                 while(index < content.size() && constexpr_isspace(content[index]))
                 {
                     if(content[index] == '\n')
@@ -2616,21 +2974,31 @@ namespace fdf::detail
 
         if(content[index] == '\"' || content[index] == '\'')
         {
-            size_t nextQuote = content.find_first_of(content[index], index + 1);
-            if(nextQuote == std::string_view::npos)
-                return MakeInvalid(DiagnosticType::UnterminatedString);  // Non matching quotes
-
-            while(content[nextQuote - 1] == '\\' && content[nextQuote - 2] != '\\')
+            const char quote = content[index];
+            size_t nextQuote = index + 1;
+            bool bEscaped = false;
+            for(; nextQuote < content.size(); nextQuote++)
             {
-                nextQuote = content.find_first_of(content[index], nextQuote + 1);
-                if(nextQuote == std::string_view::npos)
-                    return MakeInvalid(DiagnosticType::UnterminatedString);  // Non matching quotes
+                const char c = content[nextQuote];
+                if(c == quote && !bEscaped)
+                    break;
+                bEscaped = c == '\\'? !bEscaped : false;
             }
+            if(nextQuote == content.size())
+                return MakeInvalid(DiagnosticType::UnterminatedString);
 
             Token token = Token(TokenType::StringLiteral, index, static_cast<uint32_t>(nextQuote) + 1 - index);
-            index = static_cast<uint32_t>(nextQuote + 1);
             token.line = line;
-            token.column = static_cast<uint32_t>(token.startPosition - lastNewLineIndex);
+            token.column = token.startPosition - lastNewLineIndex;
+            for(size_t i = index; i < nextQuote; i++)
+            {
+                if(content[i] == '\n')
+                {
+                    line++;
+                    lastNewLineIndex = static_cast<uint32_t>(i);
+                }
+            }
+            index = static_cast<uint32_t>(nextQuote + 1);
             token.extra8 = static_cast<uint8_t>(token.count - 2);
             return token;
         }
@@ -2639,26 +3007,30 @@ namespace fdf::detail
 
         if(content[index] == '/')
         {
-            if(index + 2 >= content.size())
+            if(index + 1 >= content.size())
                 return MakeInvalid(DiagnosticType::InvalidComment); // not enough space for a comment
 
             if(content[index + 1] == '/') // single line comment
             {
                 size_t newLinePos = content.find_first_of('\n', index + 2);
-                Token token = Token(TokenType::Comment, content[index + 2] == ' '? index + 3 : index + 2);
+                const uint32_t bodyStart = index + 2 < content.size() && content[index + 2] == ' '? index + 3 : index + 2;
+                Token token = Token(TokenType::Comment, bodyStart);
                 token.line = line;
-                token.column = static_cast<uint32_t>(token.startPosition - lastNewLineIndex);
+                token.column = token.startPosition - lastNewLineIndex;
 
                 if(newLinePos != std::string_view::npos)
                 {
                     token.count = static_cast<uint32_t>(newLinePos - token.startPosition);
                     index = static_cast<uint32_t>(newLinePos);
-                    return token;
                 }
-
-                // Comment runs to the end of the file
-                token.count = static_cast<uint32_t>(content.size() - token.startPosition);
-                index = detail::UINT32_MAX_VALUE;
+                else
+                {
+                    // Comment runs to the end of the file
+                    token.count = static_cast<uint32_t>(content.size() - token.startPosition);
+                    index = detail::UINT32_MAX_VALUE;
+                }
+                if(token.count > 0 && content[token.startPosition + token.count - 1] == '\r')
+                    token.count--;   // the '\r' of a CRLF line ending isn't comment text
                 return token;
             }
 
@@ -2668,20 +3040,25 @@ namespace fdf::detail
                 while(true)
                 {
                     if(slashPos == std::string_view::npos)
-                        return MakeInvalid(DiagnosticType::UnterminatedComment); // Non-matching comment scope (There is only "/*" and not "*/")
+                        return MakeInvalid(DiagnosticType::UnterminatedComment); // missing "*/"
 
                     if(content[slashPos - 1] == '*')
                     {
                         Token token = Token(TokenType::Comment, index + 2);
                         token.line = line;
-                        token.column = static_cast<uint32_t>(token.startPosition - lastNewLineIndex);
+                        token.column = token.startPosition - lastNewLineIndex;
                         token.extra8 = 1;  // Means multi line
-                        token.count = static_cast<uint32_t>(slashPos - 2 - token.startPosition);
+                        token.count = static_cast<uint32_t>((slashPos - 1) - token.startPosition);
+                        while(token.count > 0 && constexpr_isspace(content[token.startPosition + token.count - 1]))
+                            token.count--;
 
                         for(size_t i = index + 2; i < slashPos - 1; i++)
                         {
                             if(content[i] == '\n')
+                            {
                                 line++;
+                                lastNewLineIndex = static_cast<uint32_t>(i);
+                            }
                         }
 
                         index = static_cast<uint32_t>(slashPos + 1);
@@ -2692,8 +3069,6 @@ namespace fdf::detail
                             index++;
                         }
 
-                        if(token.count == detail::UINT32_MAX_VALUE)
-                            token.count = 0;
                         return token;
                     }
 
@@ -2726,11 +3101,11 @@ namespace fdf::detail
 
         if(constexpr_isalpha(content[index]) || content[index] == '_' || constexpr_isdigit(content[index]) || content[index] == '-')
         {
-            // any unquoted character sequence (identifier or value) up to the next structural delimiter. The parser
-            // decides: a key is validated as an identifier, a value is typed by ClassifyAtom
+            // read an unquoted key or value through the next structural delimiter
+            // the parser validates keys and classifies values
             Token token = Token(TokenType::Atom, index);
             token.line = line;
-            token.column = static_cast<uint32_t>(token.startPosition - lastNewLineIndex);
+            token.column = token.startPosition - lastNewLineIndex;
 
             size_t end = index + 1;
             while(end < content.size())
@@ -2766,10 +3141,6 @@ namespace fdf::detail
     template<auto DIAGNOSTIC_CALLBACK>
     struct Utils
     {
-        template<typename... Args>
-        [[nodiscard]] static constexpr UniqueEntryPtr Create(Args&&... args) noexcept;
-                      static constexpr void           Destroy(Entry* e) noexcept;
-
         static constexpr void                         Diagnose(DiagnosticSeverity severity, DiagnosticType type, const Tokenizer& tokenizer, const Token& token) noexcept;
         static constexpr void                         SkipToNextEntry(Tokenizer& tokenizer, bool bStopAtCloseBrace) noexcept;
 
@@ -2778,9 +3149,11 @@ namespace fdf::detail
         [[nodiscard]] static constexpr bool           ParseSimpleValue(Tokenizer& tokenizer, Entry& entry    FDF_COMMENT_SWITCH(, Token comment)) noexcept;
         [[nodiscard]] static constexpr bool           ParseArray      (Tokenizer& tokenizer, Entry& array    FDF_COMMENT_SWITCH(, Token comment)) noexcept;
         [[nodiscard]] static constexpr bool           ParseMap        (Tokenizer& tokenizer, Entry& map      FDF_COMMENT_SWITCH(, Token comment)) noexcept;
+        template<Type CONTAINER_TYPE>
+        [[nodiscard]] static constexpr bool           ParseContainer  (Tokenizer& tokenizer, Entry& container FDF_COMMENT_SWITCH(, Token comment)) noexcept;
 
         template<Style STYLE>
-        static constexpr void WriteBuffer(const Entry& root, std::string& buffer, bool bOverwrite = true) noexcept;
+        [[nodiscard]] static constexpr String WriteBuffer(const Entry& root) noexcept;
     };
 }
 
@@ -2797,22 +3170,16 @@ namespace fdf
 {
     constexpr void String::Grow(uint32_t minCapacity) noexcept
     {
+        assert(minCapacity <= max_size() && "String capacity overflow");
         uint32_t newCapacity = Capacity() * 2;
         if(newCapacity < minCapacity)
             newCapacity = minCapacity;
 
-        char* newPtr;
-        if consteval
-        {
-            newPtr = new char[HEADER_SIZE + newCapacity + 1];
-        }
-        else
-        {
-            // capacity = usable chars in the granted bucket (terminator slot excluded), so re-assignments within the slack skip the realloc
-            const auto [buffer, granted] = detail::GlobalAllocator::AllocateAtLeast(HEADER_SIZE + newCapacity + 1);
-            newPtr = static_cast<char*>(buffer);
-            newCapacity = static_cast<uint32_t>(granted) - HEADER_SIZE - 1;
-        }
+        const uint32_t allocationSize = static_cast<uint32_t>(HEADER_SIZE + static_cast<size_t>(newCapacity) + 1);
+        const auto allocation = detail::GlobalAllocator::Allocate<char>(allocationSize, 0);
+        char* newPtr = allocation.ptr;
+        // capacity excludes the header and terminator
+        newCapacity = allocation.capacity - HEADER_SIZE - 1;
 
         const uint32_t oldSize = static_cast<uint32_t>(size());
         for(uint32_t i = 0; i < oldSize; i++)
@@ -2829,60 +3196,15 @@ namespace fdf
     {
         if(!ptr)
             return;
-        if consteval
-            { delete[] ptr; }
-        else
-            { detail::GlobalAllocator::Deallocate(ptr, LoadU32(sizeof(uint32_t)) + HEADER_SIZE + 1); }
+        detail::GlobalAllocator::Release<char>(ptr, 0, LoadU32(sizeof(uint32_t)) + HEADER_SIZE + 1);
         ptr = nullptr;
-    }
-
-
-    constexpr Entry::Entry(Entry&& other) noexcept
-        : type(other.type), size(other.size), capacity(other.capacity), parent(other.parent), data(other.data)   FDF_COMMENT_SWITCH(, comment(std::move(other.comment)))
-    {
-        other.type = Type::Map;
-        other.size = 0;
-        other.capacity = 0;
-        other.parent = nullptr;
-        other.data.vEntry = nullptr;   // active member matches the reset type (Map)
-
-        detail::constexpr_memcpy(identifier, other.identifier, detail::MAX_IDENTIFIER_LENGTH + 1);
-        other.SetIdentifierSize(0U);
-    }
-
-    constexpr Entry& Entry::operator=(Entry&& other) noexcept
-    {
-        if(parent)
-            (void)parent->OrphanChild_INTERNAL(*this);
-        ReleaseEverything();
-
-        type = other.type;
-        size = other.size;
-        capacity = other.capacity;
-        parent = other.parent;
-        data = other.data;
-
-        other.type = Type::Map;
-        other.size = 0;
-        other.capacity = 0;
-        other.parent = nullptr;
-        other.data.vEntry = nullptr;
-
-        detail::constexpr_memcpy(identifier, other.identifier, detail::MAX_IDENTIFIER_LENGTH + 1);
-        other.SetIdentifierSize(0U);
-
-#if !FDF_NO_COMMENTS
-        comment = std::move(other.comment);
-#endif
-
-        return *this;
     }
 
 
     constexpr Entry::Entry() noexcept
     {
         SetIdentifierSize(0);
-        data.vEntry = nullptr;   // default type is Map -> keep vEntry the active union member
+        data.e = nullptr;   // default type is Map -> keep e active
     }
     constexpr Entry::~Entry() noexcept
     {
@@ -2934,64 +3256,37 @@ namespace fdf
         switch(type)
         {
         case Type::Bool:
-            if consteval
-                { delete[] GetDataAs<bool>(); }
-            else
-                { detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(bool)); }
+            detail::GlobalAllocator::Release<bool>(*this);
             break;
         case Type::Int:
-            if consteval
-                { delete GetDataVector<int64_t>(); }
-            else
-                { detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(int64_t)); }
+            detail::GlobalAllocator::Release<int64_t>(*this);
             break;
         case Type::UInt:
-            if consteval
-                { delete GetDataVector<uint64_t>(); }
-            else
-                { detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(uint64_t)); }
+            detail::GlobalAllocator::Release<uint64_t>(*this);
             break;
         case Type::Float:
-            if consteval
-                { delete GetDataVector<double>(); }
-            else
-                { detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(double)); }
+            detail::GlobalAllocator::Release<double>(*this);
             break;
         case Type::String:
         case Type::Hex:
         case Type::Timestamp:
-            if consteval
-                { delete data.vString; }
-            else
-            {
-                String* arr = static_cast<String*>(data.raw);
-                for(uint32_t i = 0; i < size; i++)   // only [0,size) are alive
-                    std::destroy_at(arr + i);
-                detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(String));
-            }
+            detail::GlobalAllocator::Release<String>(*this);
             break;
         case Type::Version:
-            if consteval
-                { delete GetDataVector<Version>(); }
-            else
-                { detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(Version)); }
+            detail::GlobalAllocator::Release<Version>(*this);
             break;
         case Type::Array:
         case Type::Map:
+        {
             (void)ClearChildren();
-            if consteval
-                { delete GetDataVector<Entry*>(); }
-            else
-                { (void)detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(void*)); }
+            detail::GlobalAllocator::Release<Entry*>(*this);
             break;
+        }
         case Type::Null:
         default:
             return;
         }
 
-        size = 0;
-        capacity = 0;
-        ResetDataNull();
     }
 
     constexpr void Entry::ReleaseComment() noexcept
@@ -3007,50 +3302,20 @@ namespace fdf
         ReleaseComment();
     }
 
-    template<typename T>
-    constexpr T* Entry::AllocateSlab(uint32_t count) noexcept
-    {
-        const auto [p, granted] = detail::GlobalAllocator::AllocateAtLeast(count * sizeof(T));
-        capacity = static_cast<uint32_t>(granted / sizeof(T));
-        return static_cast<T*>(p);
-    }
-
     constexpr void Entry::AllocateStringArray(uint32_t count) noexcept
     {
         type = Type::String;
-        size = count;
-        if consteval
-        {
-            data.vString = new (std::nothrow) std::vector<String>();
-            assert(data.vString && "Allocation shouldn't fail");
-            data.vString->resize(count);
-        }
-        else
-        {
-            data.raw = AllocateSlab<String>(count);
-            for(uint32_t i = 0; i < count; i++)
-                std::construct_at(static_cast<String*>(data.raw) + i);
-        }
+        detail::GlobalAllocator::Allocate<String>(*this, count);
     }
-
-
-
 
     constexpr uint32_t Entry::FindChildIndex(const Entry& e) const noexcept
     {
         assert(IsContainer() && "You can only find index, if it's a container!");
+        Entry* const* children = data.e;
         for(uint32_t i = 0; i < size; i++)
         {
-            if consteval
-            {
-                if((*GetDataVector<Entry*>())[i] == &e)
-                    return i;
-            }
-            else
-            {
-                if(static_cast<Entry**>(data.raw)[i] == &e)
-                    return i;
-            }
+            if(children[i] == &e)
+                return i;
         }
         return detail::UINT32_MAX_VALUE;
     }
@@ -3058,18 +3323,11 @@ namespace fdf
     constexpr uint32_t Entry::FindChildIndex(const std::string_view _identifier) const noexcept
     {
         assert(IsContainer() && "You can only find index, if it's a container!");
+        Entry* const* children = data.e;
         for(uint32_t i = 0; i < size; i++)
         {
-            if consteval
-            {
-                if((*GetDataVector<Entry*>())[i]->GetIdentifier() == _identifier)
-                    return i;
-            }
-            else
-            {
-                if(static_cast<Entry**>(data.raw)[i]->GetIdentifier() == _identifier)
-                    return i;
-            }
+            if(children[i]->GetIdentifier() == _identifier)
+                return i;
         }
         return detail::UINT32_MAX_VALUE;
     }
@@ -3081,7 +3339,7 @@ namespace fdf
         if(type == Type::Map && !detail::IsValidIdentifier(_identifier))
             return nullptr;
 
-        UniqueEntryPtr e = detail::Utils<>::Create();
+        UniqueEntryPtr e(detail::GlobalAllocator::Create<Entry>());
         if(!e)
             return nullptr;
         if(type == Type::Map)
@@ -3097,7 +3355,7 @@ namespace fdf
 
         e->parent = this;
 
-        //TODO: In this case, we always prefer new one silently. We should allow customizing that behavior
+        // TODO: make duplicate-key replacement configurable
         if(type == Type::Map)
         {
             if(Entry* found = GetDirectChild(e->GetIdentifier()))
@@ -3109,48 +3367,24 @@ namespace fdf
             #if !FDF_NO_COMMENTS
                 std::swap(found->comment, e->comment);
             #endif
+                if(found->IsContainer())
+                {
+                    for(Entry* child : found->GetChildren())
+                        child->parent = found;
+                }
                 e.reset();
                 return found;
             }
         }
 
-        if consteval
-        {
-            if(!data.vEntry)
-                data.vEntry = new (std::nothrow) std::vector<Entry*>();
-            assert(data.vEntry && "Allocation shouldn't fail");
-            GetDataVector<Entry*>()->push_back(e.get());
-            size = static_cast<uint32_t>(GetDataVector<Entry*>()->size());
-            return e.release();
-        }
-        else
-        {
-            if(data.raw)
-            {
-                assert(size <= capacity && "size must never exceed capacity");
-                if(size == capacity)
-                {
-                    const auto [newBuffer, granted] = detail::GlobalAllocator::AllocateAtLeast(capacity * 2 * sizeof(void*));
+        assert(size <= capacity && "size must never exceed capacity");
+        if(size == capacity)
+            detail::GlobalAllocator::Reserve<Entry*>(*this, size + 1);
 
-                    for(size_t i = 0; i < size; i++)
-                        static_cast<Entry**>(newBuffer)[i] = static_cast<Entry**>(data.raw)[i];
-
-                    (void)detail::GlobalAllocator::Deallocate(data.raw, capacity * sizeof(void*));
-                    data.raw = newBuffer;
-                    capacity = static_cast<uint32_t>(granted / sizeof(void*));
-                }
-            }
-            else
-            {
-                const auto [newBuffer, granted] = detail::GlobalAllocator::AllocateAtLeast(4 * sizeof(void*));
-                data.raw = newBuffer;
-                capacity = static_cast<uint32_t>(granted / sizeof(void*));
-                size = 0;
-            }
-
-            static_cast<Entry**>(data.raw)[size++] = e.get();
-            return e.release();
-        }
+        const uint32_t index = size;
+        detail::GlobalAllocator::Resize<Entry*>(*this, size + 1);
+        data.e[index] = e.get();
+        return e.release();
     }
 
     // ReSharper disable once CppParameterMayBeConstPtrOrRef (technically we don't modify provided object, but it's modified through another mechanism)
@@ -3177,56 +3411,29 @@ namespace fdf
         if(index >= size || !IsContainer())
             return false;
 
-        if consteval
-        {
-            Entry* child = (*GetDataVector<Entry*>())[index];
-            child->parent = nullptr;  // prevent the destructor from self-orphaning (double removal)
-            // Manual shift + pop_back instead of vector::erase: MSVC's debug iterators aren't
-            // constexpr-evaluable, and erase adopts an iterator over the new end
-            auto& vec = *GetDataVector<Entry*>();
-            for(size_t i = index; i + 1 < vec.size(); i++)
-                vec[i] = vec[i + 1];
-            vec.pop_back();
-            detail::Utils<>::Destroy(child);
-        }
-        else
-        {
-            Entry* child = static_cast<Entry**>(data.raw)[index];
-            child->parent = nullptr;  // prevent the destructor from self-orphaning (double removal)
-            for(; index + 1 < size; index++)
-                static_cast<Entry**>(data.raw)[index] = static_cast<Entry**>(data.raw)[index + 1];
-            static_cast<Entry**>(data.raw)[index] = nullptr;
-            detail::Utils<>::Destroy(child);
-        }
-
-        size--;
+        Entry** children = data.e;
+        Entry* child = children[index];
+        child->parent = nullptr;  // prevent the destructor from self-orphaning (double removal)
+        for(; index + 1 < size; index++)
+            children[index] = children[index + 1];
+        detail::GlobalAllocator::Resize<Entry*>(*this, size - 1);
+        detail::GlobalAllocator::Destroy<Entry>(child);
         return true;
     }
 
     constexpr bool Entry::ClearChildren() noexcept
     {
-        if(!IsContainer() || !data.vEntry)
+        if(!IsContainer() || !data.e)
             return false;
 
-        if consteval
+        Entry** children = data.e;
+        for(uint32_t i = 0; i < size; i++)
         {
-            std::vector<Entry*>& childVec = (*GetDataVector<Entry*>());
-            for(size_t i = 0; i < childVec.size(); i++)
-            {
-                childVec[i]->parent = nullptr;  // stop the dtor self-orphaning, which would mutate childVec mid-loop
-                detail::Utils<>::Destroy(childVec[i]);
-            }
-        }
-        else
-        {
-            for(size_t i = 0; i < size; i++)
-            {
-                static_cast<Entry**>(data.raw)[i]->parent = nullptr;
-                detail::Utils<>::Destroy(static_cast<Entry**>(data.raw)[i]);
-            }
+            children[i]->parent = nullptr;  // stop the dtor self-orphaning, which would mutate children mid-loop
+            detail::GlobalAllocator::Destroy<Entry>(children[i]);
         }
 
-        size = 0;
+        detail::GlobalAllocator::Resize<Entry*>(*this, 0);
         return true;
     }
 
@@ -3250,10 +3457,17 @@ namespace fdf
 
     constexpr std::vector<UniqueEntryPtr> Entry::OrphanChildren() noexcept
     {
+        if(!IsContainer() || !data.e)
+            return {};
+
         std::vector<UniqueEntryPtr> vec;
         vec.reserve(size);
-        for(Entry* e : OrphanChildren_INTERNAL())
+        for(Entry* e : GetChildren())
+        {
+            e->parent = nullptr;
             vec.emplace_back(e);
+        }
+        detail::GlobalAllocator::Resize<Entry*>(*this, 0);
         return vec;
     }
 
@@ -3284,40 +3498,13 @@ namespace fdf
         if(index >= size || !IsContainer())
             return nullptr;
 
-        Entry* original;
-        if consteval
-        {
-            original = (*GetDataVector<Entry*>())[index];
-            auto& vec = *GetDataVector<Entry*>();   // manual shift + pop_back (MSVC debug erase isn't constexpr)
-            for(size_t i = index; i + 1 < vec.size(); i++)
-                vec[i] = vec[i + 1];
-            vec.pop_back();
-        }
-        else
-        {
-            original = static_cast<Entry**>(data.raw)[index];
-            for(; index + 1 < size; index++)
-                static_cast<Entry**>(data.raw)[index] = static_cast<Entry**>(data.raw)[index + 1];
-
-            static_cast<Entry**>(data.raw)[index] = nullptr;
-        }
-
+        Entry** children = data.e;
+        Entry* original = children[index];
+        for(; index + 1 < size; index++)
+            children[index] = children[index + 1];
         original->parent = nullptr;
-        size--;
+        detail::GlobalAllocator::Resize<Entry*>(*this, size - 1);
         return original;
-    }
-
-    constexpr std::span<Entry*> Entry::OrphanChildren_INTERNAL() noexcept
-    {
-        if(!IsContainer() || !data.vEntry)
-            return {};
-
-        const auto children = GetChildren();
-        for(Entry* e : children)
-            e->parent = nullptr;
-
-        size = 0;
-        return children;
     }
 
 
@@ -3342,28 +3529,25 @@ namespace fdf
         else
         {
             std::string_view _identifier = param;
-            for(size_t searchDepth = static_cast<uint64_t>(std::ranges::count(_identifier, '.') + 1); searchDepth > 0 && currentEntry; searchDepth--)
+            while(currentEntry)
             {
-                std::string_view cur;
                 const size_t dotPos = _identifier.find('.');
-                if(dotPos == std::string_view::npos)
-                    cur = _identifier;
-                else
-                {
-                    cur = _identifier.substr(0, dotPos);
-                    _identifier = _identifier.substr(dotPos + 1);
-                }
+                const std::string_view cur = _identifier.substr(0, dotPos);
 
-                if(std::ranges::all_of(cur, [](char c) { return c >= '0' && c <= '9'; }))
+                uint32_t value;
+                const auto parsed = std::from_chars(cur.data(), cur.data() + cur.size(), value);
+                if(parsed.ptr == cur.data() + cur.size())
                 {
-                    uint32_t value;
-                    if(std::from_chars(cur.data(), cur.data() + cur.size(), value).ec != std::errc())
+                    if(parsed.ec != std::errc())
                         return nullptr;
-
                     currentEntry = currentEntry->GetDirectChild(value);
                 }
                 else
                     currentEntry = currentEntry->GetDirectChild(cur);
+
+                if(dotPos == std::string_view::npos)
+                    break;
+                _identifier.remove_prefix(dotPos + 1);
             }
         }
 
@@ -3377,9 +3561,7 @@ namespace fdf
 
     constexpr Entry* Entry::GetDirectChild(std::string_view _identifier) noexcept
     {
-        if(size == 0 || type != Type::Map)
-            return nullptr;
-        return GetDirectChild(FindChildIndex(_identifier));
+        return const_cast<Entry*>(std::as_const(*this).GetDirectChild(_identifier));
     }
     constexpr const Entry* Entry::GetDirectChild(std::string_view _identifier) const noexcept
     {
@@ -3390,21 +3572,14 @@ namespace fdf
 
     constexpr Entry* Entry::GetDirectChild(uint32_t index) noexcept
     {
-        if(index >= size || !IsContainer())
-            return nullptr;
-
-        if consteval
-            { return (*GetDataVector<Entry*>())[index]; }
-        return static_cast<Entry**>(data.raw)[index];
+        return const_cast<Entry*>(std::as_const(*this).GetDirectChild(index));
     }
     constexpr const Entry* Entry::GetDirectChild(uint32_t index) const noexcept
     {
         if(index >= size || !IsContainer())
             return nullptr;
 
-        if consteval
-            { return (*GetDataVector<Entry*>())[index]; }
-        return static_cast<Entry**>(data.raw)[index];
+        return data.e[index];
     }
 
 
@@ -3415,43 +3590,27 @@ namespace fdf
         if(size == 0 || !IsContainer())
             return {};
 
-        if consteval
-        {
-            return *GetDataVector<Entry*>();
-        }
-        return {static_cast<Entry**>(data.raw), size};
+        return {data.e, size};
     }
     constexpr std::span<const Entry*> Entry::GetChildren() const noexcept
     {
         if(size == 0 || !IsContainer())
             return {};
 
-        if consteval
-        {
-            return {const_cast<const Entry**>(const_cast<Entry*>(this)->GetDataVector<Entry*>()->data()), size};
-        }
-        return {static_cast<const Entry**>(data.raw), size};
+        return {const_cast<const Entry**>(const_cast<Entry*>(this)->data.e), size};
     }
 
     constexpr std::span<Entry*> Entry::GetChildren_INTERNAL() noexcept
     {
-        assert((size != 0 || IsContainer()) && "If we opt into this version which doesn't checks these, it should be already in a known good state!");
+        assert(IsContainer() && "Unchecked child access requires a container");
 
-        if consteval
-        {
-            return *GetDataVector<Entry*>();
-        }
-        return {static_cast<Entry**>(data.raw), size};
+        return {data.e, size};
     }
     constexpr std::span<const Entry*> Entry::GetChildren_INTERNAL() const noexcept
     {
-        assert((size != 0 || IsContainer()) && "If we opt into this version which doesn't checks these, it should be already in a known good state!");
+        assert(IsContainer() && "Unchecked child access requires a container");
 
-        if consteval
-        {
-            return {const_cast<const Entry**>(const_cast<Entry*>(this)->GetDataVector<Entry*>()->data()), size};
-        }
-        return {static_cast<const Entry**>(data.raw), size};
+        return {const_cast<const Entry**>(const_cast<Entry*>(this)->data.e), size};
     }
 
 
@@ -3469,7 +3628,7 @@ namespace fdf
             return 0;
 
         size_t total = 0;
-        std::vector<const Entry*> stack;
+        detail::Vector<const Entry*> stack;
         stack.push_back(this);
 
         while(!stack.empty())
@@ -3491,18 +3650,21 @@ namespace fdf
         return total;
     }
 
-    constexpr std::vector<Entry*> Entry::GetChildrenRecursive() noexcept
+    template<typename Self>
+    constexpr auto Entry::GetChildrenRecursiveImpl(Self& self) noexcept
     {
-        if(size == 0 || !IsContainer())
-            return {};
+        using Pointer = Self*;
+        if(self.size == 0 || !self.IsContainer())
+            return std::vector<Pointer>{};
 
-        std::vector<Entry*> stack;
-        std::vector<Entry*> result;
-        stack.push_back(this);
+        detail::Vector<Pointer> stack;
+        std::vector<Pointer> result;
+        result.reserve(static_cast<size_t>(self.size) + 1);
+        stack.push_back(&self);
 
         while(!stack.empty())
         {
-            Entry* current = stack.back();
+            Pointer current = stack.back();
             stack.pop_back();
             result.push_back(current);
 
@@ -3517,41 +3679,23 @@ namespace fdf
         }
 
         return result;
+    }
+
+    constexpr std::vector<Entry*> Entry::GetChildrenRecursive() noexcept
+    {
+        return GetChildrenRecursiveImpl(*this);
     }
 
     constexpr std::vector<const Entry*> Entry::GetChildrenRecursive() const noexcept
     {
-        if(size == 0 || !IsContainer())
-            return {};
-
-        std::vector<const Entry*> stack;
-        std::vector<const Entry*> result;
-        stack.push_back(this);
-
-        while(!stack.empty())
-        {
-            const Entry* current = stack.back();
-            stack.pop_back();
-            result.push_back(current);
-
-            if((current->type == Type::Array || current->type == Type::Map) && current->size > 0)
-            {
-                {
-                    const auto reverseChildren = current->GetChildren_INTERNAL();
-                    for(size_t ci = reverseChildren.size(); ci-- > 0; )
-                        stack.push_back(reverseChildren[ci]);
-                }
-            }
-        }
-
-        return result;
+        return GetChildrenRecursiveImpl(*this);
     }
 
 
 
 
-    template<std::underlying_type_t<ForEachFlags::Flag> FLAGS, typename Callable> requires (std::is_invocable_v<Callable, Entry&>)
-    constexpr void Entry::ForEach(Callable callback) noexcept(std::is_nothrow_invocable_v<Callable, Entry&>)
+    template<std::underlying_type_t<ForEachFlags::Flag> FLAGS, typename Self, typename Callable>
+    constexpr void Entry::ForEachImpl(Self& self, Callable& callback) noexcept(std::is_nothrow_invocable_v<Callable, Self&>)
     {
         if constexpr(!ForEachFlags::IsValidForEachFlag(FLAGS))
         {
@@ -3561,31 +3705,31 @@ namespace fdf
         {
             // Non-recursive, non-sorted
             if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
-                callback(*this);
-            for(Entry* child : GetChildren())
+                callback(self);
+            for(auto* child : self.GetChildren())
                 callback(*child);
         }
         else if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::Group) && ForEachFlags::IsNotSet(FLAGS, ForEachFlags::Recursive))
         {
             // Non-recursive, sorted
             if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
-                callback(*this);
+                callback(self);
 
-            if(size == 0 || !IsContainer())
+            if(self.size == 0 || !self.IsContainer())
                 return;
 
-            const auto children = GetChildren_INTERNAL();
-            for(Entry* e : children)
+            const auto children = self.GetChildren_INTERNAL();
+            for(auto* e : children)
             {
                 if(!e->IsContainer())
                     callback(*e);
             }
-            for(Entry* e : children)
+            for(auto* e : children)
             {
                 if(e->type == Type::Array)
                     callback(*e);
             }
-            for(Entry* e : children)
+            for(auto* e : children)
             {
                 if(e->type == Type::Map)
                     callback(*e);
@@ -3594,22 +3738,23 @@ namespace fdf
         else if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::Recursive) && ForEachFlags::IsNotSet(FLAGS, ForEachFlags::Group))
         {
             // Recursive, non-sorted
-            if(size == 0 || !IsContainer())
+            if(self.size == 0 || !self.IsContainer())
             {
                 if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
-                    callback(*this);
+                    callback(self);
                 return;
             }
 
-            std::vector<Entry*> stack;
+            using Pointer = Self*;
+            detail::Vector<Pointer> stack;
             if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
             {
-                stack.push_back(this);
+                stack.push_back(&self);
             }
             else
             {
                 {
-                    const auto reverseChildren = GetChildren_INTERNAL();
+                    const auto reverseChildren = self.GetChildren_INTERNAL();
                     for(size_t ci = reverseChildren.size(); ci-- > 0; )
                         stack.push_back(reverseChildren[ci]);
                 }
@@ -3617,7 +3762,7 @@ namespace fdf
 
             while(!stack.empty())
             {
-                Entry* current = stack.back();
+                Pointer current = stack.back();
                 stack.pop_back();
                 callback(*current);
 
@@ -3631,18 +3776,18 @@ namespace fdf
         else if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::Recursive | ForEachFlags::Group))
         {
             // Recursive, sorted
-            if(size == 0 || !IsContainer())
+            if(self.size == 0 || !self.IsContainer())
             {
                 if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
-                    callback(*this);
+                    callback(self);
                 return;
             }
 
             enum class Phase : uint8_t { Pre, InOrder, Leaf, Array, Map };
-            struct Frame { Entry* e; Phase phase; uint32_t idx;};
+            struct Frame { Self* e; Phase phase; uint32_t idx;};
 
-            std::vector<Frame> stack;
-            stack.push_back(Frame{ this, Phase::Pre, 0 });
+            detail::Vector<Frame> stack;
+            stack.push_back(Frame{ &self, Phase::Pre, 0 });
 
             while(!stack.empty())
             {
@@ -3657,7 +3802,7 @@ namespace fdf
                         }
                         else
                         {
-                            if(f.e != this)
+                            if(f.e != &self)
                                 callback(*f.e);
                         }
 
@@ -3687,7 +3832,7 @@ namespace fdf
                     }
                     case Phase::Leaf:
                     {
-                        for(Entry* c : f.e->GetChildren_INTERNAL())
+                        for(auto* c : f.e->GetChildren_INTERNAL())
                         {
                             if(!c->IsContainer())
                                 callback(*c);
@@ -3702,7 +3847,7 @@ namespace fdf
                         bool pushed = false;
                         while(f.idx < children.size())
                         {
-                            Entry* c = children[f.idx++];
+                            auto* c = children[f.idx++];
                             if(c->IsContainer() && c->type == Type::Array)
                             {
                                 stack.push_back(Frame{ c, Phase::Pre, 0 });
@@ -3723,7 +3868,7 @@ namespace fdf
                         bool pushed = false;
                         while(f.idx < children.size())
                         {
-                            Entry* c = children[f.idx++];
+                            auto* c = children[f.idx++];
                             if(c->IsContainer() && c->type == Type::Map)
                             {
                                 stack.push_back(Frame{ c, Phase::Pre, 0 });
@@ -3745,193 +3890,13 @@ namespace fdf
     template<std::underlying_type_t<ForEachFlags::Flag> FLAGS, typename Callable> requires (std::is_invocable_v<Callable, const Entry&>)
     constexpr void Entry::ForEach(Callable callback) const noexcept(std::is_nothrow_invocable_v<Callable, const Entry&>)
     {
-        if constexpr(!ForEachFlags::IsValidForEachFlag(FLAGS))
-        {
-            static_assert(false, "Invalid flag");
-        }
-        else if constexpr(ForEachFlags::IsNotSet(FLAGS, ForEachFlags::Recursive | ForEachFlags::Group))
-        {
-            // Non-recursive, non-sorted
-            if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
-                callback(*this);
-            for(const Entry* child : GetChildren())
-                callback(*child);
-        }
-        else if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::Group) && ForEachFlags::IsNotSet(FLAGS, ForEachFlags::Recursive))
-        {
-            // Non-recursive, sorted
-            if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
-                callback(*this);
+        ForEachImpl<FLAGS>(*this, callback);
+    }
 
-            if(size == 0 || !IsContainer())
-                return;
-
-            const auto children = GetChildren_INTERNAL();
-            for(const Entry* e : children)
-            {
-                if(!e->IsContainer())
-                    callback(*e);
-            }
-            for(const Entry* e : children)
-            {
-                if(e->type == Type::Array)
-                    callback(*e);
-            }
-            for(const Entry* e : children)
-            {
-                if(e->type == Type::Map)
-                    callback(*e);
-            }
-        }
-        else if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::Recursive) && ForEachFlags::IsNotSet(FLAGS, ForEachFlags::Group))
-        {
-            // Recursive, non-sorted
-            if(size == 0 || !IsContainer())
-            {
-                if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
-                    callback(*this);
-                return;
-            }
-
-            std::vector<const Entry*> stack;
-            if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
-            {
-                stack.push_back(this);
-            }
-            else
-            {
-                {
-                    const auto reverseChildren = GetChildren_INTERNAL();
-                    for(size_t ci = reverseChildren.size(); ci-- > 0; )
-                        stack.push_back(reverseChildren[ci]);
-                }
-            }
-
-            while(!stack.empty())
-            {
-                const Entry* current = stack.back();
-                stack.pop_back();
-                callback(*current);
-
-                {
-                    const auto reverseChildren = current->GetChildren();
-                    for(size_t ci = reverseChildren.size(); ci-- > 0; )
-                        stack.push_back(reverseChildren[ci]);
-                }
-            }
-        }
-        else if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::Recursive | ForEachFlags::Group))
-        {
-            // Recursive, sorted
-            if(size == 0 || !IsContainer())
-            {
-                if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
-                    callback(*this);
-                return;
-            }
-
-            enum class Phase : uint8_t { Pre, InOrder, Leaf, Array, Map };
-            struct Frame { const Entry* e; Phase phase; uint32_t idx;};
-
-            std::vector<Frame> stack;
-            stack.push_back(Frame{ this, Phase::Pre, 0 });
-
-            while(!stack.empty())
-            {
-                Frame& f = stack.back();
-                switch(f.phase)
-                {
-                    case Phase::Pre:
-                    {
-                        if constexpr(ForEachFlags::IsSet(FLAGS, ForEachFlags::IncludeSelf))
-                        {
-                            callback(*f.e);
-                        }
-                        else
-                        {
-                            if(f.e != this)
-                                callback(*f.e);
-                        }
-
-                        // Arrays are positional: emit children in order. Maps group by type
-                        f.phase = f.e->type == Type::Array? Phase::InOrder : Phase::Leaf;
-                        break;
-                    }
-                    case Phase::InOrder:
-                    {
-                        auto children = f.e->GetChildren_INTERNAL();
-                        bool pushed = false;
-                        while(f.idx < children.size())
-                        {
-                            auto* c = children[f.idx++];
-                            if(!c->IsContainer())
-                            {
-                                callback(*c);
-                                continue;
-                            }
-                            stack.push_back(Frame{ c, Phase::Pre, 0 });
-                            pushed = true;
-                            break;
-                        }
-                        if(!pushed)
-                            stack.pop_back();
-                        break;
-                    }
-                    case Phase::Leaf:
-                    {
-                        for(const Entry* c : f.e->GetChildren_INTERNAL())
-                        {
-                            if(!c->IsContainer())
-                                callback(*c);
-                        }
-
-                        f.phase = Phase::Array;
-                        break;
-                    }
-                    case Phase::Array:
-                    {
-                        auto children = f.e->GetChildren_INTERNAL();
-                        bool pushed = false;
-                        while(f.idx < children.size())
-                        {
-                            const Entry* c = children[f.idx++];
-                            if(c->IsContainer() && c->type == Type::Array)
-                            {
-                                stack.push_back(Frame{ c, Phase::Pre, 0 });
-                                pushed = true;
-                                break;
-                            }
-                        }
-                        if(!pushed)
-                        {
-                            f.phase = Phase::Map;
-                            f.idx = 0;
-                        }
-                        break;
-                    }
-                    case Phase::Map:
-                    {
-                        auto children = f.e->GetChildren_INTERNAL();
-                        bool pushed = false;
-                        while(f.idx < children.size())
-                        {
-                            const Entry* c = children[f.idx++];
-                            if(c->IsContainer() && c->type == Type::Map)
-                            {
-                                stack.push_back(Frame{ c, Phase::Pre, 0 });
-                                pushed = true;
-                                break;
-                            }
-                        }
-                        if(!pushed)
-                            stack.pop_back();
-                        break;
-                    }
-                    default:
-                        break;
-                }
-            }
-        }
+    template<std::underlying_type_t<ForEachFlags::Flag> FLAGS, typename Callable> requires (std::is_invocable_v<Callable, Entry&>)
+    constexpr void Entry::ForEach(Callable callback) noexcept(std::is_nothrow_invocable_v<Callable, Entry&>)
+    {
+        ForEachImpl<FLAGS>(*this, callback);
     }
 
 
@@ -3946,21 +3911,13 @@ namespace fdf
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<bool>() noexcept
     {
-        if(type != Type::Bool)
-            return std::span<bool>();
-        if consteval
-            { return std::span(GetDataAs<bool>(), size); }
-        return std::span(static_cast<bool*>(data.raw), size);
+        return type == Type::Bool? std::span<bool>(data.b, size) : std::span<bool>();
     }
 
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<int64_t>() noexcept
     {
-        if(type != Type::Int)
-            return std::span<int64_t>();
-        if consteval
-            { return std::span(*GetDataVector<int64_t>()); }
-        return std::span(static_cast<int64_t*>(data.raw), size);
+        return type == Type::Int? std::span<int64_t>(data.i, size) : std::span<int64_t>();
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<int>() noexcept  { return GetValue<int64_t>(); }
@@ -3968,11 +3925,7 @@ namespace fdf
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<uint64_t>() noexcept
     {
-        if(type != Type::UInt)
-            return std::span<uint64_t>();
-        if consteval
-            { return std::span(*GetDataVector<uint64_t>()); }
-        return std::span(static_cast<uint64_t*>(data.raw), size);
+        return type == Type::UInt? std::span<uint64_t>(data.u, size) : std::span<uint64_t>();
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<unsigned int>() noexcept  { return GetValue<uint64_t>(); }
@@ -3980,21 +3933,13 @@ namespace fdf
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<Version>() noexcept
     {
-        if(type != Type::Version)
-            return std::span<Version>();
-        if consteval
-            { return std::span(*GetDataVector<Version>()); }
-        return std::span(static_cast<Version*>(data.raw), size);
+        return type == Type::Version? std::span<Version>(data.v, size) : std::span<Version>();
     }
 
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<double>() noexcept
     {
-        if(type != Type::Float)
-            return std::span<double>();
-        if consteval
-            { return std::span(*GetDataVector<double>()); }
-        return std::span(static_cast<double*>(data.raw), size);
+        return type == Type::Float? std::span<double>(data.f, size) : std::span<double>();
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<float>() noexcept  { return GetValue<double>(); }
@@ -4002,11 +3947,7 @@ namespace fdf
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<String>() noexcept
     {
-        if(type != Type::String || IsDataNull())
-            return std::span<String>();
-        if consteval
-            { return std::span<String>(*GetDataVector<String>()); }
-        return std::span<String>(static_cast<String*>(data.raw), size);
+        return type == Type::String && !IsDataNull()? std::span<String>(data.s, size) : std::span<String>();
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<char>() noexcept  { return GetValue<String>(); }
@@ -4025,21 +3966,13 @@ namespace fdf
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<bool>() const noexcept
     {
-        if(type != Type::Bool)
-            return std::span<const bool>();
-        if consteval
-            { return std::span(GetDataAs<bool>(), size); }
-        return std::span(static_cast<const bool*>(data.raw), size);
+        return type == Type::Bool? std::span<const bool>(data.b, size) : std::span<const bool>();
     }
 
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<int64_t>() const noexcept
     {
-        if(type != Type::Int)
-            return std::span<const int64_t>();
-        if consteval
-            { return std::span(*GetDataVector<int64_t>()); }
-        return std::span(static_cast<const int64_t*>(data.raw), size);
+        return type == Type::Int? std::span<const int64_t>(data.i, size) : std::span<const int64_t>();
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<int>() const noexcept  { return GetValue<int64_t>(); }
@@ -4047,11 +3980,7 @@ namespace fdf
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<uint64_t>() const noexcept
     {
-        if(type != Type::UInt)
-            return std::span<const uint64_t>();
-        if consteval
-            { return std::span(*GetDataVector<uint64_t>()); }
-        return std::span(static_cast<const uint64_t*>(data.raw), size);
+        return type == Type::UInt? std::span<const uint64_t>(data.u, size) : std::span<const uint64_t>();
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<unsigned int>() const noexcept  { return GetValue<uint64_t>(); }
@@ -4059,21 +3988,13 @@ namespace fdf
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<Version>() const noexcept
     {
-        if(type != Type::Version)
-            return std::span<const Version>();
-        if consteval
-            { return std::span(*GetDataVector<Version>()); }
-        return std::span(static_cast<const Version*>(data.raw), size);
+        return type == Type::Version? std::span<const Version>(data.v, size) : std::span<const Version>();
     }
 
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<double>() const noexcept
     {
-        if(type != Type::Float)
-            return std::span<const double>();
-        if consteval
-            { return std::span(*GetDataVector<double>()); }
-        return std::span(static_cast<const double*>(data.raw), size);
+        return type == Type::Float? std::span<const double>(data.f, size) : std::span<const double>();
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<float>() const noexcept  { return GetValue<double>(); }
@@ -4081,11 +4002,8 @@ namespace fdf
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<String>() const noexcept
     {
-        if((type != Type::String && type != Type::Hex && type != Type::Timestamp) || IsDataNull())
-            return std::span<const String>();
-        if consteval
-            { return std::span<const String>(*GetDataVector<String>()); }
-        return std::span<const String>(static_cast<const String*>(data.raw), size);
+        const bool bStringStorage = type == Type::String || type == Type::Hex || type == Type::Timestamp;
+        return bStringStorage && !IsDataNull()? std::span<const String>(data.s, size) : std::span<const String>();
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<char>() const noexcept  { return GetValue<String>(); }
@@ -4124,85 +4042,21 @@ namespace fdf
             return;
         ReleaseData();
         type = _type;
-        if consteval
-            { ResetDataNull(); } // Only needed for union active member at comptime
+        ResetDataNull();
     }
 
-    template<typename T>
-    constexpr void Entry::ResizeStorage(const uint32_t _size) noexcept
-    {
-        if(size == _size)
-            return;
-
-        if consteval
-        {
-            if constexpr(std::is_same_v<T, bool>)
-            {
-                bool* newData = _size? new (std::nothrow) bool[_size] : nullptr;
-                assert((_size == 0 || newData) && "Allocation shouldn't fail");
-                uint32_t i = 0;
-                if(data.boolArray)
-                {
-                    for(; i < std::min(size, _size); i++)
-                        newData[i] = data.boolArray[i];
-                    delete[] data.boolArray;
-                }
-                for(; i < _size; i++)
-                    newData[i] = false;
-                data.boolArray = newData;
-            }
-            else
-            {
-                if(!GetDataVector<T>())
-                {
-                    GetDataVector<T>() = new (std::nothrow) std::vector<T>();
-                    assert(GetDataVector<T>() && "Allocation shouldn't fail");
-                }
-                GetDataVector<T>()->resize(_size);
-            }
-        }
-        else
-        {
-            T* arr = static_cast<T*>(data.raw);
-            if(_size <= capacity)   // slab has room: adjust the live range in place
-            {
-                for(uint32_t i = _size; i < size; i++)   // shrink: destroy the dropped tail
-                    std::destroy_at(arr + i);
-                for(uint32_t i = size; i < _size; i++)   // grow: value-init the new tail
-                    std::construct_at(arr + i);
-            }
-            else   // grow past capacity: move the live range to a bigger bucket
-            {
-                const uint32_t oldCapacity = capacity;
-                T* newData = AllocateSlab<T>(_size);
-                uint32_t i = 0;
-                for(; i < size; i++)   // size < _size here, every live element survives
-                    std::construct_at(newData + i, std::move(arr[i]));
-                for(; i < _size; i++)
-                    std::construct_at(newData + i);
-                for(uint32_t j = 0; j < size; j++)   // destroy the moved-from originals
-                    std::destroy_at(arr + j);
-                if(oldCapacity)   // nothing to free when growing from an empty entry
-                    detail::GlobalAllocator::Deallocate(data.raw, oldCapacity * sizeof(T));
-                data.raw = newData;
-            }
-        }
-
-        size = _size;
-    }
-
-    // Resize a value pack in place: bool, numeric, version, or string. Map/array/null and the constrained-text
-    // types (hex/timestamp) are rejected, an empty component isn't a valid hex or timestamp
+    // resizes bool, numeric, version and string packs
+    // containers, null, hex and timestamps reject resize
     constexpr void Entry::Resize(const uint32_t _size) noexcept
     {
         switch(type)
         {
-        case Type::Bool:    ResizeStorage<bool>(_size);     break;
-        case Type::Int:     ResizeStorage<int64_t>(_size);  break;
-        case Type::UInt:    ResizeStorage<uint64_t>(_size); break;
-        case Type::Float:   ResizeStorage<double>(_size);   break;
-        case Type::String:  ResizeStorage<String>(_size);   break;
-        case Type::Version: ResizeStorage<Version>(_size);  break;
+        case Type::Bool:    detail::GlobalAllocator::Resize<bool>(*this, _size);     break;
+        case Type::Int:     detail::GlobalAllocator::Resize<int64_t>(*this, _size);  break;
+        case Type::UInt:    detail::GlobalAllocator::Resize<uint64_t>(*this, _size); break;
+        case Type::Float:   detail::GlobalAllocator::Resize<double>(*this, _size);   break;
+        case Type::String:  detail::GlobalAllocator::Resize<String>(*this, _size);   break;
+        case Type::Version: detail::GlobalAllocator::Resize<Version>(*this, _size);  break;
         default:            return;
         }
     }
@@ -4215,97 +4069,56 @@ namespace fdf
     {
         ReleaseData();
         type = Type::Null;
+        ResetDataNull();
     }
     constexpr void Entry::SetValue(NilType) noexcept
     {
-        ReleaseData();
-        type = Type::Null;
+        SetValue(NullType{});
     }
 
     constexpr void Entry::SetValue(ArrayType) noexcept
     {
         ReleaseData();
         type = Type::Array;
+        ResetDataNull();
     }
     constexpr void Entry::SetValue(MapType) noexcept
     {
         ReleaseData();
         type = Type::Map;
+        ResetDataNull();
     }
 
     constexpr void Entry::SetValue(const bool value) noexcept
     {
         ReleaseData();
         type = Type::Bool;
-        size = 1;
-        if consteval
-        {
-            data.boolArray = new (std::nothrow) bool[1];
-            assert(data.boolArray && "Allocation shouldn't fail");
-            *GetDataAs<bool>() = value;
-        }
-        else
-        {
-            data.raw = AllocateSlab<bool>(size);
-            static_cast<bool*>(data.raw)[0] = value;
-        }
+        detail::GlobalAllocator::Allocate<bool>(*this, 1);
+        data.b[0] = value;
     }
 
     constexpr void Entry::SetValue(const std::signed_integral auto value) noexcept
     {
         ReleaseData();
         type = Type::Int;
-        size = 1;
-        if consteval
-        {
-            data.vInt = new (std::nothrow) std::vector<int64_t>();
-            assert(data.vInt && "Allocation shouldn't fail");
-            GetDataVector<int64_t>()->resize(size);
-            (*GetDataVector<int64_t>())[0] = static_cast<int64_t>(value);
-        }
-        else
-        {
-            data.raw = AllocateSlab<int64_t>(size);
-            static_cast<int64_t*>(data.raw)[0] = static_cast<int64_t>(value);
-        }
+        detail::GlobalAllocator::Allocate<int64_t>(*this, 1);
+        data.i[0] = static_cast<int64_t>(value);
     }
 
     constexpr void Entry::SetValue(const std::unsigned_integral auto value) noexcept
     {
         ReleaseData();
         type = Type::UInt;
-        size = 1;
-        if consteval
-        {
-            data.vUInt = new (std::nothrow) std::vector<uint64_t>();
-            assert(data.vUInt && "Allocation shouldn't fail");
-            GetDataVector<uint64_t>()->resize(size);
-            (*GetDataVector<uint64_t>())[0] = static_cast<uint64_t>(value);
-        }
-        else
-        {
-            data.raw = AllocateSlab<uint64_t>(size);
-            static_cast<uint64_t*>(data.raw)[0] = static_cast<uint64_t>(value);
-        }
+        detail::GlobalAllocator::Allocate<uint64_t>(*this, 1);
+        data.u[0] = static_cast<uint64_t>(value);
     }
 
     constexpr void Entry::SetValue(const std::floating_point auto value) noexcept
     {
         ReleaseData();
         type = Type::Float;
-        size = 1;
-        if consteval
-        {
-            data.vFloat = new (std::nothrow) std::vector<double>();
-            assert(data.vFloat && "Allocation shouldn't fail");
-            GetDataVector<double>()->resize(size);
-            (*GetDataVector<double>())[0] = static_cast<double>(value);
-        }
-        else
-        {
-            data.raw = AllocateSlab<double>(size);
-            static_cast<double*>(data.raw)[0] = static_cast<double>(value);
-        }
+        detail::GlobalAllocator::Allocate<double>(*this, 1);
+        data.f[0] = static_cast<double>(value);
     }
 
     constexpr void Entry::SetValue(const std::string_view value) noexcept
@@ -4323,17 +4136,9 @@ namespace fdf
         if(value.empty())
             return;
 
-        if consteval
-        {
-            for(uint32_t i = 0; i < count; i++)
-                (*data.vString)[i] = value[i];
-        }
-        else
-        {
-            String* arr = static_cast<String*>(data.raw);
-            for(uint32_t i = 0; i < count; i++)
-                arr[i] = value[i];
-        }
+        String* arr = data.s;
+        for(uint32_t i = 0; i < count; i++)
+            arr[i] = value[i];
     }
 
     constexpr void Entry::SetValue(const char value) noexcept
@@ -4349,14 +4154,11 @@ namespace fdf
     constexpr void Entry::SetValue(const Timestamp& value) noexcept
     {
         ReleaseData();
-        std::string text;
+        String text;
         value.AppendTo(text);
         AllocateStringArray(1);
         type = Type::Timestamp;
-        if consteval
-            { (*data.vString)[0] = std::string_view(text); }
-        else
-            { static_cast<String*>(data.raw)[0] = std::string_view(text); }
+        data.s[0] = std::string_view(text);
     }
 
 
@@ -4367,20 +4169,9 @@ namespace fdf
     {
         ReleaseData();
         type = Type::Bool;
-        size = static_cast<uint32_t>(value.size());
-        if consteval
-        {
-            data.boolArray = new (std::nothrow) bool[size];
-            assert(data.boolArray && "Allocation shouldn't fail");
-            for(size_t i = 0; i < size; i++)
-                *(GetDataAs<bool>() + i) = value[i];
-        }
-        else
-        {
-            data.raw = AllocateSlab<bool>(size);
-            for(size_t i = 0; i < size; i++)
-                static_cast<bool*>(data.raw)[i] = value[i];
-        }
+        detail::GlobalAllocator::Allocate<bool>(*this, static_cast<uint32_t>(value.size()));
+        for(size_t i = 0; i < size; i++)
+            data.b[i] = value[i];
     }
 
     template <std::signed_integral T>
@@ -4388,23 +4179,9 @@ namespace fdf
     {
         ReleaseData();
         type = Type::Int;
-        size = static_cast<uint32_t>(value.size());
-        if(size <= 0U)
-            return;
-        if consteval
-        {
-            data.vInt = new (std::nothrow) std::vector<int64_t>();
-            assert(data.vInt && "Allocation shouldn't fail");
-            GetDataVector<int64_t>()->resize(size);
-            for(size_t i = 0; i < size; i++)
-                (*GetDataVector<int64_t>())[i] = static_cast<int64_t>(value[i]);
-        }
-        else
-        {
-            data.raw = AllocateSlab<int64_t>(size);
-            for(size_t i = 0; i < size; i++)
-                static_cast<int64_t*>(data.raw)[i] = static_cast<int64_t>(value[i]);
-        }
+        detail::GlobalAllocator::Allocate<int64_t>(*this, static_cast<uint32_t>(value.size()));
+        for(size_t i = 0; i < size; i++)
+            data.i[i] = static_cast<int64_t>(value[i]);
     }
 
     template <std::unsigned_integral T>
@@ -4412,23 +4189,9 @@ namespace fdf
     {
         ReleaseData();
         type = Type::UInt;
-        size = static_cast<uint32_t>(value.size());
-        if(size <= 0U)
-            return;
-        if consteval
-        {
-            data.vUInt = new (std::nothrow) std::vector<uint64_t>();
-            assert(data.vUInt && "Allocation shouldn't fail");
-            GetDataVector<uint64_t>()->resize(size);
-            for(size_t i = 0; i < size; i++)
-                (*GetDataVector<uint64_t>())[i] = static_cast<uint64_t>(value[i]);
-        }
-        else
-        {
-            data.raw = AllocateSlab<uint64_t>(size);
-            for(size_t i = 0; i < size; i++)
-                static_cast<uint64_t*>(data.raw)[i] = static_cast<uint64_t>(value[i]);
-        }
+        detail::GlobalAllocator::Allocate<uint64_t>(*this, static_cast<uint32_t>(value.size()));
+        for(size_t i = 0; i < size; i++)
+            data.u[i] = static_cast<uint64_t>(value[i]);
     }
 
     constexpr void Entry::SetValue(const Version& value) noexcept
@@ -4440,26 +4203,11 @@ namespace fdf
     {
         ReleaseData();
         type = Type::Version;
-        size = static_cast<uint32_t>(value.size());
-        if(size == 0)
-            return;
-        // revision is meaningless without bHasRevision, force it to 0 so the value the writer emits
-        // and a re-parse both agree with what's stored
+        detail::GlobalAllocator::Allocate<Version>(*this, static_cast<uint32_t>(value.size()));
+        // a missing revision flag normalizes revision to zero
         auto normalized = [](Version v) noexcept { if(!v.bHasRevision) v.revision = 0; return v; };
-        if consteval
-        {
-            data.vVersion = new (std::nothrow) std::vector<Version>();
-            assert(data.vVersion && "Allocation shouldn't fail");
-            data.vVersion->reserve(size);
-            for(const Version& v : value)
-                data.vVersion->push_back(normalized(v));
-        }
-        else
-        {
-            data.raw = AllocateSlab<Version>(size);
-            for(size_t i = 0; i < size; i++)
-                std::construct_at(static_cast<Version*>(data.raw) + i, normalized(value[i]));
-        }
+        for(size_t i = 0; i < size; i++)
+            data.v[i] = normalized(value[i]);
     }
 
     template <std::floating_point T>
@@ -4467,23 +4215,9 @@ namespace fdf
     {
         ReleaseData();
         type = Type::Float;
-        size = static_cast<uint32_t>(value.size());
-        if(size <= 0u)
-            return;
-        if consteval
-        {
-            data.vFloat = new (std::nothrow) std::vector<double>();
-            assert(data.vFloat && "Allocation shouldn't fail");
-            GetDataVector<double>()->resize(size);
-            for(size_t i = 0; i < size; i++)
-                (*GetDataVector<double>())[i] = static_cast<double>(value[i]);
-        }
-        else
-        {
-            data.raw = AllocateSlab<double>(size);
-            for(size_t i = 0; i < size; i++)
-                static_cast<double*>(data.raw)[i] = static_cast<double>(value[i]);
-        }
+        detail::GlobalAllocator::Allocate<double>(*this, static_cast<uint32_t>(value.size()));
+        for(size_t i = 0; i < size; i++)
+            data.f[i] = static_cast<double>(value[i]);
     }
 
 
@@ -4500,7 +4234,7 @@ namespace fdf
     #pragma warning(disable : 4702)
 #endif
     template<Style STYLE>
-    [[nodiscard]] constexpr std::string_view Entry::DataToView(std::string& temp) const noexcept
+    [[nodiscard]] constexpr std::string_view Entry::DataToView(String& temp) const noexcept
     {
         switch(type)
         {
@@ -4659,15 +4393,27 @@ namespace fdf
     bool Entry::ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy) noexcept
     {
         std::error_code ec;
-        if(!std::filesystem::exists(filepath, ec) || ec || !std::filesystem::is_regular_file(filepath, ec) || ec)
+        if(!std::filesystem::is_regular_file(filepath, ec) || ec)
             return false;
 
-        std::ifstream file(filepath);
+        const auto fileSize = std::filesystem::file_size(filepath, ec);
+        if(ec)
+            return false;
+        if(fileSize > String::max_size())
+        {
+            if constexpr(!std::is_null_pointer_v<std::remove_cvref_t<decltype(DIAGNOSTIC_CALLBACK)>>)
+                DIAGNOSTIC_CALLBACK(Diagnostic{ DiagnosticSeverity::Fatal, DiagnosticType::InputTooLarge, {}, 0, 0, 0 });
+            return false;
+        }
+
+        std::ifstream file(filepath, std::ios::binary);
         if(!file)
             return false;
 
-        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        return ParseCombineBuffer<DIAGNOSTIC_CALLBACK>(content, fileCommentCombineStrategy);
+        String content(static_cast<size_t>(fileSize), '\0');
+        if(fileSize > 0 && !file.read(content.data(), static_cast<std::streamsize>(fileSize)))
+            return false;
+        return ParseCombineBuffer<DIAGNOSTIC_CALLBACK>(std::string_view(content), fileCommentCombineStrategy);
     }
 
     template <auto DIAGNOSTIC_CALLBACK>
@@ -4682,8 +4428,12 @@ namespace fdf
 
     constexpr bool Entry::Combine(UniqueEntryPtr& other, [[maybe_unused]] CommentCombineStrategy fileCommentCombineStrategy) noexcept
     {
-        if(!IsContainer() || type != other->type)
+        if(!other || !IsContainer() || type != other->type || other.get() == this)
             return false;
+
+        if(other->size > detail::UINT32_MAX_VALUE - size)
+            return false;
+        detail::GlobalAllocator::Reserve<Entry*>(*this, size + other->size);
 
     #if !FDF_NO_COMMENTS
         switch(fileCommentCombineStrategy)
@@ -4709,7 +4459,16 @@ namespace fdf
         }
     #endif
 
-        return AddChild(other);
+        // all validation happened above, moving children cannot fail
+        while(other->GetChildCount() > 0)
+        {
+            UniqueEntryPtr child = other->OrphanChild(0U);
+            assert(child && "a non-empty container must orphan its first child");
+            [[maybe_unused]] const Entry* added = AddChild(child);
+            assert(added && "an orphaned child must be addable");
+        }
+        other.reset();
+        return true;
     }
 
 
@@ -4720,26 +4479,28 @@ namespace fdf
     UniqueEntryPtr ParseFile(const std::filesystem::path& filepath) noexcept
     {
         std::error_code ec;
-        if(!std::filesystem::exists(filepath, ec) || ec || !std::filesystem::is_regular_file(filepath, ec) || ec)
+        if(!std::filesystem::is_regular_file(filepath, ec) || ec)
             return nullptr;
 
         // Reject an oversized file before reading it into memory, offsets are 32-bit
         const auto fileSize = std::filesystem::file_size(filepath, ec);
         if(ec)
             return nullptr;
-        if(fileSize >= detail::UINT32_MAX_VALUE)
+        if(fileSize > String::max_size())
         {
             if constexpr(!std::is_null_pointer_v<std::remove_cvref_t<decltype(DIAGNOSTIC_CALLBACK)>>)
                 DIAGNOSTIC_CALLBACK(Diagnostic{ DiagnosticSeverity::Fatal, DiagnosticType::InputTooLarge, {}, 0, 0, 0 });
             return nullptr;
         }
 
-        std::ifstream file(filepath);
+        std::ifstream file(filepath, std::ios::binary);
         if(!file)
             return nullptr;
 
-        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        return detail::Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(content);
+        String content(static_cast<size_t>(fileSize), '\0');
+        if(fileSize > 0 && !file.read(content.data(), static_cast<std::streamsize>(fileSize)))
+            return nullptr;
+        return detail::Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(std::string_view(content));
     }
 
     template<auto DIAGNOSTIC_CALLBACK>
@@ -4751,85 +4512,57 @@ namespace fdf
     template<Style STYLE>
     bool WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists) noexcept
     {
-        auto parentDir = filepath.parent_path();
         std::error_code ec;
-        if(!std::filesystem::exists(parentDir, ec) && (ec || !bCreateIfNotExists || !std::filesystem::create_directories(parentDir, ec) || ec))
+        const bool bFileExists = std::filesystem::exists(filepath, ec);
+        if(ec)
             return false;
-        if(std::filesystem::exists(filepath, ec) && (ec || !std::filesystem::is_regular_file(filepath, ec) || ec))
+        if(bFileExists)
+        {
+            if(!std::filesystem::is_regular_file(filepath, ec) || ec)
+                return false;
+        }
+        else if(!bCreateIfNotExists)
             return false;
+
+        const std::filesystem::path parentDir = filepath.parent_path();
+        if(!parentDir.empty())
+        {
+            const bool bParentExists = std::filesystem::exists(parentDir, ec);
+            if(ec)
+                return false;
+            if(!bParentExists && (!bCreateIfNotExists || !std::filesystem::create_directories(parentDir, ec) || ec))
+                return false;
+            if(bParentExists && (!std::filesystem::is_directory(parentDir, ec) || ec))
+                return false;
+        }
 
         std::ofstream file(filepath);
         if(!file)
             return false;
 
-        std::string buffer;
-        detail::Utils<>::WriteBuffer<STYLE>(e, buffer);
+        String buffer = detail::Utils<>::WriteBuffer<STYLE>(e);
 
-        file << buffer;
+        file.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         return static_cast<bool>(file);
     }
     template<Style STYLE>
-    constexpr void WriteBuffer(const Entry& root, std::string& buffer) noexcept
+    constexpr String WriteBuffer(const Entry& root) noexcept
     {
-        detail::Utils<>::WriteBuffer<STYLE>(root, buffer);
+        return detail::Utils<>::WriteBuffer<STYLE>(root);
     }
 
 
     constexpr UniqueEntryPtr NewEntry() noexcept
     {
-        UniqueEntryPtr e = detail::Utils<>::Create();
-        if(!e)
-            return nullptr;
-
-        e->type = Type::Map;
-        return e;
+        return UniqueEntryPtr(detail::GlobalAllocator::Create<Entry>());
     }
 }
 
 namespace fdf::detail
 {
-    template<auto DIAGNOSTIC_CALLBACK>
-    template<typename... Args>
-    constexpr UniqueEntryPtr Utils<DIAGNOSTIC_CALLBACK>::Create(Args&&... args) noexcept
-    {
-        if consteval
-        {
-            UniqueEntryPtr p = UniqueEntryPtr(new (std::nothrow) Entry{std::forward<Args>(args)...});
-            assert(p && "Allocation shouldn't fail");
-            return p;
-        }
-        else
-        {
-            if constexpr(FDF_DISABLE_SLAB_ALLOCATOR)
-                return UniqueEntryPtr(new(GlobalAllocator::Allocate<sizeof(Entry)>()) Entry{std::forward<Args>(args)...});
-            else
-                return UniqueEntryPtr(new(GlobalAllocator::ENTRY_ALLOCATOR.Allocate()) Entry{std::forward<Args>(args)...});
-        }
-    }
-
-    template<auto DIAGNOSTIC_CALLBACK>
-    constexpr void Utils<DIAGNOSTIC_CALLBACK>::Destroy(Entry* e) noexcept
-    {
-        if consteval
-        {
-            delete e;
-        }
-        else
-        {
-            if(e)
-            {
-                e->~Entry();
-                if constexpr(FDF_DISABLE_SLAB_ALLOCATOR)
-                    (void)GlobalAllocator::Deallocate<sizeof(Entry)>(e);
-                else
-                    (void)GlobalAllocator::ENTRY_ALLOCATOR.Deallocate(e);
-            }
-        }
-    }
-
     constexpr void EntryDeleter::operator()(Entry* e) noexcept
     {
-        Utils<>::Destroy(e);
+        GlobalAllocator::Destroy<Entry>(e);
     }
 
     template<auto DIAGNOSTIC_CALLBACK>
@@ -4842,10 +4575,8 @@ namespace fdf::detail
         }
     }
 
-    // Skip tokens until the next entry boundary so parsing can resume after a malformed entry
-    // Brace-depth aware so it behaves the same for single-line and multi-line containers: a
-    // comma or newline at depth 0 separates entries, a close brace at depth 0 ends the container
-    // When bStopAtCloseBrace, that close brace is left for the caller's container loop to consume
+    // skips a malformed entry while tracking nested braces
+    // bStopAtCloseBrace leaves the enclosing close brace for the caller
     template<auto DIAGNOSTIC_CALLBACK>
     constexpr void Utils<DIAGNOSTIC_CALLBACK>::SkipToNextEntry(Tokenizer& tokenizer, bool bStopAtCloseBrace) noexcept
     {
@@ -4891,8 +4622,7 @@ namespace fdf::detail
     template<auto DIAGNOSTIC_CALLBACK>
     constexpr UniqueEntryPtr Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(std::string_view content) noexcept
     {
-        // Offsets into the buffer are 32-bit and UINT32_MAX_VALUE is the eof sentinel, so a size at or
-        // above it would collide or overflow. Refuse rather than silently corrupt positions
+        // UINT32_MAX_VALUE is both the offset limit and eof sentinel
         if(content.size() >= detail::UINT32_MAX_VALUE)
         {
             if constexpr(!std::is_null_pointer_v<std::remove_cvref_t<decltype(DIAGNOSTIC_CALLBACK)>>)
@@ -4919,7 +4649,7 @@ namespace fdf::detail
             Token fileCommentToken = TokenType::NonExisting;
         #endif
 
-        UniqueEntryPtr root = Create();
+        UniqueEntryPtr root(GlobalAllocator::Create<Entry>());
         if(!root)
             return nullptr;
         root->type = Type::Map;
@@ -4982,7 +4712,7 @@ namespace fdf::detail
                 const uint32_t childCountBefore = root->GetChildCount();
                 if(!ParseVariable(tokenizer, *root   FDF_COMMENT_SWITCH(,comment)))
                 {
-                    // Drop the half-built entry, report it, and resume at the next line
+                    // Drop the half-built entry, report it and resume at the next line
                     while(root->GetChildCount() > childCountBefore)
                         (void)root->RemoveChild(root->GetChildCount() - 1);
 
@@ -5018,7 +4748,7 @@ namespace fdf::detail
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseVariable   (Tokenizer& tokenizer, Entry& parent   FDF_COMMENT_SWITCH(, Token comment)) noexcept
     {
         Token currentToken = tokenizer.Current();
-        UniqueEntryPtr _temp = Utils<>::Create();
+        UniqueEntryPtr _temp(GlobalAllocator::Create<Entry>());
         Entry* entry = parent.AddChild(_temp);
         if(!entry)
             return false;
@@ -5118,42 +4848,55 @@ namespace fdf::detail
             return true;
         };
 
-        struct Component { std::string_view view; Type type; };
-
-        // A StringLiteral is already a String, an Atom resolves via ClassifyAtom. Structural rejects
-        // recover here, content errors surface in the per-type parse below
-        auto classifyToken = [&](Token token, Component& out) -> bool
+        // StringLiteral is already a string and ClassifyAtom resolves atoms
+        // structural errors recover here, content errors in the type parser
+        auto classifyToken = [&](Token token, Type& out) -> bool
         {
             const std::string_view v = tokenizer.ToView(token);
             if(token.type == TokenType::StringLiteral)
             {
-                out = { v, Type::String };
+                out = Type::String;
                 return true;
             }
 
-            Type t = Type::String;
-            if(!ClassifyAtom(v, t))
+            out = Type::String;
+            if(!ClassifyAtom(v, out))
             {
                 Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, token);
                 return false;
             }
-            out = { v, t };
             return true;
         };
 
-        // Gather the value's components. A single scalar stays on the stack, a '|' pack spills to a vector
-        Component single[1];
-        if(!classifyToken(currentToken, single[0]))
+        // replaying the cheap tokenizer avoids keeping a heap-backed token list
+        const Tokenizer componentStart = tokenizer;
+        Type firstType;
+        if(!classifyToken(currentToken, firstType))
             return false;
 
+        bool bAllBool      = true;
+        bool bAllNumeric   = true;
+        bool bAllString    = true;
+        bool bAllHex       = true;
+        bool bAllVersion   = true;
+        bool bAllTimestamp = true;
+        bool bAnyFloat     = false;
+        auto includeType = [&](Type type)
+        {
+            bAllBool      = bAllBool      && type == Type::Bool;
+            bAllNumeric   = bAllNumeric   && (type == Type::Int || type == Type::Float);
+            bAllString    = bAllString    && type == Type::String;
+            bAllHex       = bAllHex       && type == Type::Hex;
+            bAllVersion   = bAllVersion   && type == Type::Version;
+            bAllTimestamp = bAllTimestamp && type == Type::Timestamp;
+            bAnyFloat     = bAnyFloat     || type == Type::Float;
+        };
+        includeType(firstType);
+
+        uint32_t componentCount = 1;
         currentToken = tokenizer.Advance();
-
-        std::vector<Component> packComponents;
-        std::span<const Component> components(single, 1);
-
         if(currentToken.type == TokenType::Pipe)
         {
-            packComponents.push_back(single[0]);
             while(currentToken.type == TokenType::Pipe)
             {
                 currentToken = tokenizer.Advance();
@@ -5164,36 +4907,40 @@ namespace fdf::detail
                     return false;  // dangling '|' with no component
                 }
 
-                Component c;
-                if(!classifyToken(currentToken, c))
+                Type componentType;
+                if(!classifyToken(currentToken, componentType))
                     return false;
-                packComponents.push_back(c);
+                includeType(componentType);
+                componentCount++;
 
                 currentToken = tokenizer.Advance();
             }
-            components = packComponents;
         }
 
-        bool bAllBool      = true;
-        bool bAllNumeric   = true;
-        bool bAllString    = true;
-        bool bAllHex       = true;
-        bool bAllVersion   = true;
-        bool bAllTimestamp = true;
-        bool bAnyFloat     = false;
-        for(const Component& c : components)
+        struct ComponentReader
         {
-            bAllBool      = bAllBool      && c.type == Type::Bool;
-            bAllNumeric   = bAllNumeric   && (c.type == Type::Int || c.type == Type::Float);
-            bAllString    = bAllString    && c.type == Type::String;
-            bAllHex       = bAllHex       && c.type == Type::Hex;
-            bAllVersion   = bAllVersion   && c.type == Type::Version;
-            bAllTimestamp = bAllTimestamp && c.type == Type::Timestamp;
-            bAnyFloat     = bAnyFloat     || c.type == Type::Float;
-        }
+            Tokenizer tokenizer;
+            uint32_t remaining;
 
-        // A pack (2+ components) must be uniform. A mix like 1|true, or null/version components, has no common type
-        if(components.size() > 1 && !bAllBool && !bAllNumeric && !bAllString && !bAllHex && !bAllVersion && !bAllTimestamp)
+            [[nodiscard]] constexpr std::string_view Next() noexcept
+            {
+                assert(remaining > 0 && IsValueLiteral(tokenizer.Current().type));
+                const std::string_view result = tokenizer.ToView(tokenizer.Current());
+                remaining--;
+                if(remaining > 0)
+                {
+                    [[maybe_unused]] const Token pipe = tokenizer.Advance();
+                    assert(pipe.type == TokenType::Pipe);
+                    [[maybe_unused]] const Token component = tokenizer.Advance();
+                    assert(IsValueLiteral(component.type));
+                }
+                return result;
+            }
+        };
+        auto makeComponentReader = [&]() { return ComponentReader{ componentStart, componentCount }; };
+
+        // packs need a common component type
+        if(componentCount > 1 && !bAllBool && !bAllNumeric && !bAllString && !bAllHex && !bAllVersion && !bAllTimestamp)
         {
             Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidPack, tokenizer, valueToken);
             return false;
@@ -5202,24 +4949,13 @@ namespace fdf::detail
         if(bAllBool)
         {
             entry.type = Type::Bool;
-            entry.size = static_cast<uint32_t>(components.size());
-            if consteval
-            {
-                entry.data.boolArray = new (std::nothrow) bool[entry.size];
-                assert(entry.data.boolArray && "Allocation shouldn't fail");
-            }
-            else
-            {
-                entry.data.raw = entry.AllocateSlab<bool>(entry.size);
-            }
+            detail::GlobalAllocator::Allocate<bool>(entry, componentCount);
 
-            for(size_t i = 0; i < components.size(); i++)
+            auto componentReader = makeComponentReader();
+            for(uint32_t i = 0; i < componentCount; i++)
             {
-                const bool value = components[i].view == KEYWORDS[2];
-                if consteval
-                    { entry.GetDataAs<bool>()[i] = value; }
-                else
-                    { static_cast<bool*>(entry.data.raw)[i] = value; }
+                const bool value = componentReader.Next() == KEYWORDS[2];
+                entry.data.b[i] = value;
             }
 
             return postProcess();
@@ -5231,18 +4967,7 @@ namespace fdf::detail
         if(bAllVersion)
         {
             entry.type = Type::Version;
-            entry.size = static_cast<uint32_t>(components.size());
-            if consteval
-            {
-                entry.data.vVersion = new (std::nothrow) std::vector<Version>(entry.size);
-                assert(entry.data.vVersion && "Allocation shouldn't fail");
-            }
-            else
-            {
-                entry.data.raw = entry.AllocateSlab<Version>(entry.size);
-                for(size_t i = 0; i < components.size(); i++)
-                    std::construct_at(static_cast<Version*>(entry.data.raw) + i);
-            }
+            detail::GlobalAllocator::Allocate<Version>(entry, componentCount);
 
             auto fail = [&]() -> bool
             {
@@ -5251,15 +4976,10 @@ namespace fdf::detail
                 return false;
             };
 
-            for(size_t versionIndex = 0; versionIndex < components.size(); versionIndex++)
+            auto componentReader = makeComponentReader();
+            for(uint32_t versionIndex = 0; versionIndex < componentCount; versionIndex++)
             {
-                Version& version = [&]() -> Version&
-                {
-                    if consteval
-                        { return (*entry.GetDataVector<Version>())[versionIndex]; }
-                    else
-                        { return static_cast<Version*>(entry.data.raw)[versionIndex]; }
-                }();
+                Version& version = entry.data.v[versionIndex];
                 uint32_t componentIndex = 0;
                 uint64_t result = 0;
                 bool bHasDigit = false;
@@ -5290,7 +5010,7 @@ namespace fdf::detail
                     return true;
                 };
 
-                for(char c : components[versionIndex].view)
+                for(char c : componentReader.Next())
                 {
                     if(constexpr_isdigit(c))
                     {
@@ -5316,21 +5036,10 @@ namespace fdf::detail
 
         if(bAllNumeric && !bAnyFloat)
         {
-            entry.size = static_cast<uint32_t>(components.size());
-            if consteval
-            {
-                entry.data.vInt = new (std::nothrow) std::vector<int64_t>();
-                assert(entry.data.vInt && "Allocation shouldn't fail");
-                entry.GetDataVector<int64_t>()->resize(entry.size);
-            }
-            else
-            {
-                entry.data.raw = entry.AllocateSlab<int64_t>(entry.size);
-            }
-
-            // match type to the buffer now, else an early error return leaves a Map pointing at an
-            // int buffer and ReleaseData walks it as children. Flips to UInt with the buffer below
+            // set the type before allocation so early error cleanup sees an Int buffer
+            // promotion below changes both the buffer and type to UInt
             entry.type = Type::Int;
+            detail::GlobalAllocator::Allocate<int64_t>(entry, componentCount);
 
             bool bIsUnsigned = false;
             bool bContainsAnyNegative = false;
@@ -5342,9 +5051,10 @@ namespace fdf::detail
                 return false;
             };
 
-            for(size_t d = 0; d < components.size(); d++)
+            auto componentReader = makeComponentReader();
+            for(uint32_t d = 0; d < componentCount; d++)
             {
-                const std::string_view seg = components[d].view;
+                const std::string_view seg = componentReader.Next();
                 uint64_t result = 0;
                 bool bIsNegative = false;
                 bool bIsFirstChar = true;
@@ -5382,13 +5092,13 @@ namespace fdf::detail
 
                 if(bIsNegative)
                 {
-                    if(bIsUnsigned || result > INT64_MAX_VALUE)
+                    constexpr uint64_t INT64_MIN_MAGNITUDE = static_cast<uint64_t>(INT64_MAX_VALUE) + 1U;
+                    if(bIsUnsigned || result > INT64_MIN_MAGNITUDE)
                         return fail();
 
-                    if consteval
-                        { (*entry.GetDataVector<int64_t>())[d] = -static_cast<int64_t>(result); }
-                    else
-                        { static_cast<int64_t*>(entry.data.raw)[d] = -static_cast<int64_t>(result); }
+                    entry.data.i[d] = result == INT64_MIN_MAGNITUDE
+                        ? std::numeric_limits<int64_t>::min()
+                        : -static_cast<int64_t>(result);
                 }
                 else
                 {
@@ -5402,44 +5112,13 @@ namespace fdf::detail
                             return fail();
 
                         if(!bWasUnsigned)
-                        {
-                            if consteval
-                            {
-                                auto* temp = new (std::nothrow) std::vector<uint64_t>();
-                                assert(temp && "Allocation shouldn't fail");
-                                auto& oldVec = *entry.GetDataVector<int64_t>();
-                                temp->resize(oldVec.size());
-
-                                for(size_t i = 0; i < oldVec.size(); ++i)
-                                    (*temp)[i] = static_cast<uint64_t>(oldVec[i]);
-
-                                delete entry.GetDataVector<int64_t>();
-                                entry.data.vUInt = temp;
-                            }
-                            else
-                            {
-                                for(size_t i = 0; i < d; i++)
-                                {
-                                    const int64_t temp = static_cast<int64_t*>(entry.data.raw)[i];
-                                    static_cast<uint64_t*>(entry.data.raw)[i] = static_cast<uint64_t>(temp);
-                                }
-                            }
-                        }
+                            detail::GlobalAllocator::ConvertFrom<uint64_t, int64_t>(entry, static_cast<uint32_t>(d));
 
                         entry.type = Type::UInt;  // keep type matched to the promoted buffer
-
-                        if consteval
-                            { (*entry.GetDataVector<uint64_t>())[d] = result; }
-                        else
-                            { static_cast<uint64_t*>(entry.data.raw)[d] = result; }
+                        entry.data.u[d] = result;
                     }
                     else
-                    {
-                        if consteval
-                            { (*entry.GetDataVector<int64_t>())[d] = static_cast<int64_t>(result); }
-                        else
-                            { static_cast<int64_t*>(entry.data.raw)[d] = static_cast<int64_t>(result); }
-                    }
+                        entry.data.i[d] = static_cast<int64_t>(result);
                 }
             }
 
@@ -5454,21 +5133,12 @@ namespace fdf::detail
         if(bAllNumeric)
         {
             entry.type = Type::Float;
-            entry.size = static_cast<uint32_t>(components.size());
-            if consteval
-            {
-                entry.data.vFloat = new (std::nothrow) std::vector<double>();
-                assert(entry.data.vFloat && "Allocation shouldn't fail");
-                entry.GetDataVector<double>()->resize(entry.size);
-            }
-            else
-            {
-                entry.data.raw = entry.AllocateSlab<double>(entry.size);
-            }
+            detail::GlobalAllocator::Allocate<double>(entry, componentCount);
 
-            for(size_t d = 0; d < components.size(); d++)
+            auto componentReader = makeComponentReader();
+            for(uint32_t d = 0; d < componentCount; d++)
             {
-                const std::string_view seg = components[d].view;
+                const std::string_view seg = componentReader.Next();
                 bool bOk = false;
                 const double result = detail::ParseDouble(seg.data(), seg.data() + seg.size(), &bOk);
                 if(!bOk)
@@ -5478,31 +5148,24 @@ namespace fdf::detail
                     return false;
                 }
 
-                if consteval
-                    { (*entry.GetDataVector<double>())[d] = result; }
-                else
-                    { static_cast<double*>(entry.data.raw)[d] = result; }
+                entry.data.f[d] = result;
             }
 
             return postProcess();
         }
 
-        // Scalar string and '|' string pack share one shape: a String[count] slab (scalar is count 1)
+        // scalar strings and packs share a String[count] slab
         if(bAllString)
         {
-            const uint32_t count = static_cast<uint32_t>(components.size());
-            entry.AllocateStringArray(count);
+            entry.AllocateStringArray(componentCount);
 
-            String* dest;
-            if consteval
-                { dest = entry.data.vString->data(); }
-            else
-                { dest = static_cast<String*>(entry.data.raw); }
+            String* dest = entry.data.s;
 
             // decode each literal straight into its stored component, no transient buffer
-            for(uint32_t i = 0; i < count; i++)
+            auto componentReader = makeComponentReader();
+            for(uint32_t i = 0; i < componentCount; i++)
             {
-                const std::string_view literal = components[i].view;
+                const std::string_view literal = componentReader.Next();
                 dest[i].reserve(literal.size() - 2);   // decoded length <= literal length minus the quotes
                 DecodeStringLiteral(literal, [&](char c) { dest[i].push_back(c); });
             }
@@ -5510,15 +5173,16 @@ namespace fdf::detail
             return postProcess();
         }
 
-        // Hex and timestamp keep raw text in a String[count], scalar or pack. Timestamps validate
-        // before allocation, a buffer left on a failed entry gets double-freed by recovery cleanup
+        // hex and timestamps keep raw text in a String[count] slab
+        // timestamp validation runs before allocation so recovery has no partial buffer
         if(bAllHex || bAllTimestamp)
         {
             if(bAllTimestamp)
             {
-                for(const Component& c : components)
+                auto componentReader = makeComponentReader();
+                for(uint32_t i = 0; i < componentCount; i++)
                 {
-                    if(!IsValidTimestamp(c.view))
+                    if(!IsValidTimestamp(componentReader.Next()))
                     {
                         Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidTimestamp, tokenizer, valueToken);
                         return false;
@@ -5526,23 +5190,18 @@ namespace fdf::detail
                 }
             }
 
-            const uint32_t count = static_cast<uint32_t>(components.size());
-            entry.AllocateStringArray(count);
+            entry.AllocateStringArray(componentCount);
             entry.type = bAllHex? Type::Hex : Type::Timestamp;
 
-            for(uint32_t i = 0; i < count; i++)
-            {
-                if consteval
-                    { (*entry.data.vString)[i] = components[i].view; }
-                else
-                    { static_cast<String*>(entry.data.raw)[i] = components[i].view; }
-            }
+            auto componentReader = makeComponentReader();
+            for(uint32_t i = 0; i < componentCount; i++)
+                entry.data.s[i] = componentReader.Next();
 
             return postProcess();
         }
 
 
-        const Type valueType = single[0].type;
+        const Type valueType = firstType;
 
         if(valueType == Type::Null)
         {
@@ -5552,11 +5211,14 @@ namespace fdf::detail
         return false;  // unhandled token
     }
     template<auto DIAGNOSTIC_CALLBACK>
-    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseArray      (Tokenizer& tokenizer, Entry& array   FDF_COMMENT_SWITCH(, Token comment)) noexcept
+    template<Type CONTAINER_TYPE>
+    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseContainer(Tokenizer& tokenizer, Entry& container FDF_COMMENT_SWITCH(, Token comment)) noexcept
     {
-        assert(tokenizer.Current().type == TokenType::SquareBraceOpen && "Sanity check!");
+        static_assert(CONTAINER_TYPE == Type::Array || CONTAINER_TYPE == Type::Map);
+        constexpr TokenType CLOSE_TOKEN = CONTAINER_TYPE == Type::Array? TokenType::SquareBraceClose : TokenType::CurlyBraceClose;
+        assert(tokenizer.Current().type == (CONTAINER_TYPE == Type::Array? TokenType::SquareBraceOpen : TokenType::CurlyBraceOpen) && "Sanity check!");
 
-        array.type = Type::Array;
+        container.type = CONTAINER_TYPE;
 
         Token currentToken = tokenizer.Advance();
         FDF_CHECK_TOKEN(currentToken);
@@ -5584,13 +5246,17 @@ namespace fdf::detail
             }
 
 
-            if(IsValueLiteral(currentToken.type) || currentToken.type == TokenType::CurlyBraceOpen || currentToken.type == TokenType::SquareBraceOpen)
+            const bool bStartsChild = CONTAINER_TYPE == Type::Array
+                ? IsValueLiteral(currentToken.type) || currentToken.type == TokenType::CurlyBraceOpen || currentToken.type == TokenType::SquareBraceOpen
+                : currentToken.type == TokenType::Atom;
+
+            if(bStartsChild)
             {
-                const uint32_t childCountBefore = array.GetChildCount();
-                if(!ParseVariable(tokenizer, array   FDF_COMMENT_SWITCH(,childComment)))
+                const uint32_t childCountBefore = container.GetChildCount();
+                if(!ParseVariable(tokenizer, container FDF_COMMENT_SWITCH(,childComment)))
                 {
-                    while(array.GetChildCount() > childCountBefore)
-                        (void)array.RemoveChild(array.GetChildCount() - 1);
+                    while(container.GetChildCount() > childCountBefore)
+                        (void)container.RemoveChild(container.GetChildCount() - 1);
 
                     if(tokenizer.Current().type == TokenType::Invalid)
                     {
@@ -5603,7 +5269,7 @@ namespace fdf::detail
                 }
                 currentToken = tokenizer.Current();
             }
-            else if(currentToken.type == TokenType::SquareBraceClose)
+            else if(currentToken.type == CLOSE_TOKEN)
             {
                 currentToken = tokenizer.Advance();
                 FDF_CHECK_TOKEN(currentToken);
@@ -5634,14 +5300,13 @@ namespace fdf::detail
 
             #if !FDF_NO_COMMENTS
                 if(comment.type != TokenType::NonExisting)
-                    array.GetComment() = tokenizer.ToView(comment);
+                    container.GetComment() = tokenizer.ToView(comment);
             #endif
 
                 return true;
             }
             else
             {
-                // Unexpected token inside an array: report and skip to the next element or the array's end
                 if(currentToken.type == TokenType::EndOfFile)
                 {
                     Diagnose(DiagnosticSeverity::Fatal, DiagnosticType::UnexpectedEndOfFile, tokenizer, currentToken);
@@ -5658,112 +5323,17 @@ namespace fdf::detail
             }
         }
     }
+
+    template<auto DIAGNOSTIC_CALLBACK>
+    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseArray(Tokenizer& tokenizer, Entry& array FDF_COMMENT_SWITCH(, Token comment)) noexcept
+    {
+        return ParseContainer<Type::Array>(tokenizer, array FDF_COMMENT_SWITCH(, comment));
+    }
+
     template<auto DIAGNOSTIC_CALLBACK>
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseMap        (Tokenizer& tokenizer, Entry& map   FDF_COMMENT_SWITCH(, Token comment)) noexcept
     {
-        assert(tokenizer.Current().type == TokenType::CurlyBraceOpen && "Sanity check!");
-
-        map.type = Type::Map;
-
-        Token currentToken = tokenizer.Advance();
-        FDF_CHECK_TOKEN(currentToken);
-        FDF_CHECK_TOKEN_FOR_EOF(currentToken);
-
-        while(true)
-        {
-        #if !FDF_NO_COMMENTS
-            Token childComment;
-        #endif
-            while(currentToken.type == TokenType::Comment || currentToken.type == TokenType::NewLine)
-            {
-            #if !FDF_NO_COMMENTS
-                if(currentToken.type == TokenType::Comment)
-                {
-                    if(childComment.type != TokenType::NonExisting)
-                        Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
-                    childComment = currentToken;
-                }
-            #endif
-
-                currentToken = tokenizer.Advance();
-                FDF_CHECK_TOKEN(currentToken);
-                FDF_CHECK_TOKEN_FOR_EOF(currentToken);
-            }
-
-
-            if(currentToken.type == TokenType::Atom)
-            {
-                const uint32_t childCountBefore = map.GetChildCount();
-                if(!ParseVariable(tokenizer, map   FDF_COMMENT_SWITCH(,childComment)))
-                {
-                    while(map.GetChildCount() > childCountBefore)
-                        (void)map.RemoveChild(map.GetChildCount() - 1);
-
-                    if(tokenizer.Current().type == TokenType::Invalid)
-                    {
-                        Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(tokenizer.Current().extra8), tokenizer, tokenizer.Current());
-                        return false;  // Lexer error: can't reliably resume
-                    }
-                    SkipToNextEntry(tokenizer, true);  // ParseVariable already reported the error
-                    currentToken = tokenizer.Current();
-                    continue;
-                }
-                currentToken = tokenizer.Current();
-            }
-            else if(currentToken.type == TokenType::CurlyBraceClose)
-            {
-                currentToken = tokenizer.Advance();
-                FDF_CHECK_TOKEN(currentToken);
-
-                if(currentToken.type == TokenType::Comma)
-                {
-                    currentToken = tokenizer.Advance();
-                    FDF_CHECK_TOKEN(currentToken);
-                    FDF_CHECK_TOKEN_FOR_EOF(currentToken);
-                }
-
-                if(currentToken.type == TokenType::Comment)
-                {
-                #if !FDF_NO_COMMENTS
-                    if(comment.type != TokenType::NonExisting)
-                        Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
-                    comment = currentToken;
-                #endif
-                    currentToken = tokenizer.Advance();
-                    FDF_CHECK_TOKEN(currentToken);
-                }
-
-                if(currentToken.type == TokenType::NewLine)
-                {
-                    currentToken = tokenizer.Advance();
-                    FDF_CHECK_TOKEN(currentToken);
-                }
-
-            #if !FDF_NO_COMMENTS
-                if(comment.type != TokenType::NonExisting)
-                    map.GetComment() = tokenizer.ToView(comment);
-            #endif
-
-                return true;
-            }
-            else
-            {
-                // Unexpected token inside a map: report and skip to the next entry or the map's end
-                if(currentToken.type == TokenType::EndOfFile)
-                {
-                    Diagnose(DiagnosticSeverity::Fatal, DiagnosticType::UnexpectedEndOfFile, tokenizer, currentToken);
-                    return false;
-                }
-                if(currentToken.type == TokenType::Invalid)
-                {
-                    Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(currentToken.extra8), tokenizer, currentToken);
-                    return false;
-                }
-                Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken);
-                SkipToNextEntry(tokenizer, true);
-                currentToken = tokenizer.Current();
-            }
-        }
+        return ParseContainer<Type::Map>(tokenizer, map FDF_COMMENT_SWITCH(, comment));
     }
 
 
@@ -5785,19 +5355,18 @@ namespace fdf::detail
 
     template<auto DIAGNOSTIC_CALLBACK>
     template<Style STYLE>
-    constexpr void Utils<DIAGNOSTIC_CALLBACK>::WriteBuffer(const Entry& root, std::string& buffer, const bool bOverwrite) noexcept
+    constexpr String Utils<DIAGNOSTIC_CALLBACK>::WriteBuffer(const Entry& root) noexcept
     {
+        String buffer;
         assert((root.GetIdentifierSize() != 0 || (root.type == Type::Map && !root.parent)) && "Unless it's a map, it must have an identifier");
 
         static constexpr bool CHECK_SINGLE_LINE = STYLE.singleLineContainerLimit > 5;
-        std::vector<ScopePositions<CHECK_SINGLE_LINE>> scopes;
+        detail::Vector<ScopePositions<CHECK_SINGLE_LINE>> scopes;
         uint32_t lastDepth = 0u;
         const bool bHasDedicatedRoot = !root.parent && root.type == Type::Map && root.GetIdentifierSize() == 0;
 
-        const size_t totalChildCount = root.GetChildCountRecursive();
-        if(bOverwrite)
-            buffer.clear();
-        buffer.reserve(buffer.size() + (totalChildCount * 50));
+        buffer.clear();
+        buffer.reserve(buffer.size() + (static_cast<size_t>(root.GetChildCount()) * 50));
 
 
 
@@ -5811,17 +5380,6 @@ namespace fdf::detail
             else
                 buffer.append(count, '\t');
         };
-        auto addEqualSignFn = [&buffer]() -> void
-        {
-            if constexpr(STYLE.bSpaceBeforeAndAfterEqualSign)
-                buffer.append(" = ");
-            else
-                buffer.push_back('=');
-        };
-        [[maybe_unused]] auto addCommaFn = [&buffer]() -> void
-        {
-            buffer.append(", ");
-        };
 
 
 
@@ -5829,9 +5387,8 @@ namespace fdf::detail
 
         auto writeQuotedStringFn = [&buffer](std::string_view view) -> void
         {
-            // Pick the quote that needs the least escaping: single quotes when the value has a double
-            // quote but no single quote (and the style allows it), double quotes otherwise. Backslash
-            // and control chars are always escaped so the output re-parses to the exact same value
+            // choose the quote that needs less escaping
+            // always escape backslashes and control characters
             const bool bHasDouble = view.contains('\"');
             const bool bHasSingle = view.contains('\'');
             const char quote = (bHasDouble && !bHasSingle && !STYLE.bAlwaysUseDoubleQuoteForStrings)? '\'' : '\"';
@@ -5857,6 +5414,7 @@ namespace fdf::detail
             }
             buffer.push_back(quote);
         };
+        String valueBuffer;
         auto writeSimpleEntryValueFn = [&](const Entry& e) -> void
         {
             if(e.type == Type::String)
@@ -5872,14 +5430,8 @@ namespace fdf::detail
                 return;
             }
 
-            std::string temp;
-            buffer.append(e.DataToView<STYLE>(temp));
-        };
-        [[maybe_unused]] auto writeSimpleEntryFn = [&](const Entry& e) -> void
-        {
-            writeEntryNameFn(e);
-            addEqualSignFn();
-            writeSimpleEntryValueFn(e);
+            valueBuffer.clear();
+            buffer.append(e.DataToView<STYLE>(valueBuffer));
         };
 
 
@@ -5906,11 +5458,11 @@ namespace fdf::detail
                         }
                         buffer.push_back('\n');
 
-                        for(size_t pos = scopes[j].end; pos - 2 > scopes[j].begin; pos--)
+                        for(size_t pos = scopes[j].end; pos > scopes[j].begin + 2; pos--)
                         {
                             if(buffer[pos] == '/' && buffer[pos - 1] == '/')
                             {
-                                { for(size_t k = j; k + 1 < scopes.size(); k++) scopes[k] = scopes[k + 1]; scopes.pop_back(); }   // manual erase (MSVC debug vector::erase isn't constexpr)
+                                scopes.erase(j);
                                 return;
                             }
                             if(buffer[pos] == ' ' && (detail::constexpr_isspace(buffer[pos - 2]) || IsBrace(buffer[pos - 2])))
@@ -5919,7 +5471,7 @@ namespace fdf::detail
                                 scopes[j].spaces += STYLE.tabSize;
                         }
                         if(scopes[j].end - scopes[j].textBegin + 1 - scopes[j].spaces > STYLE.singleLineContainerLimit)
-                            { for(size_t k = j; k + 1 < scopes.size(); k++) scopes[k] = scopes[k + 1]; scopes.pop_back(); }   // manual erase (MSVC debug vector::erase isn't constexpr)
+                            scopes.erase(j);
                         return;
                     }
                 }
@@ -5953,7 +5505,7 @@ namespace fdf::detail
             {
                 // no blank line before the first element of a nested container
                 const size_t found = buffer.find_last_not_of("\n\t ");
-                if(found == std::string::npos || !IsOpenBrace(buffer[found]))
+                if(found == String::npos || !IsOpenBrace(buffer[found]))
                     buffer.push_back('\n');   
             }
 
@@ -5962,7 +5514,7 @@ namespace fdf::detail
 
 
         #if !FDF_NO_COMMENTS
-            // Short comments on simple entries go inline (trailing); long ones and container
+            // short scalar comments are inline, others get a leading line
             const std::string_view entryComment = STYLE.bEntryComment? std::string_view(e.GetComment()) : std::string_view{};
             size_t commentSize = 0;
             detail::NormalizeComment(entryComment, [&](char) { commentSize++; });
@@ -5978,7 +5530,7 @@ namespace fdf::detail
 
                 if constexpr(STYLE.singleLineCommentLimit >= 5)
                 {
-                    const uint32_t overhead = (depth * STYLE.tabSize) + 3;
+                    const size_t overhead = static_cast<size_t>(depth) * STYLE.tabSize + 3;
                     if(overhead + 5 <= STYLE.singleLineCommentLimit)
                     {
                         // wrap in place: break each overlong line at the last space that fits
@@ -5989,7 +5541,7 @@ namespace fdf::detail
                         {
                             bMultiLine = true;
                             size_t breakPos = buffer.find_last_of(' ', lineStart + available);
-                            if(breakPos == std::string::npos || breakPos <= lineStart)
+                            if(breakPos == String::npos || breakPos <= lineStart)
                             {
                                 breakPos = lineStart + available;   // no space fits, hard split
                                 buffer.insert(breakPos, 1, '\n');
@@ -6000,8 +5552,9 @@ namespace fdf::detail
                             size_t prefixEnd = breakPos + 1;
                             if constexpr(STYLE.bUseSpacesOverTabs)
                             {
-                                buffer.insert(prefixEnd, depth * STYLE.tabSize, ' ');
-                                prefixEnd += depth * STYLE.tabSize;
+                                const size_t indentation = static_cast<size_t>(depth) * STYLE.tabSize;
+                                buffer.insert(prefixEnd, indentation, ' ');
+                                prefixEnd += indentation;
                             }
                             else
                             {
@@ -6029,7 +5582,10 @@ namespace fdf::detail
                 if(!e.parent || e.parent->type != Type::Array)
                 {
                     writeEntryNameFn(e);
-                    addEqualSignFn();
+                    if constexpr(STYLE.bSpaceBeforeAndAfterEqualSign)
+                        buffer.append(" = ");
+                    else
+                        buffer.push_back('=');
                 }
                 writeSimpleEntryValueFn(e);
 
@@ -6041,7 +5597,7 @@ namespace fdf::detail
             #if !FDF_NO_COMMENTS
                 if(bInlineComment)
                 {
-                    // '\x01' is a placeholder for the gap before the comment, resolved (and aligned) in a final pass
+                    // '\x01' marks comment padding for the final alignment pass
                     buffer.push_back('\x01');
                     buffer.append("// ");
                     detail::NormalizeComment(entryComment, [&](char c) { buffer.push_back(c); });
@@ -6054,9 +5610,7 @@ namespace fdf::detail
                 const bool bIsMap = e.type == Type::Map;
                 addTabFn(depth);
 
-                // Empty containers emit inline (name{ } / name[ ]) without opening a scope. A deferred
-                // close brace would otherwise be lost: the final flush only closes lastDepth scopes,
-                // and an empty container never advances depth past its own opening
+                // empty containers emit inline without opening a deferred scope
                 if(e.GetChildCount() == 0)
                 {
                     if(!e.parent || e.parent->type != Type::Array)
@@ -6105,17 +5659,16 @@ namespace fdf::detail
             {
                 if(bHasDedicatedRoot)
                 {
-                    // Stored raw: keep newlines but strip each line's leading whitespace, drop blank
-                    // lines, and break a contained "*/" so the block comment can't close early
+                    // keep raw newlines, strip leading whitespace and blank lines, and escape "*/"
                     const std::string_view fileComment = root.GetComment();
-                    if(fileComment.find_first_not_of(" \t\n\v\f\r") != std::string::npos)
+                    if(fileComment.find_first_not_of(" \t\n\v\f\r") != std::string_view::npos)
                     {
                         buffer.append("/*#\n");
                         bool bPendingNewLine = false;
                         bool bLineStart = true;
                         for(char c : fileComment)
                         {
-                            if(c == '\n')
+                            if(c == '\n' || c == '\r')
                             {
                                 bPendingNewLine = true;
                                 bLineStart = true;
@@ -6179,7 +5732,7 @@ namespace fdf::detail
                 {
                     if(scopes[j].begin < scopes[i].begin && scopes[j].end > scopes[i].end)
                     {
-                        if(std::max(scopes[i].end, scopes[j].end) - std::min(scopes[j].begin, scopes[j].begin) + 1 - scopes[j].spaces > STYLE.singleLineContainerLimit)
+                        if(scopes[j].end - scopes[j].begin + 1 - scopes[j].spaces > STYLE.singleLineContainerLimit)
                             break;
                         found = j;
                     }
@@ -6189,7 +5742,7 @@ namespace fdf::detail
                     i = found;
 
 
-                // Delete blank lines between multiple new lines
+                // collapse blank lines
                 size_t newLinePos = detail::SIZE_T_MAX_VALUE;
                 for(found = scopes[i].end + 1; found < buffer.size(); found++)
                 {
@@ -6201,14 +5754,14 @@ namespace fdf::detail
                     if(buffer[found] == '{')
                     {
                         const size_t found2 = buffer.find_first_of("}\n", found);
-                        if(found2 != std::string::npos && buffer[found2] != '\n')
+                        if(found2 != String::npos && buffer[found2] != '\n')
                             buffer.erase(newLinePos, 1);
                         break;
                     }
                     if(buffer[found] == '[')
                     {
                         const size_t found2 = buffer.find_first_of("]\n", found);
-                        if(found2 != std::string::npos && buffer[found2] != '\n')
+                        if(found2 != String::npos && buffer[found2] != '\n')
                             buffer.erase(newLinePos, 1);
                         break;
                     }
@@ -6239,7 +5792,7 @@ namespace fdf::detail
                                 found = buffer.find_first_not_of(' ', pos);
                                 // Skip an open brace too: the token before it is the container's name
                                 // (or a prior array element), separated fine by a space, never a comma
-                                if(found != std::string::npos && !IsCloseBrace(buffer[found]) && !IsOpenBrace(buffer[found]))
+                                if(found != String::npos && !IsCloseBrace(buffer[found]) && !IsOpenBrace(buffer[found]))
                                 {
                                     buffer[pos] = ',';
                                     buffer.insert(++pos, 1, ' ');
@@ -6253,11 +5806,11 @@ namespace fdf::detail
                         if(bIncremented)
                             --pos;
 
-                        // Eliminate multiple new lines
+                        // collapse consecutive newlines
                         while(pos - 1 > scopes[i].begin && buffer[pos - 1] == '\n')
                             buffer.erase(--pos, 1);
 
-                        // If it contains nested single line, add some spaces to make it more clear
+                        // separate nested single-line containers with spaces
                         if(pos - 1 >= scopes[i].begin)
                         {
                             if((IsOpenBrace(buffer[pos - 1]) && IsOpenBrace(buffer[pos + 1])) || (IsCloseBrace(buffer[pos - 1]) && IsCloseBrace(buffer[pos + 1])))
@@ -6278,49 +5831,110 @@ namespace fdf::detail
 
 
     #if !FDF_NO_COMMENTS
-        // Resolve inline-comment pad placeholders ('\x01'). Each marks the gap before a trailing
-        // "// comment". With bAlignCloseComments, the '//' of consecutive inline-commented lines
-        // are padded to a shared column; otherwise each becomes a single space
+        // resolve inline-comment padding markers
+        // aligned comments share a column, otherwise each marker becomes one space
         {
             constexpr char MARKER = '\x01';
-            std::vector<size_t> markers;
-            for(size_t p = buffer.find(MARKER); p != std::string::npos; p = buffer.find(MARKER, p + 1))
-                markers.push_back(p);
-
-            if(!markers.empty())
+            const size_t fileCommentEnd = buffer.starts_with("/*#")? buffer.find("*/") : String::npos;
+            auto isPaddingMarker = [&](size_t marker) -> bool
             {
-                std::vector<size_t> pads(markers.size(), 1);
-                if constexpr(STYLE.bAlignCloseComments)
+                if(marker >= buffer.size() || buffer[marker] != MARKER
+                   || marker + 3 >= buffer.size() || buffer.compare(marker + 1, 3, "// ") != 0
+                   || (fileCommentEnd != String::npos && marker < fileCommentEnd))
+                    return false;
+
+                const size_t previousNewLine = buffer.rfind('\n', marker);
+                const size_t lineStart = previousNewLine == String::npos? 0 : previousNewLine + 1;
+                char quote = '\0';
+                bool bEscaped = false;
+                for(size_t i = lineStart; i < marker; i++)
                 {
-                    auto columnOf = [&](size_t m) -> size_t
+                    const char c = buffer[i];
+                    if(quote != '\0')
                     {
-                        const size_t lineStart = buffer.rfind('\n', m);
-                        return lineStart == std::string::npos? m : m - lineStart - 1;
-                    };
-
-                    for(size_t groupStart = 0; groupStart < markers.size(); )
-                    {
-                        size_t groupEnd = groupStart;
-                        while(groupEnd + 1 < markers.size() &&
-                              std::count(buffer.begin() + static_cast<int64_t>(markers[groupEnd]), buffer.begin() + static_cast<int64_t>(markers[groupEnd + 1]), '\n') == 1)
-                            groupEnd++;
-
-                        size_t maxColumn = 0;
-                        for(size_t k = groupStart; k <= groupEnd; k++)
-                            maxColumn = std::max(maxColumn, columnOf(markers[k]));
-                        for(size_t k = groupStart; k <= groupEnd; k++)
-                            pads[k] = (maxColumn - columnOf(markers[k])) + 1;
-
-                        groupStart = groupEnd + 1;
+                        if(bEscaped)
+                            bEscaped = false;
+                        else if(c == '\\')
+                            bEscaped = true;
+                        else if(c == quote)
+                            quote = '\0';
                     }
+                    else if(c == '\"' || c == '\'')
+                        quote = c;
+                    else if(c == '/' && i + 1 < marker && buffer[i + 1] == '/')
+                        return false;
                 }
+                return quote == '\0';
+            };
+            auto findMarker = [&](size_t start) -> size_t
+            {
+                for(size_t marker = buffer.find(MARKER, start); marker != String::npos; marker = buffer.find(MARKER, marker + 1))
+                    if(isPaddingMarker(marker))
+                        return marker;
+                return String::npos;
+            };
+            auto findPreviousMarker = [&](size_t start, size_t lowerBound) -> size_t
+            {
+                size_t marker = buffer.rfind(MARKER, start);
+                while(marker != String::npos && marker >= lowerBound)
+                {
+                    if(isPaddingMarker(marker))
+                        return marker;
+                    if(marker == 0)
+                        break;
+                    marker = buffer.rfind(MARKER, marker - 1);
+                }
+                return String::npos;
+            };
 
-                // Replace from the last marker to the first so earlier indices stay valid
-                for(size_t k = markers.size(); k-- > 0; )
-                    buffer.replace(markers[k], 1, pads[k], ' ');
+            if constexpr(!STYLE.bAlignCloseComments)
+            {
+                for(size_t marker = findMarker(0); marker != String::npos; marker = findMarker(marker + 1))
+                    buffer[marker] = ' ';
+            }
+            else
+            {
+                auto columnOf = [&](size_t marker) -> size_t
+                {
+                    const size_t lineStart = buffer.rfind('\n', marker);
+                    return lineStart == String::npos? marker : marker - lineStart - 1;
+                };
+
+                size_t groupStart = findMarker(0);
+                while(groupStart != String::npos)
+                {
+                    size_t groupEnd = groupStart;
+                    size_t maxColumn = columnOf(groupStart);
+                    while(true)
+                    {
+                        const size_t next = findMarker(groupEnd + 1);
+                        if(next == String::npos)
+                            break;
+                        const size_t firstNewLine = buffer.find('\n', groupEnd + 1);
+                        if(firstNewLine == String::npos || firstNewLine >= next)
+                            break;
+                        const size_t secondNewLine = buffer.find('\n', firstNewLine + 1);
+                        if(secondNewLine != String::npos && secondNewLine < next)
+                            break;
+                        groupEnd = next;
+                        maxColumn = std::max(maxColumn, columnOf(groupEnd));
+                    }
+
+                    size_t marker = groupEnd;
+                    while(true)
+                    {
+                        buffer.replace(marker, 1, maxColumn - columnOf(marker) + 1, ' ');
+                        if(marker == groupStart)
+                            break;
+                        marker = findPreviousMarker(marker - 1, groupStart);
+                        assert(marker != String::npos && marker >= groupStart);
+                    }
+                    groupStart = findMarker(groupStart + 1);
+                }
             }
         }
     #endif
+        return buffer;
     }
 }
 

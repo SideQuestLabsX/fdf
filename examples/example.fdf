@@ -15,9 +15,9 @@ uuid="a123-xyz"
 pi=3.14              // float
 
 resolution=1920|1080  // 2-component pack
-scale=1.0|1.0|1.0     // 3 components, floats work too
-gradient=1|50|10|1    // 4 components
-five=1|2|3|4|5        // 5 components
+scale=1.0|1.0|1.0     // floats work too
+gradient=1|50|10|1
+five=1|2|3|4|5        // no fixed component cap
 bool40=true|false|true|true|false|true|true|false|true|true|false|true|true|false|true|true|false|true|true|false|true|true|false|true|true|false|true|true|false|true|true|false|true|true|false|true|true|false|true|true
 tags="config"|"example"|"demo"  // string pack, strings work like any other scalar
 
@@ -115,8 +115,8 @@ gameItems3
 [
     { id=1, name="Potion" }
     { id=2, name="Elixir" }
-    { id=3 }            // Unspecified fields defaults to null
-    { id=4, name=null } // Same as previous one
+    { id=3 }            // a field you leave out doesn't exist at all
+    { id=4, name=null } // different from above: name exists here, holding null
 ]
 
 // Array of maps within other maps
