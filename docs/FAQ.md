@@ -40,8 +40,7 @@ fdf figures out the type from the value, there is no type annotation.
 | Type | Example |
 |------|---------|
 | Bool | `true`, `false` |
-| Int | `12345`, `-7` (signed 64-bit) |
-| UInt | `9223372036854775808` (unsigned 64-bit) |
+| Int | `12345`, `-7` (64-bit, unsigned range readable via `GetValue<uint64_t>()`) |
 | Float | `3.14`, `1.0e21` (64-bit) |
 | String | `"text"` or `'text'` |
 | Hex | `0xFF5733` |

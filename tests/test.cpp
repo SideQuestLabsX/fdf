@@ -74,7 +74,6 @@ namespace fdf::detail
         "Null     ",
         "Bool     ",
         "Int      ",
-        "UInt     ",
         "Float    ",
         "String   ",
         "Hex      ",
@@ -585,7 +584,7 @@ namespace fdf::detail
             {
                 e->SetValue(42u);
                 auto v = e->GetValue<uint64_t>();
-                CHECK(e->GetType() == Type::UInt && v.size() == 1 && v[0] == 42u);
+                CHECK(e->GetType() == Type::Int && v.size() == 1 && v[0] == 42u);
             }
 
             if(Entry* e = root->Emplace("f"); CHECK(e))
@@ -622,7 +621,7 @@ namespace fdf::detail
                 uint64_t uints[2] = { 1u, 2u };
                 e->SetValue(std::span(uints, 2));
                 auto v = e->GetValue<uint64_t>();
-                CHECK(e->GetType() == Type::UInt && v.size() == 2 && v[0] == 1u && v[1] == 2u);
+                CHECK(e->GetType() == Type::Int && v.size() == 2 && v[0] == 1u && v[1] == 2u);
             }
 
             if(Entry* e = root->Emplace("dbls"); CHECK(e))
@@ -631,6 +630,81 @@ namespace fdf::detail
                 e->SetValue(std::span(dbls, 3));
                 auto v = e->GetValue<double>();
                 CHECK(e->GetType() == Type::Float && v.size() == 3 && v[0] == 1.0 && v[1] == 2.5 && v[2] == 3.0);
+            }
+
+            // overwrites reuse the buffer: same storage type via resize, other types retype in place
+            if(Entry* e = root->Emplace("reuse"); CHECK(e))
+            {
+                int64_t big[4] = { 1, 2, 3, 4 };
+                e->SetValue(std::span(big, 4));
+                const void* p = e->GetValue<int64_t>().data();
+                int64_t small[2] = { 9, 8 };
+                e->SetValue(std::span(small, 2));
+                auto v = e->GetValue<int64_t>();
+                CHECK(v.data() == p && v.size() == 2 && v[0] == 9 && v[1] == 8);
+                e->SetValue(3.5);
+                CHECK(e->GetType() == Type::Float && e->GetValue<double>()[0] == 3.5
+                    && static_cast<const void*>(e->GetValue<double>().data()) == p);
+            }
+
+            if(Entry* e = root->Emplace("reuseStr"); CHECK(e))
+            {
+                std::string_view parts[2] = { "alpha", "beta" };
+                e->SetValue(std::span<const std::string_view>(parts, 2));
+                const void* p = e->GetValue<String>().data();
+                int64_t ints[2] = { 5, 6 };
+                e->SetValue(std::span(ints, 2));   // String -> Int retypes the block, frees the char payloads
+                auto v = e->GetValue<int64_t>();
+                CHECK(e->GetType() == Type::Int && static_cast<const void*>(v.data()) == p && v[0] == 5 && v[1] == 6);
+
+                e->SetValue(std::span<const std::string_view>());   // empty span -> one empty string, no stale text
+                auto s = e->GetValue<String>();
+                CHECK(e->GetType() == Type::String && s.size() == 1 && s[0].empty());
+            }
+
+            // container and value blocks interchange freely: children die, bytes stay
+            if(Entry* e = root->Emplace("reuseKids"); CHECK(e))
+            {
+                e->SetValue(MapType{});
+                CHECK(e->Emplace("a") && e->Emplace("b"));
+                const void* p = static_cast<const void*>(e->GetChildren().data());
+                e->SetValue(ArrayType{});
+                CHECK(e->GetType() == Type::Array && e->GetChildCount() == 0);
+                Entry* kid = e->Emplace("c");
+                CHECK(kid && e->GetChildCount() == 1
+                    && static_cast<const void*>(e->GetChildren().data()) == p);
+
+                int64_t ints[2] = { 7, 8 };
+                e->SetValue(std::span(ints, 2));   // container -> value, child dies with the retype
+                auto v = e->GetValue<int64_t>();
+                CHECK(e->GetType() == Type::Int && static_cast<const void*>(v.data()) == p
+                    && v.size() == 2 && v[0] == 7 && v[1] == 8);
+
+                e->SetValue(MapType{});            // value -> container, block becomes child capacity
+                Entry* again = e->Emplace("d");
+                CHECK(again && e->GetChildCount() == 1
+                    && static_cast<const void*>(e->GetChildren().data()) == p);
+            }
+
+            // retype across element sizes: capacity converts to the new unit, block stays
+            if(Entry* e = root->Emplace("reuseSizes"); CHECK(e))
+            {
+                e->SetValue(true);
+                const void* p = static_cast<const void*>(e->GetValue<bool>().data());
+                e->SetValue(static_cast<int64_t>(-9));
+                // a bool scalar block fits an int64 only via slab bucket slack (MIN_BUCKET 8)
+                const bool bSameBlock = FDF_DISABLE_SLAB_ALLOCATOR
+                    || static_cast<const void*>(e->GetValue<int64_t>().data()) == p;
+                CHECK(e->GetType() == Type::Int && bSameBlock && e->GetValue<int64_t>()[0] == -9);
+
+                Version vers[2] = { { .major = 1, .minor = 2, .patch = 3 }, { .major = 4, .minor = 5, .patch = 6 } };
+                e->SetValue(std::span<const Version>(vers, 2));   // 8 -> 32 bytes, must reallocate
+                const void* pv = static_cast<const void*>(e->GetValue<Version>().data());
+                double dbls[4] = { 1.0, 2.0, 3.0, 4.0 };
+                e->SetValue(std::span(dbls, 4));   // Version[2] -> Float[4], same 32 bytes
+                auto f = e->GetValue<double>();
+                CHECK(e->GetType() == Type::Float && static_cast<const void*>(f.data()) == pv
+                    && f.size() == 4 && f[0] == 1.0 && f[3] == 4.0);
             }
 
             if(Entry* e = root->Emplace("bools"); CHECK(e))
@@ -1444,14 +1518,25 @@ namespace fdf::detail
                 { .bHasRevision = true, .major = 2147483647, .minor = 4294967295U, .patch = 4294967295U, .revision = 4294967295U }
             });
 
-            // a component above INT64_MAX makes the pack unsigned
+            // components above INT64_MAX keep their bit pattern and read back through the unsigned view
             if(UniqueEntryPtr root = ParseBuffer("v = 1|2|18446744073709551615\n"))
             {
                 Entry* e = root->GetChild("v");
-                if(CHECK(e && e->GetType() == Type::UInt))
+                if(CHECK(e && e->GetType() == Type::Int))
                 {
                     auto s = e->GetValue<uint64_t>();
                     CHECK(s.size() == 3 && s[0] == 1 && s[1] == 2 && s[2] == 18446744073709551615ull);
+                }
+            }
+
+            // negative and above-INT64_MAX components may mix, bits decide the interpretation
+            if(UniqueEntryPtr root = ParseBuffer("v = -1|18446744073709551615\n"))
+            {
+                Entry* e = root->GetChild("v");
+                if(CHECK(e && e->GetType() == Type::Int))
+                {
+                    auto s = e->GetValue<int64_t>();
+                    CHECK(s.size() == 2 && s[0] == -1 && s[1] == -1);
                 }
             }
 
@@ -1627,7 +1712,6 @@ namespace fdf::detail
                 "bad = 1|99999999999999999999999\nok = 7\n",   // component overflows u64
                 "bad = -1|99999999999999999999999\nok = 7\n",  // negative then unsigned-overflow
                 "bad = -9223372036854775809\nok = 7\n",         // one below int64 minimum
-                "bad = -9223372036854775808|9223372036854775808\nok = 7\n", // signed/unsigned mix
                 "bad = 1..0\nok = 7\n",                         // empty version component
                 "bad = -|1\nok = 7\n",                          // empty leading component
                 "bad = 1|\nok = 7\n",                           // empty trailing component
@@ -2256,7 +2340,6 @@ namespace fdf::detail
                 case Type::Null:                      return true;
                 case Type::Bool:                      return SpanEqual(a.GetValue<bool>(),     b.GetValue<bool>());
                 case Type::Int:                       return SpanEqual(a.GetValue<int64_t>(),  b.GetValue<int64_t>());
-                case Type::UInt:                       return SpanEqual(a.GetValue<uint64_t>(), b.GetValue<uint64_t>());
                 case Type::Version:                    return SpanEqual(a.GetValue<Version>(),  b.GetValue<Version>());
                 case Type::Float:                     return SpanEqual(a.GetValue<double>(),   b.GetValue<double>());
                 case Type::String: case Type::Timestamp: return SpanEqual(a.GetValue<String>(), b.GetValue<String>());
@@ -3004,7 +3087,7 @@ consteval bool UIntProbe()
 {
     fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 18446744073709551615\n");
     const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
-    return e && e->GetType() == fdf::Type::UInt && e->GetValue<uint64_t>()[0] == 18446744073709551615ull;
+    return e && e->GetType() == fdf::Type::Int && e->GetValue<uint64_t>()[0] == 18446744073709551615ull;
 }
 consteval bool MinIntProbe()
 {
@@ -3016,13 +3099,13 @@ consteval bool MinIntProbe()
     return values.size() == 3 && values[0] == std::numeric_limits<int64_t>::min()
         && values[1] == 0 && values[2] == std::numeric_limits<int64_t>::max();
 }
-consteval bool UIntPromotionProbe()
+consteval bool UIntPackProbe()
 {
     fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 1|2|18446744073709551615\n");
     const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
-    if(!e || e->GetType() != fdf::Type::UInt)
+    if(!e || e->GetType() != fdf::Type::Int)
         return false;
-    const std::span<const uint64_t> values = e->GetValue<uint64_t>();
+    const fdf::ConstUIntSpan values = e->GetValue<uint64_t>();
     return values.size() == 3 && values[0] == 1 && values[1] == 2
         && values[2] == 18446744073709551615ull;
 }
@@ -3078,7 +3161,7 @@ consteval bool TimestampProbe()
 static_assert(IntProbe(),       "consteval int parse");
 static_assert(MinIntProbe(),    "consteval minimum int64 parse");
 static_assert(UIntProbe(),      "consteval uint (max u64) parse");
-static_assert(UIntPromotionProbe(), "consteval int pack promotion preserves earlier components");
+static_assert(UIntPackProbe(),  "consteval unsigned view over an int pack with a huge component");
 static_assert(FloatProbe(),     "consteval float parse");
 static_assert(StringProbe(),    "consteval string parse");
 static_assert(BoolProbe(),      "consteval bool parse");
@@ -3227,7 +3310,7 @@ consteval bool WriteScalarsProbe()
     fdf::String out = fdf::WriteBuffer<fdf::Style{}>(*root);
 
     return ContainsAt(out, "i=-42")
-        && ContainsAt(out, "u=18446744073709551615")
+        && ContainsAt(out, "u=-1")   // above INT64_MAX serializes in signed form, bits round-trip
         && ContainsAt(out, "f=2.5")
         && ContainsAt(out, "b=true")
         && ContainsAt(out, "s=\"hi\"")
@@ -3312,7 +3395,12 @@ consteval bool ValueRoundTripProbe()
 
     fdf::Entry* u = root->Emplace("u");
     u->SetValue(static_cast<uint64_t>(42));
-    if(u->GetType() != fdf::Type::UInt || u->GetValue<uint64_t>()[0] != 42u)
+    if(u->GetType() != fdf::Type::Int || u->GetValue<uint64_t>()[0] != 42u)
+        return false;
+
+    // overwrite through the buffer-reuse path (same storage, capacity suffices)
+    u->SetValue(static_cast<int64_t>(-3));
+    if(u->GetType() != fdf::Type::Int || u->GetValue<int64_t>()[0] != -3)
         return false;
 
     fdf::Entry* f = root->Emplace("f");

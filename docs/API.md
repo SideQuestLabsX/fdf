@@ -32,7 +32,7 @@ file and missing parent directories. Bare filenames use the current directory.
 `Type` is the tag every entry carries
 
 ```cpp
-enum class Type : uint8_t { Map, Array, Null, Nil = Null, Bool, Int, UInt, Float,
+enum class Type : uint8_t { Map, Array, Null, Nil = Null, Bool, Int, Float,
                             String, Hex, Version, Timestamp };
 ```
 
@@ -62,6 +62,11 @@ auto flag = e->GetChild("fullscreen")->GetValue<bool>()[0];      // true
 auto vers = e->GetChild("versions")->GetValue<Version>();
 auto when = e->GetChild("created")->GetValue<Timestamp>();       // decoded fields
 ```
+
+`GetValue<uint64_t>()` returns `fdf::UIntSpan` (or `ConstUIntSpan`), a span-alike unsigned view
+over the same `Int` storage: indexing, iteration, `front`/`back`/`first`/`last`/`subspan` and
+element writes all work. Each element is bit-cast, so values above `2^63-1` read back exactly.
+`data()` hands out a raw `uint64_t*` and is the one runtime-only member.
 
 `Version` is 16 bytes. `major` is limited to `0..2147483647`; the other components use the
 full `uint32_t` range. `bHasRevision` distinguishes `1.2.3` from `1.2.3.0`. Packs may mix both

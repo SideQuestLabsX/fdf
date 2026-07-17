@@ -80,7 +80,6 @@ FDF_EXPORT namespace fdf
 
         Bool,
         Int,
-        UInt,
         Float,
 
         String,
@@ -1064,6 +1063,89 @@ FDF_EXPORT namespace fdf
     [[nodiscard]] constexpr String operator+(std::string_view a, String&& b) noexcept  { b.insert(0, a); return std::move(b); }
     [[nodiscard]] constexpr String operator+(char a, String&& b) noexcept  { b.insert(0, std::string_view(&a, 1)); return std::move(b); }
 
+    // GetValue<uint64_t> returns this: an unsigned lens over the int64_t storage
+    // per-element bit_cast keeps it constexpr-legal where a reinterpreted std::span would not be
+    template<bool IS_CONST>
+    class BasicUIntSpan
+    {
+        using INT64 = std::conditional_t<IS_CONST, const int64_t, int64_t>;
+
+    public:
+        // proxy element so writes land in the underlying signed buffer
+        struct Ref
+        {
+            INT64* p;
+
+            constexpr operator uint64_t() const noexcept  { return std::bit_cast<uint64_t>(*p); }
+
+            constexpr const Ref& operator=(const uint64_t value) const noexcept requires(!IS_CONST)
+            {
+                *p = std::bit_cast<int64_t>(value);
+                return *this;
+            }
+        };
+
+        struct Iterator
+        {
+            using iterator_category = std::random_access_iterator_tag;
+            using value_type = uint64_t;
+            using difference_type = ptrdiff_t;
+
+            INT64* p = nullptr;
+
+            constexpr uint64_t operator*() const noexcept  { return std::bit_cast<uint64_t>(*p); }
+            constexpr uint64_t operator[](const difference_type n) const noexcept  { return std::bit_cast<uint64_t>(p[n]); }
+
+            constexpr Iterator& operator++()    noexcept  { ++p; return *this; }
+            constexpr Iterator  operator++(int) noexcept  { return Iterator{ p++ }; }
+            constexpr Iterator& operator--()    noexcept  { --p; return *this; }
+            constexpr Iterator  operator--(int) noexcept  { return Iterator{ p-- }; }
+            constexpr Iterator& operator+=(const difference_type n) noexcept  { p += n; return *this; }
+            constexpr Iterator& operator-=(const difference_type n) noexcept  { p -= n; return *this; }
+
+            friend constexpr Iterator operator+(Iterator it, const difference_type n) noexcept  { it.p += n; return it; }
+            friend constexpr Iterator operator+(const difference_type n, Iterator it) noexcept  { it.p += n; return it; }
+            friend constexpr Iterator operator-(Iterator it, const difference_type n) noexcept  { it.p -= n; return it; }
+            friend constexpr difference_type operator-(const Iterator a, const Iterator b) noexcept  { return a.p - b.p; }
+
+            friend constexpr bool operator==(const Iterator& a, const Iterator& b) noexcept = default;
+            friend constexpr auto operator<=>(const Iterator& a, const Iterator& b) noexcept = default;
+        };
+
+        constexpr BasicUIntSpan() noexcept = default;
+        constexpr BasicUIntSpan(INT64* _data, const size_t _size) noexcept : ptr(_data), count(_size)  { }
+
+        constexpr operator BasicUIntSpan<true>() const noexcept requires(!IS_CONST)  { return { ptr, count }; }
+
+        [[nodiscard]] constexpr size_t size()  const noexcept  { return count; }
+        [[nodiscard]] constexpr bool   empty() const noexcept  { return count == 0; }
+
+        [[nodiscard]] constexpr uint64_t operator[](const size_t i) const noexcept requires(IS_CONST)   { return std::bit_cast<uint64_t>(ptr[i]); }
+        [[nodiscard]] constexpr Ref      operator[](const size_t i) const noexcept requires(!IS_CONST)  { return Ref{ ptr + i }; }
+        [[nodiscard]] constexpr auto front() const noexcept  { return (*this)[0]; }
+        [[nodiscard]] constexpr auto back()  const noexcept  { return (*this)[count - 1]; }
+
+        [[nodiscard]] constexpr Iterator begin() const noexcept  { return Iterator{ ptr }; }
+        [[nodiscard]] constexpr Iterator end()   const noexcept  { return Iterator{ ptr + count }; }
+
+        [[nodiscard]] constexpr BasicUIntSpan first(const size_t n) const noexcept  { return { ptr, n }; }
+        [[nodiscard]] constexpr BasicUIntSpan last(const size_t n)  const noexcept  { return { ptr + (count - n), n }; }
+        [[nodiscard]] constexpr BasicUIntSpan subspan(const size_t offset, const size_t n) const noexcept  { return { ptr + offset, n }; }
+
+        // runtime-only escape hatch, signed/unsigned aliasing is permitted so the cast is well-defined
+        [[nodiscard]] const uint64_t* data() const noexcept requires(IS_CONST)   { return reinterpret_cast<const uint64_t*>(ptr); }
+        [[nodiscard]] uint64_t*       data() const noexcept requires(!IS_CONST)  { return reinterpret_cast<uint64_t*>(ptr); }
+
+    private:
+        INT64* ptr = nullptr;
+        size_t count = 0;
+    };
+
+    using UIntSpan = BasicUIntSpan<false>;
+    using ConstUIntSpan = BasicUIntSpan<true>;
+
+    static_assert(std::random_access_iterator<UIntSpan::Iterator>);
+
     class Entry
     {
     public:
@@ -1101,7 +1183,6 @@ FDF_EXPORT namespace fdf
             Entry** e = nullptr;
             bool* b;
             int64_t* i;
-            uint64_t* u;
             Version* v;
             double* f;
             String* s;
@@ -1119,7 +1200,6 @@ FDF_EXPORT namespace fdf
             {
                 case Type::Bool:                                          return !data.b;
                 case Type::Int:                                           return !data.i;
-                case Type::UInt:                                          return !data.u;
                 case Type::Version:                                       return !data.v;
                 case Type::Float:                                         return !data.f;
                 case Type::String: case Type::Hex: case Type::Timestamp:  return !data.s;
@@ -1135,7 +1215,6 @@ FDF_EXPORT namespace fdf
             {
                 case Type::Bool:                                         data.b = nullptr; break;
                 case Type::Int:                                          data.i = nullptr; break;
-                case Type::UInt:                                         data.u = nullptr; break;
                 case Type::Version:                                      data.v = nullptr; break;
                 case Type::Float:                                        data.f = nullptr; break;
                 case Type::String: case Type::Hex: case Type::Timestamp: data.s = nullptr; break;
@@ -2511,7 +2590,6 @@ namespace fdf::detail
                  if constexpr(std::is_same_v<T, Entry*  >) return entry.data.e;
             else if constexpr(std::is_same_v<T, bool    >) return entry.data.b;
             else if constexpr(std::is_same_v<T, int64_t >) return entry.data.i;
-            else if constexpr(std::is_same_v<T, uint64_t>) return entry.data.u;
             else if constexpr(std::is_same_v<T, Version >) return entry.data.v;
             else if constexpr(std::is_same_v<T, double  >) return entry.data.f;
             else if constexpr(std::is_same_v<T, String  >) return entry.data.s;
@@ -2524,7 +2602,6 @@ namespace fdf::detail
                  if constexpr(std::is_same_v<T, Entry*  >) entry.data.e = value;
             else if constexpr(std::is_same_v<T, bool    >) entry.data.b = value;
             else if constexpr(std::is_same_v<T, int64_t >) entry.data.i = value;
-            else if constexpr(std::is_same_v<T, uint64_t>) entry.data.u = value;
             else if constexpr(std::is_same_v<T, Version >) entry.data.v = value;
             else if constexpr(std::is_same_v<T, double  >) entry.data.f = value;
             else if constexpr(std::is_same_v<T, String  >) entry.data.s = value;
@@ -2832,25 +2909,107 @@ namespace fdf::detail
             entry.capacity = allocation.capacity;
         }
 
-        template<typename T, typename U>
-        static constexpr void ConvertFrom(Entry& entry, const uint32_t initializedCount) noexcept
+        template<typename T>
+        [[nodiscard]] static constexpr bool Stores(const Type t) noexcept
         {
-            static_assert(!std::is_same_v<T, U>);
-            assert(initializedCount <= entry.size);
-
-            U* oldData = GetData<U>(entry);
-            const uint32_t oldSize = entry.size;
-            const uint32_t oldCapacity = entry.capacity;
-
-            const TypedAllocationResult<T> allocation = Allocate<T>(oldSize);
-
-            for(uint32_t i = 0; i < initializedCount; i++)
-                allocation.ptr[i] = static_cast<T>(oldData[i]);
-
-            Release<U>(oldData, oldSize, oldCapacity);
-            SetData<T>(entry, allocation.ptr);
-            entry.capacity = allocation.capacity;
+                 if constexpr(std::is_same_v<T, bool   >) return t == Type::Bool;
+            else if constexpr(std::is_same_v<T, int64_t>) return t == Type::Int;
+            else if constexpr(std::is_same_v<T, double >) return t == Type::Float;
+            else if constexpr(std::is_same_v<T, Version>) return t == Type::Version;
+            else if constexpr(std::is_same_v<T, String >) return t == Type::String || t == Type::Hex || t == Type::Timestamp;
+            else if constexpr(std::is_same_v<T, Entry* >) return t == Type::Array || t == Type::Map;
+            else return false;
         }
+
+        template<Type TYPE>
+        [[nodiscard]] static constexpr auto StorageOf() noexcept
+        {
+                 if constexpr(TYPE == Type::Bool)    return std::type_identity<bool>{};
+            else if constexpr(TYPE == Type::Int)     return std::type_identity<int64_t>{};
+            else if constexpr(TYPE == Type::Float)   return std::type_identity<double>{};
+            else if constexpr(TYPE == Type::Version) return std::type_identity<Version>{};
+            else if constexpr(TYPE == Type::String || TYPE == Type::Hex || TYPE == Type::Timestamp)
+                return std::type_identity<String>{};
+            else if constexpr(TYPE == Type::Array || TYPE == Type::Map)
+                return std::type_identity<Entry*>{};
+            else
+                static_assert(false, "Type holds no storage");
+        }
+
+        // storage for a value overwrite: reuses the buffer when the entry already holds this
+        // storage type with enough capacity, the caller must overwrite every element in [0, count)
+        template<Type NEW_TYPE>
+        static constexpr void Repurpose(Entry& entry, const uint32_t count) noexcept
+        {
+            using T = typename decltype(StorageOf<NEW_TYPE>())::type;
+
+            // capacity 0 = nothing to reuse, the common first-set case skips every check
+            if(entry.capacity != 0)
+            {
+                // children never survive an overwrite. Destroying them up front lets the
+                // child-pointer block flow through both reuse paths like any other storage,
+                // Resize's element destroy only sees the pointers, never the owned children
+                if(entry.type == Type::Array || entry.type == Type::Map)
+                    (void)entry.ClearChildren();
+
+                if(Stores<T>(entry.type) && GetData<T>(entry) && count <= entry.capacity)
+                {
+                    Resize<T>(entry, count);
+                    entry.type = NEW_TYPE;
+                    return;
+                }
+
+                // runtime may retype a buffer in place between any storage types: every block is
+                // >= 8-aligned (MIN_BUCKET), which covers the largest storage alignment, so only the
+                // byte capacity matters. Constant evaluation owns typed arrays and must reallocate
+                if !consteval
+                {
+                    size_t oldElementSize = 0;
+                    void* raw = nullptr;
+                    switch(entry.type)
+                    {
+                        case Type::Bool:     raw = entry.data.b; oldElementSize = sizeof(bool);    break;
+                        case Type::Int:      raw = entry.data.i; oldElementSize = sizeof(int64_t); break;
+                        case Type::Float:    raw = entry.data.f; oldElementSize = sizeof(double);  break;
+                        case Type::Version:  raw = entry.data.v; oldElementSize = sizeof(Version); break;
+                        case Type::String: case Type::Hex: case Type::Timestamp:
+                                             raw = entry.data.s; oldElementSize = sizeof(String);  break;
+                        case Type::Array: case Type::Map:
+                                             raw = entry.data.e; oldElementSize = sizeof(Entry*);  break;
+                        default: break;
+                    }
+
+                    // the divisibility and range checks keep capacity * sizeof(T) == oldBytes, the
+                    // eventual release must reproduce the exact byte count to hit the right bucket.
+                    // oldBytes >= sizeof(T) keeps a retained block's capacity at least 1 even for
+                    // count 0 (an emptied container target)
+                    const size_t oldBytes = static_cast<size_t>(entry.capacity) * oldElementSize;
+                    if(raw && oldBytes >= sizeof(T) && static_cast<size_t>(count) * sizeof(T) <= oldBytes
+                        && oldBytes % sizeof(T) == 0 && oldBytes / sizeof(T) <= UINT32_MAX_VALUE)
+                    {
+                        if(entry.type == Type::String || entry.type == Type::Hex || entry.type == Type::Timestamp)
+                        {
+                            for(uint32_t i = 0; i < entry.size; i++)
+                                std::destroy_at(entry.data.s + i);
+                        }
+
+                        T* ptr = static_cast<T*>(raw);
+                        for(uint32_t i = 0; i < count; i++)
+                            std::construct_at(ptr + i);
+                        SetData<T>(entry, ptr);
+                        entry.size = count;
+                        entry.capacity = static_cast<uint32_t>(oldBytes / sizeof(T));
+                        entry.type = NEW_TYPE;
+                        return;
+                    }
+                }
+            }
+
+            entry.ReleaseData();
+            entry.type = NEW_TYPE;
+            Allocate<T>(entry, count);
+        }
+
     };
 
 
@@ -3260,9 +3419,6 @@ namespace fdf
             break;
         case Type::Int:
             detail::GlobalAllocator::Release<int64_t>(*this);
-            break;
-        case Type::UInt:
-            detail::GlobalAllocator::Release<uint64_t>(*this);
             break;
         case Type::Float:
             detail::GlobalAllocator::Release<double>(*this);
@@ -3925,7 +4081,7 @@ namespace fdf
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<uint64_t>() noexcept
     {
-        return type == Type::UInt? std::span<uint64_t>(data.u, size) : std::span<uint64_t>();
+        return type == Type::Int? UIntSpan(data.i, size) : UIntSpan();
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<unsigned int>() noexcept  { return GetValue<uint64_t>(); }
@@ -3980,7 +4136,7 @@ namespace fdf
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<uint64_t>() const noexcept
     {
-        return type == Type::UInt? std::span<const uint64_t>(data.u, size) : std::span<const uint64_t>();
+        return type == Type::Int? ConstUIntSpan(data.i, size) : ConstUIntSpan();
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<unsigned int>() const noexcept  { return GetValue<uint64_t>(); }
@@ -4053,7 +4209,6 @@ namespace fdf
         {
         case Type::Bool:    detail::GlobalAllocator::Resize<bool>(*this, _size);     break;
         case Type::Int:     detail::GlobalAllocator::Resize<int64_t>(*this, _size);  break;
-        case Type::UInt:    detail::GlobalAllocator::Resize<uint64_t>(*this, _size); break;
         case Type::Float:   detail::GlobalAllocator::Resize<double>(*this, _size);   break;
         case Type::String:  detail::GlobalAllocator::Resize<String>(*this, _size);   break;
         case Type::Version: detail::GlobalAllocator::Resize<Version>(*this, _size);  break;
@@ -4078,46 +4233,34 @@ namespace fdf
 
     constexpr void Entry::SetValue(ArrayType) noexcept
     {
-        ReleaseData();
-        type = Type::Array;
-        ResetDataNull();
+        detail::GlobalAllocator::Repurpose<Type::Array>(*this, 0);
     }
     constexpr void Entry::SetValue(MapType) noexcept
     {
-        ReleaseData();
-        type = Type::Map;
-        ResetDataNull();
+        detail::GlobalAllocator::Repurpose<Type::Map>(*this, 0);
     }
 
     constexpr void Entry::SetValue(const bool value) noexcept
     {
-        ReleaseData();
-        type = Type::Bool;
-        detail::GlobalAllocator::Allocate<bool>(*this, 1);
+        detail::GlobalAllocator::Repurpose<Type::Bool>(*this, 1);
         data.b[0] = value;
     }
 
     constexpr void Entry::SetValue(const std::signed_integral auto value) noexcept
     {
-        ReleaseData();
-        type = Type::Int;
-        detail::GlobalAllocator::Allocate<int64_t>(*this, 1);
+        detail::GlobalAllocator::Repurpose<Type::Int>(*this, 1);
         data.i[0] = static_cast<int64_t>(value);
     }
 
     constexpr void Entry::SetValue(const std::unsigned_integral auto value) noexcept
     {
-        ReleaseData();
-        type = Type::UInt;
-        detail::GlobalAllocator::Allocate<uint64_t>(*this, 1);
-        data.u[0] = static_cast<uint64_t>(value);
+        detail::GlobalAllocator::Repurpose<Type::Int>(*this, 1);
+        data.i[0] = std::bit_cast<int64_t>(static_cast<uint64_t>(value));
     }
 
     constexpr void Entry::SetValue(const std::floating_point auto value) noexcept
     {
-        ReleaseData();
-        type = Type::Float;
-        detail::GlobalAllocator::Allocate<double>(*this, 1);
+        detail::GlobalAllocator::Repurpose<Type::Float>(*this, 1);
         data.f[0] = static_cast<double>(value);
     }
 
@@ -4128,13 +4271,14 @@ namespace fdf
 
     constexpr void Entry::SetValue(const std::span<const std::string_view> value) noexcept
     {
-        ReleaseData();
-
         // A string value is at least one component, so an empty span becomes a single empty string
         const uint32_t count = value.empty()? 1U : static_cast<uint32_t>(value.size());
-        AllocateStringArray(count);
+        detail::GlobalAllocator::Repurpose<Type::String>(*this, count);
         if(value.empty())
+        {
+            data.s[0].clear();  // a reused component may hold stale text
             return;
+        }
 
         String* arr = data.s;
         for(uint32_t i = 0; i < count; i++)
@@ -4153,11 +4297,9 @@ namespace fdf
 
     constexpr void Entry::SetValue(const Timestamp& value) noexcept
     {
-        ReleaseData();
         String text;
         value.AppendTo(text);
-        AllocateStringArray(1);
-        type = Type::Timestamp;
+        detail::GlobalAllocator::Repurpose<Type::Timestamp>(*this, 1);
         data.s[0] = std::string_view(text);
     }
 
@@ -4167,9 +4309,7 @@ namespace fdf
 
     constexpr void Entry::SetValue(std::span<bool> value) noexcept
     {
-        ReleaseData();
-        type = Type::Bool;
-        detail::GlobalAllocator::Allocate<bool>(*this, static_cast<uint32_t>(value.size()));
+        detail::GlobalAllocator::Repurpose<Type::Bool>(*this, static_cast<uint32_t>(value.size()));
         for(size_t i = 0; i < size; i++)
             data.b[i] = value[i];
     }
@@ -4177,9 +4317,7 @@ namespace fdf
     template <std::signed_integral T>
     constexpr void Entry::SetValue(std::span<T> value) noexcept
     {
-        ReleaseData();
-        type = Type::Int;
-        detail::GlobalAllocator::Allocate<int64_t>(*this, static_cast<uint32_t>(value.size()));
+        detail::GlobalAllocator::Repurpose<Type::Int>(*this, static_cast<uint32_t>(value.size()));
         for(size_t i = 0; i < size; i++)
             data.i[i] = static_cast<int64_t>(value[i]);
     }
@@ -4187,11 +4325,9 @@ namespace fdf
     template <std::unsigned_integral T>
     constexpr void Entry::SetValue(std::span<T> value) noexcept
     {
-        ReleaseData();
-        type = Type::UInt;
-        detail::GlobalAllocator::Allocate<uint64_t>(*this, static_cast<uint32_t>(value.size()));
+        detail::GlobalAllocator::Repurpose<Type::Int>(*this, static_cast<uint32_t>(value.size()));
         for(size_t i = 0; i < size; i++)
-            data.u[i] = static_cast<uint64_t>(value[i]);
+            data.i[i] = std::bit_cast<int64_t>(static_cast<uint64_t>(value[i]));
     }
 
     constexpr void Entry::SetValue(const Version& value) noexcept
@@ -4201,9 +4337,7 @@ namespace fdf
 
     constexpr void Entry::SetValue(const std::span<const Version> value) noexcept
     {
-        ReleaseData();
-        type = Type::Version;
-        detail::GlobalAllocator::Allocate<Version>(*this, static_cast<uint32_t>(value.size()));
+        detail::GlobalAllocator::Repurpose<Type::Version>(*this, static_cast<uint32_t>(value.size()));
         // a missing revision flag normalizes revision to zero
         auto normalized = [](Version v) noexcept { if(!v.bHasRevision) v.revision = 0; return v; };
         for(size_t i = 0; i < size; i++)
@@ -4213,9 +4347,7 @@ namespace fdf
     template <std::floating_point T>
     constexpr void Entry::SetValue(std::span<T> value) noexcept
     {
-        ReleaseData();
-        type = Type::Float;
-        detail::GlobalAllocator::Allocate<double>(*this, static_cast<uint32_t>(value.size()));
+        detail::GlobalAllocator::Repurpose<Type::Float>(*this, static_cast<uint32_t>(value.size()));
         for(size_t i = 0; i < size; i++)
             data.f[i] = static_cast<double>(value[i]);
     }
@@ -4336,20 +4468,6 @@ namespace fdf
                 {
                     if(i) temp.push_back('|');
                     detail::AppendInt(temp, span[i]);
-                }
-                return temp;
-            }
-
-            case Type::UInt:
-            {
-                const auto span = GetValue<uint64_t>();
-                if(span.empty())
-                    return {};
-                temp.clear();
-                for(size_t i = 0; i < span.size(); i++)
-                {
-                    if(i) temp.push_back('|');
-                    detail::AppendUInt(temp, span[i]);
                 }
                 return temp;
             }
@@ -5036,13 +5154,8 @@ namespace fdf::detail
 
         if(bAllNumeric && !bAnyFloat)
         {
-            // set the type before allocation so early error cleanup sees an Int buffer
-            // promotion below changes both the buffer and type to UInt
             entry.type = Type::Int;
             detail::GlobalAllocator::Allocate<int64_t>(entry, componentCount);
-
-            bool bIsUnsigned = false;
-            bool bContainsAnyNegative = false;
 
             auto fail = [&]() -> bool
             {
@@ -5063,10 +5176,7 @@ namespace fdf::detail
                 for(char c : seg)
                 {
                     if(bIsFirstChar && c == '-')
-                    {
                         bIsNegative = true;
-                        bContainsAnyNegative = true;
-                    }
                     else if(constexpr_isdigit(c))
                     {
                         if(result > UINT64_MAX_VALUE / 10)
@@ -5093,7 +5203,7 @@ namespace fdf::detail
                 if(bIsNegative)
                 {
                     constexpr uint64_t INT64_MIN_MAGNITUDE = static_cast<uint64_t>(INT64_MAX_VALUE) + 1U;
-                    if(bIsUnsigned || result > INT64_MIN_MAGNITUDE)
+                    if(result > INT64_MIN_MAGNITUDE)
                         return fail();
 
                     entry.data.i[d] = result == INT64_MIN_MAGNITUDE
@@ -5102,27 +5212,11 @@ namespace fdf::detail
                 }
                 else
                 {
-                    const bool bWasUnsigned = bIsUnsigned;
-                    if(result > static_cast<uint64_t>(INT64_MAX_VALUE))
-                        bIsUnsigned = true;
-
-                    if(bIsUnsigned)
-                    {
-                        if(bContainsAnyNegative)
-                            return fail();
-
-                        if(!bWasUnsigned)
-                            detail::GlobalAllocator::ConvertFrom<uint64_t, int64_t>(entry, static_cast<uint32_t>(d));
-
-                        entry.type = Type::UInt;  // keep type matched to the promoted buffer
-                        entry.data.u[d] = result;
-                    }
-                    else
-                        entry.data.i[d] = static_cast<int64_t>(result);
+                    // values past INT64_MAX keep their unsigned bit pattern, GetValue<uint64_t> reads them back
+                    entry.data.i[d] = std::bit_cast<int64_t>(result);
                 }
             }
 
-            entry.type = bIsUnsigned? Type::UInt : Type::Int;
             return postProcess();
         }
 

@@ -5,8 +5,7 @@
 | Type | Examples | Notes |
 |------|----------|-------|
 | Bool | `true`, `false` | |
-| Int | `12345`, `-7` | signed 64-bit |
-| UInt | `12345` | unsigned 64-bit |
+| Int | `12345`, `-7` | 64-bit, literals accepted in `-2^63..2^64-1` |
 | Float | `3.14`, `1.0e21` | 64-bit, scientific notation supported. `inf`/`nan` not representable |
 | String | `"text"`, `'text'` | single or double quotes |
 | Hex | `0xFF5733` | `0x`/`0X` prefix marks it as hex |
@@ -17,6 +16,10 @@
 Timestamp dates may use calendar (`2024-12-24`), ordinal (`2024-359`), or ISO week
 (`2024-W52-2`) notation. Each form can include a time and zone. Week 53 is only valid in
 years that contain it.
+
+Int stores 64 bits with no separate unsigned type. Literals above `2^63-1` keep their unsigned
+bit pattern and read back exactly through `GetValue<uint64_t>()`. They re-serialize in signed
+form: `18446744073709551615` is written back as `-1`, same bits.
 
 ## Packs
 
