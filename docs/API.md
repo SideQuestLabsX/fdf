@@ -33,7 +33,7 @@ file and missing parent directories. Bare filenames use the current directory.
 
 ```cpp
 enum class Type : uint8_t { Map, Array, Null, Nil = Null, Bool, Int, Float,
-                            String, Hex, Version, Timestamp };
+                            String, Hex, Version, Timestamp, Duration };
 ```
 
 ## Reading values
@@ -52,15 +52,15 @@ uint32_t     GetChildCount()      const;
 ```
 
 `GetValue<T>()` reads the scalar payload. Every scalar type comes back as a `std::span` over its
-components (one element for a plain scalar, more for a pack); a timestamp is decoded into a
-`Timestamp` struct on demand.
+components: one element for a plain scalar and more for a pack.
 
 ```cpp
 auto name = e->GetChild("name")->GetValue<fdf::String>()[0];     // "MyGame"
 auto px   = e->GetChild("pos")->GetValue<int64_t>();             // pack span: [100, 100]
 auto flag = e->GetChild("fullscreen")->GetValue<bool>()[0];      // true
 auto vers = e->GetChild("versions")->GetValue<Version>();
-auto when = e->GetChild("created")->GetValue<Timestamp>();       // decoded fields
+auto when = e->GetChild("created")->GetValue<Timestamp>();
+auto wait = e->GetChild("timeout")->GetValue<Duration>();
 ```
 
 `GetValue<uint64_t>()` returns `fdf::UIntSpan` (or `ConstUIntSpan`), a span-alike unsigned view
@@ -71,6 +71,44 @@ element writes all work. Each element is bit-cast, so values above `2^63-1` read
 `Version` is 16 bytes. `major` is limited to `0..2147483647`; the other components use the
 full `uint32_t` range. `bHasRevision` distinguishes `1.2.3` from `1.2.3.0`. Packs may mix both
 forms: `1.0.0|2.0.0.0`.
+
+`Timestamp` is a concrete 16-byte, 4-byte-aligned value. Its date, time, fraction, timezone and
+shape fields are stored directly in a contiguous `Timestamp[count]` payload. Mutable and const
+entries return `std::span<Timestamp>` and `std::span<const Timestamp>`. The bitfield object
+representation is compiler-specific, so persistence must encode named members rather than copy
+the struct bytes.
+
+`Duration` is a concrete 8-byte, 8-byte-aligned signed nanosecond count. Mutable and const entries
+return `std::span<Duration>` and `std::span<const Duration>`. Its factories and integer accessors
+cover weeks through nanoseconds:
+
+```cpp
+Duration timeout = Duration::Hours(1) + Duration::Minutes(30);
+int64_t minutes = timeout.TotalMinutes();   // 90
+```
+
+Duration arithmetic is `constexpr`. Timestamps interoperate through free operators:
+
+```cpp
+Timestamp deadline = created + Duration::Minutes(30);
+Timestamp retryAt = deadline - Duration::Seconds(5);
+Duration elapsed = deadline - created;
+```
+
+A `+`/`-` result outside years 0-9999 is invalid (`IsValid() == false`). A timestamp difference
+beyond `Duration`'s ±292-year range saturates, and an invalid operand yields a zero `Duration`.
+`ToUnixNanos()` saturates past roughly year 2262, where `int64_t` nanoseconds run out.
+`FromUnixSeconds`/`FromUnixNanos` reject inputs outside the representable range instead of
+truncating. `Duration` factories and operators use plain `int64_t` math, overflow there is the
+caller's precondition, as in `std::chrono`.
+
+`Timestamp::IsValid()` checks the whole structure. The fields are public and editable through the
+mutable span, so `Date(2024, 13, 99)` and a hand-edited out-of-range field both report invalid.
+
+Values the text format cannot express are written as `null`: a timestamp with any invalid
+component and a float that is infinite or NaN. Re-parsing then yields a real `Null`, so a
+round-trip settles after one pass. Parsing rejects the same cases up front, so a float literal
+that overflows to infinity is an `InvalidNumber` error.
 
 `Hex` stores decoded bytes in source order. `0x` is the empty byte string. `Read(value, offset)` and
 `Write(value, offset)` convert between the stored big-endian bytes and a host value, returning `bool`
@@ -147,9 +185,10 @@ std::string_view view = comps[0];                // "renamed"
 ## Walking the tree
 
 ```cpp
-std::span<Entry*>      GetChildren();
-std::vector<Entry*>    GetChildrenRecursive();
-size_t                 GetChildCountRecursive() const;
+std::span<Entry*>             GetChildren();
+std::span<const Entry* const> GetChildren() const;
+std::vector<Entry*>           GetChildrenRecursive();
+size_t                        GetChildCountRecursive() const;
 
 template<auto FLAGS = ForEachFlags::None>
 void ForEach(auto&& callback);   // callback(Entry&) or callback(const Entry&)
@@ -178,19 +217,25 @@ root->ForEach<fdf::ForEachFlags::Recursive>([](const fdf::Entry& e)
 Entry* Emplace(std::string_view key);    // add a child, returns it ("" for array items)
 Entry* AddChild(UniqueEntryPtr& e);      // adopt an existing node
 
-void SetValue(value);                    // bool, integer, float, string, Version, Timestamp, Hex...
+void SetValue(value);                    // bool, integer, float, string, Version, Timestamp, Duration, Hex...
                                          // pass std::span for a pack, or edit components through
                                          // GetValue(); an rvalue String or Hex is moved
 bool SetIdentifier(std::string_view);
 void SetType(Type);
-void Resize(uint32_t);                   // grow/shrink a bool/int/float/string/version/hex pack,
-                                         // tail zero or empty. Timestamp packs ignore it
+
+void Resize(uint32_t);                   // grow/shrink a bool/int/float/string/version/timestamp/duration/hex
+                                         // pack, tail zero or empty
 
 bool RemoveChild(child | key | index);
 bool ClearChildren();
 UniqueEntryPtr OrphanChild(child | key | index);   // detach without destroying
 std::vector<UniqueEntryPtr> OrphanChildren();
 ```
+
+Adding a map key that already exists replaces the entry in place without changing its position.
+Parsing uses the same last-wins behavior: `a=1` followed by `a=2` leaves one child holding `2`.
+`AddChild` rejects ownership cycles. It returns `nullptr` and leaves ownership with the caller when
+an orphaned ancestor is passed to its descendant.
 
 `SetValue(fdf::ArrayType{})` / `SetValue(fdf::MapType{})` turn a node into an empty
 container. Then use `Emplace` to add its children.

@@ -79,7 +79,8 @@ namespace fdf::detail
         "String   ",
         "Hex      ",
         "Version  ",
-        "Timestamp"
+        "Timestamp",
+        "Duration "
     };
 }
 
@@ -329,6 +330,10 @@ namespace fdf::test
 #define CHECK(cond)        fdf::test::ReportCheck((cond), #cond, __FILE__, __LINE__)
 #define CHECK_MSG(cond, m) fdf::test::ReportCheck((cond), #cond, __FILE__, __LINE__, (m))
 
+// CHECK that returns before dependent assertions can dereference bad state
+#define REQUIRE(cond)        do { if(!CHECK(cond))          return; } while(false)
+#define REQUIRE_MSG(cond, m) do { if(!CHECK_MSG(cond, (m))) return; } while(false)
+
 
 
 
@@ -508,6 +513,8 @@ namespace fdf::detail
             "escaped5 = \"asd\\tasd\\p\"\n"
             "escaped6 = \"\\\\asd\\\\\"\n"
             "authors = \"ann\"|\"bo\"\n"
+            "timeout = 1h30m\n"
+            "delays = 1s|500ms\n"
             "gameSettings1 {\n"
             "    resolution = 1920|1080\n"
             "    fullscreen = false\n"
@@ -525,10 +532,10 @@ namespace fdf::detail
             if(!e)
                 return;
 
-            // Derived from READ_DOC: 13 top-level entries, recursive adds gameSettings1's 3 children
-            // + 3 tag elements, and players' 2 maps + their 4 leaves = 25
-            CHECK_MSG(e->GetChildCountRecursive() == 25, std::format("recursive count = {}", e->GetChildCountRecursive()));
-            CHECK_MSG(e->GetChildCount() == 13, std::format("top level count = {}", e->GetChildCount()));
+            // Derived from READ_DOC: 15 top-level entries, recursive adds gameSettings1's 3 children
+            // + 3 tag elements, and players' 2 maps + their 4 leaves = 27
+            CHECK_MSG(e->GetChildCountRecursive() == 27, std::format("recursive count = {}", e->GetChildCountRecursive()));
+            CHECK_MSG(e->GetChildCount() == 15, std::format("top level count = {}", e->GetChildCount()));
 
             if(Entry* entry = e->GetChild("appVersion"); CHECK(entry && entry->GetType() == Type::Version))
             {
@@ -570,6 +577,18 @@ namespace fdf::detail
             {
                 const std::span<const String> parts = entry->GetValue<String>();
                 CHECK(parts.size() == 2 && parts[0] == "ann" && parts[1] == "bo");
+            }
+
+            if(Entry* entry = e->GetChild("timeout"); CHECK(entry && entry->GetType() == Type::Duration))
+            {
+                const std::span<const Duration> parts = entry->GetValue<Duration>();
+                CHECK(parts.size() == 1 && parts[0] == Duration::Minutes(90));
+            }
+
+            if(Entry* entry = e->GetChild("delays"); CHECK(entry && entry->GetType() == Type::Duration))
+            {
+                const std::span<const Duration> parts = entry->GetValue<Duration>();
+                CHECK(parts.size() == 2 && parts[0] == Duration::Seconds(1) && parts[1] == Duration::Millis(500));
             }
 
             if(Entry* entry = e->GetChild("gameSettings1.resolution"); CHECK(entry && entry->GetType() == Type::Int))
@@ -694,6 +713,9 @@ namespace fdf::detail
         // SetValue/GetValue scalar and span coverage
         static void ValueTest()
         {
+            static_assert(std::is_same_v<decltype(std::declval<const Entry&>().GetChildren()), std::span<const Entry* const>>);
+            static_assert(std::is_same_v<decltype(std::declval<      Entry&>().GetChildren()), std::span<      Entry*      >>);
+
             UniqueEntryPtr root = NewEntry();
             if(!CHECK(static_cast<bool>(root)))
                 return;
@@ -856,14 +878,15 @@ namespace fdf::detail
                 CHECK(e->GetValue<Version>()[0].patch == 9);
             }
 
-            // Set from a Timestamp reference, decode it back
             if(Entry* e = root->Emplace("t"); CHECK(e))
             {
                 const Timestamp ts = Timestamp::DateTime(2024, 12, 24, 15, 30, 0);
                 e->SetValue(ts);
                 CHECK(e->GetType() == Type::Timestamp);
-                Timestamp got = e->GetValue<Timestamp>();
-                CHECK(got.year == 2024 && got.month == 12 && got.day == 24 && got.hour == 15 && got.minute == 30);
+                std::span<Timestamp> got = e->GetValue<Timestamp>();
+                CHECK(got.size() == 1 && got[0].year == 2024 && got[0].month == 12 && got[0].day == 24);
+                got[0].minute = 45;
+                CHECK(std::as_const(*e).GetValue<Timestamp>()[0].minute == 45);
             }
 
             // Re-set overwrites type and value cleanly
@@ -1035,7 +1058,6 @@ namespace fdf::detail
                 CHECK(e->GetType() == Type::Bool && v.size() == 3 && v[0] == false && v[1] == false && v[2] == false);
             }
 
-            // Timestamp ignores Resize
             if(UniqueEntryPtr doc = ParseBuffer("h = 0xFF|0x80\nt = 2024-01-02|2024-03-04\n"))
             {
                 if(Entry* h = doc->GetChild("h"); CHECK(h && h->GetType() == Type::Hex))
@@ -1051,14 +1073,22 @@ namespace fdf::detail
                 if(Entry* t = doc->GetChild("t"); CHECK(t && t->GetType() == Type::Timestamp))
                 {
                     t->Resize(4);
-                    CHECK(std::as_const(*t).GetValue<String>().size() == 2);
+                    auto grown = t->GetValue<Timestamp>();
+                    CHECK(grown.size() == 4 && grown[0].day == 2 && grown[1].day == 4
+                        && !grown[2].IsValid() && !grown[3].IsValid());
+                    t->Resize(1);
+                    auto shrunk = t->GetValue<Timestamp>();
+                    CHECK(shrunk.size() == 1 && shrunk[0].day == 2);
                 }
             }
 
             if(UniqueEntryPtr paths = ParseBuffer("tags [ \"a\", \"b\" ]\nplayers [ { name=\"p\" } ]\n"))
             {
-                CHECK(paths->GetChild("tags.1")->GetFullIdentifier() == "tags.1");
-                CHECK(paths->GetChild("players.0.name")->GetFullIdentifier() == "players.0.name");
+                const Entry* tag = paths->GetChild("tags.1");
+                const Entry* name = paths->GetChild("players.0.name");
+                REQUIRE(tag && name);
+                CHECK(tag->GetFullIdentifier() == "tags.1");
+                CHECK(name->GetFullIdentifier() == "players.0.name");
             }
 
             UniqueEntryPtr base = ParseBuffer("keep=1\nsection { old=2 }\n");
@@ -1397,6 +1427,95 @@ namespace fdf::detail
             CHECK(static_cast<bool>(ParseBuffer("//")));
         #endif
 
+            // consume mismatched closers so recovery makes progress
+            {
+                test::g_diagnostics = 0;
+                if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("a { ] }\n"); CHECK(static_cast<bool>(root)))
+                {
+                    Entry* a = root->GetChild("a");
+                    CHECK(a && a->GetType() == Type::Map && a->GetChildCount() == 0);
+                }
+                CHECK(test::g_diagnostics >= 1);
+
+                CHECK(static_cast<bool>(ParseBuffer<&CountDiagnostics>("a [ } ]\n")));
+                CHECK(static_cast<bool>(ParseBuffer<&CountDiagnostics>("a { b { ] } }\n")));
+
+                if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("a { ]\n"); CHECK(static_cast<bool>(root)))
+                    CHECK(root->GetChild("a") == nullptr);
+            }
+
+            // duplicate keys follow AddChild's last-wins policy
+            {
+                if(UniqueEntryPtr root = ParseBuffer("a=1\na=2\n"); CHECK(static_cast<bool>(root)))
+                {
+                    CHECK(root->GetChildCount() == 1);
+                    Entry* a = root->GetChild("a");
+                    if(CHECK(a && a->GetType() == Type::Int))
+                        CHECK(a->GetValue<int64_t>()[0] == 2);
+                }
+                if(UniqueEntryPtr root = ParseBuffer("m { a=1, a=2 }\n"); CHECK(static_cast<bool>(root)))
+                {
+                    Entry* m = root->GetChild("m");
+                    if(CHECK(m))
+                        CHECK(m->GetChildCount() == 1);
+                }
+                if(UniqueEntryPtr root = ParseBuffer("a=1\na { b=2 }\n"); CHECK(static_cast<bool>(root)))
+                {
+                    Entry* a = root->GetChild("a");
+                    if(CHECK(a && a->GetType() == Type::Map))
+                        CHECK(a->GetChildCount() == 1 && a->GetChild("b") != nullptr);
+                }
+            }
+
+            // non-finite floats
+            {
+                test::g_diagnostics = 0;
+                if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("f = 1.0e9999\n"); CHECK(static_cast<bool>(root)))
+                    CHECK(root->GetChild("f") == nullptr);
+                CHECK(test::g_diagnostics >= 1);
+
+                UniqueEntryPtr built = NewEntry();
+                if(Entry* f = built->Emplace("f"); CHECK(f))
+                {
+                    f->SetValue(std::numeric_limits<double>::infinity());
+                    const String written = WriteBuffer<Style{ .bCommas = false }>(*built);
+                    CHECK(written == "f=null\n");
+                    UniqueEntryPtr reparsed = ParseBuffer(written);
+                    CHECK(reparsed && reparsed->GetChild("f") != nullptr);
+                }
+            }
+
+            // malformed duplicates preserve the earlier valid value
+            {
+                for(std::string_view src : { "a=1\na=1.0e9999\n", "a=1\na=5m3h\n", "m { a=1, a=1.0e9999 }\n" })
+                {
+                    UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(src);
+                    if(!CHECK_MSG(static_cast<bool>(root), src))
+                        continue;
+                    const Entry* scope = src.starts_with("m")? root->GetChild("m") : root.get();
+                    const Entry* a = scope? scope->GetChild("a") : nullptr;
+                    if(CHECK_MSG(a && a->GetType() == Type::Int, src))
+                        CHECK_MSG(a->GetValue<int64_t>()[0] == 1, src);
+                }
+            }
+
+            // reject ancestor adoption to prevent ownership cycles
+            {
+                UniqueEntryPtr root = NewEntry();
+                Entry* a = root->Emplace("a");
+                Entry* b = a? a->Emplace("b") : nullptr;
+                if(CHECK(a && b))
+                {
+                    UniqueEntryPtr orphan = root->OrphanChild(*a);
+                    if(CHECK(static_cast<bool>(orphan)))
+                    {
+                        CHECK(b->AddChild(orphan) == nullptr);
+                        CHECK(static_cast<bool>(orphan));  // ownership remains with caller
+                        CHECK(orphan->AddChild(orphan) == nullptr);
+                    }
+                }
+            }
+
             // Diagnostic carries line / column / offset of the offending token
             {
                 // "ok = 1\n" is 7 bytes; the bad identifier starts at offset 7, line 2, column 1
@@ -1478,8 +1597,18 @@ namespace fdf::detail
             {
                 { DiagnosticType::InvalidTimestamp,    "ts = 2024-13-45\nok = 1\n",                          false },
                 { DiagnosticType::InvalidTimestamp,    "ts = 25:99:00\nok = 1\n",                            false },
-                { DiagnosticType::InvalidTimestamp,    "ts = 2014-W53-1\nok = 1\n",                          false },
+                { DiagnosticType::InvalidTimestamp,    "ts = 2024-359\nok = 1\n",                            false },
+                { DiagnosticType::InvalidTimestamp,    "ts = 2024-W52-2\nok = 1\n",                          false },
                 { DiagnosticType::InvalidTimestamp,    "ts = 2024-W52-2junk\nok = 1\n",                      false },
+                { DiagnosticType::InvalidTimestamp,    "ts = 15:30:00-05:00\nok = 1\n",                      false },
+                { DiagnosticType::InvalidTimestamp,    "ts = 15:30:00.1234567890\nok = 1\n",                 false },
+                { DiagnosticType::InvalidDuration,     "ts = 9223372036854775808ns\nok = 1\n",                false },
+                { DiagnosticType::InvalidDuration,     "ts = 106751d23h47m16s854ms775us808ns\nok = 1\n",      false },
+                { DiagnosticType::InvalidDuration,     "ts = 0.5ns\nok = 1\n",                                false },
+                { DiagnosticType::InvalidDuration,     "ts = 1s1m\nok = 1\n",                                false },
+                { DiagnosticType::InvalidDuration,     "ts = 1h2h\nok = 1\n",                                false },
+                { DiagnosticType::InvalidDuration,     "ts = 1mo\nok = 1\n",                                 false },
+                { DiagnosticType::InvalidDuration,     "ts = 1sjunk\nok = 1\n",                              false },
                 { DiagnosticType::InvalidIdentifier,   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa = 1\nok = 1\n", false },  // > 30 chars
                 { DiagnosticType::InvalidIdentifier,   "true = 1\nok = 1\n",                                 false },  // keyword can't be a key
                 { DiagnosticType::InvalidIdentifier,   "ts-x = 1\nok = 1\n",                                 false },  // '-' not allowed in identifier
@@ -1507,18 +1636,34 @@ namespace fdf::detail
                 }
             }
 
-            // accepted timestamp forms parse and preserve their text
-            constexpr std::string_view goodTs[] =
+            // Accepted timestamp forms parse and write canonically
+            struct TimestampCase
             {
-                "2024-12-24", "2024-359", "2024-W52-2", "2020-W53-7", "2020-W01-1", "15:30:00",
-                "2024-W52-2T15:30:00Z", "2015-W53-7T23:59:59.123+05:30",
-                "2024-12-24T15:30:00", "2024-12-24T15:30:00.123Z", "15:30:00-05:00",
+                std::string_view source;
+                std::string_view canonical;
             };
-            for(std::string_view ts : goodTs)
+            constexpr TimestampCase goodTs[] =
             {
-                UniqueEntryPtr root = ParseBuffer(std::format("t = {}\n", ts));
-                if(Entry* e = root? root->GetChild("t") : nullptr; CHECK_MSG(e && e->GetType() == Type::Timestamp, ts))
-                    CHECK(FirstString(*e) == ts);
+                { "2024-12-24", "2024-12-24" },
+                { "2024-02-29", "2024-02-29" },
+                { "15:30:00", "15:30:00" },
+                { "15:30:00.1", "15:30:00.1" },
+                { "2024-12-24T15:30:00", "2024-12-24T15:30:00" },
+                { "2024-12-24t15:30:00z", "2024-12-24T15:30:00Z" },
+                { "2024-12-24T15:30:00.123456789Z", "2024-12-24T15:30:00.123456789Z" },
+                { "2024-12-24T15:30:00+05:30", "2024-12-24T15:30:00+05:30" },
+                { "2024-12-24T15:30:00-05:00", "2024-12-24T15:30:00-05:00" },
+            };
+            for(const TimestampCase& ts : goodTs)
+            {
+                UniqueEntryPtr root = ParseBuffer(std::format("t = {}\n", ts.source));
+                Entry* e = root? root->GetChild("t") : nullptr;
+                if(CHECK_MSG(e && e->GetType() == Type::Timestamp, ts.source))
+                {
+                    CHECK_MSG(e->GetValue<Timestamp>().size() == 1, ts.source);
+                    String out = WriteBuffer<Style{ .bCommas = false }>(*root);
+                    CHECK_MSG(out == std::format("t={}\n", ts.canonical), out);
+                }
             }
 
             // a fake oversized view tests the 32-bit input limit without allocating 4GB
@@ -1676,21 +1821,17 @@ namespace fdf::detail
             checkStrings("\"a\\\"q\"|'b\\tc'",           { "a\"q", "b\tc" });
             checkStrings("\"\"|\"x\"",                   { "", "x" });
 
-            auto checkText = [](std::string_view src, Type type, std::initializer_list<std::string_view> exp)
+            if(UniqueEntryPtr root = ParseBuffer("v = 2024-12-24|15:30:00\n"))
             {
-                UniqueEntryPtr root = ParseBuffer(std::format("v = {}\n", src));
                 const Entry* e = root? root->GetChild("v") : nullptr;
-                if(!CHECK_MSG(e && e->GetType() == type, src))
-                    return;
-                const std::span<const String> parts = e->GetValue<String>();
-                if(!CHECK_MSG(parts.size() == exp.size(), src))
-                    return;
-                size_t i = 0;
-                for(std::string_view x : exp)
-                    CHECK_MSG(parts[i++] == x, src);
-            };
-            checkText("2024-12-24|15:30:00",      Type::Timestamp, { "2024-12-24", "15:30:00" });
-            checkText("2024-12-24T15:30:00Z|2024-359", Type::Timestamp, { "2024-12-24T15:30:00Z", "2024-359" });
+                if(CHECK(e && e->GetType() == Type::Timestamp))
+                {
+                    const std::span<const Timestamp> parts = e->GetValue<Timestamp>();
+                    CHECK(parts.size() == 2);
+                    CHECK(parts[0].bHasDate && !parts[0].bHasTime && parts[0].day == 24);
+                    CHECK(!parts[1].bHasDate && parts[1].bHasTime && parts[1].hour == 15);
+                }
+            }
 
             if(UniqueEntryPtr root = ParseBuffer("v = 0xFF|0xAA\n"))
             {
@@ -1718,14 +1859,16 @@ namespace fdf::detail
                 }
             }
 
-            // GetValue<Timestamp> on a timestamp pack decodes component 0
-            if(UniqueEntryPtr root = ParseBuffer("v = 2024-12-24|15:30:00\n"))
+            // Timestamp pack components are contiguous and mutable
+            if(UniqueEntryPtr root = ParseBuffer("v = 2024-12-24T15:30:00Z|2024-12-25t16:45:30+05:30\n"))
             {
-                const Entry* e = root->GetChild("v");
+                Entry* e = root->GetChild("v");
                 if(CHECK(e && e->GetType() == Type::Timestamp))
                 {
-                    const Timestamp ts = e->GetValue<Timestamp>();
-                    CHECK(ts.year == 2024 && ts.month == 12 && ts.day == 24);
+                    std::span<Timestamp> parts = e->GetValue<Timestamp>();
+                    CHECK(parts.size() == 2 && parts[0].day == 24 && parts[1].day == 25);
+                    parts[1].minute = 30;
+                    CHECK(std::as_const(*e).GetValue<Timestamp>()[1].minute == 30);
                 }
             }
 
@@ -1742,13 +1885,9 @@ namespace fdf::detail
                     const Entry* b = reparsed? reparsed->GetChild("v") : nullptr;
                     if(CHECK_MSG(a && b && a->GetType() == b->GetType(), out))
                     {
-                        const std::span<const String> pa = a->GetValue<String>();
-                        const std::span<const String> pb = b->GetValue<String>();
-                        if(CHECK_MSG(pa.size() == pb.size(), out))
-                        {
-                            for(size_t i = 0; i < pa.size(); i++)
-                                CHECK_MSG(pa[i] == pb[i], out);
-                        }
+                        const std::span<const Timestamp> pa = a->GetValue<Timestamp>();
+                        const std::span<const Timestamp> pb = b->GetValue<Timestamp>();
+                        CHECK_MSG(SpanEqual(pa, pb), out);
                     }
                 }
             }
@@ -1923,6 +2062,8 @@ namespace fdf::detail
                 { DiagnosticType::InvalidPack,      "bad = 0xFF|2024-12-24\nok = 7\n" },      // hex/timestamp mix
                 { DiagnosticType::InvalidPack,      "bad = 2024-12-24|\"a\"\nok = 7\n" },     // timestamp/string mix
                 { DiagnosticType::InvalidTimestamp, "bad = 2024-12-24|25:99:00\nok = 7\n" },  // bad component in a timestamp pack
+                { DiagnosticType::InvalidDuration,  "bad = 1h|0.5ns\nok = 7\n" },              // bad component in a duration pack
+                { DiagnosticType::InvalidPack,      "bad = 1h|2\nok = 7\n" },                  // duration/number mix
                 { DiagnosticType::InvalidNumber,    "bad = 1x2\nok = 7\n" },                  // old 'x' syntax
             };
             for(const PackCase& c : packCases)
@@ -2064,10 +2205,14 @@ namespace fdf::detail
                 Entry* h = root->GetChild("h");
                 Entry* t = root->GetChild("t");
                 CHECK(h && h->GetType() == Type::Hex);
-                CHECK(t && t->GetType() == Type::Timestamp && FirstString(*t) == "2024-12-24T15:30:00");
+                CHECK(t && t->GetType() == Type::Timestamp);
                 if(h && t)
                 {
-                    CHECK(std::as_const(*t).GetValue<String>().size() == 1);
+                    const std::span<const Timestamp> timestamps = std::as_const(*t).GetValue<Timestamp>();
+                    CHECK(timestamps.size() == 1 && timestamps[0].year == 2024
+                        && timestamps[0].month == 12 && timestamps[0].day == 24
+                        && timestamps[0].hour == 15 && timestamps[0].minute == 30);
+                    CHECK(std::as_const(*t).GetValue<String>().empty());
                     CHECK(t->GetValue<String>().empty());
                     CHECK(std::as_const(*h).GetValue<String>().empty());
                     CHECK(h->GetValue<String>().empty());
@@ -2748,16 +2893,20 @@ namespace fdf::detail
 
 
 
-        // timestamp decoding, canonical injection and epoch conversion
         static void TimestampTest()
         {
+            static_assert(sizeof(Timestamp) == 16 && alignof(Timestamp) == 4);
+            static_assert(std::is_trivially_copyable_v<Timestamp>);
+            static_assert(std::is_same_v<decltype(std::declval<Entry&>().GetValue<Timestamp>()), std::span<Timestamp>>);
+            static_assert(std::is_same_v<decltype(std::declval<const Entry&>().GetValue<Timestamp>()), std::span<const Timestamp>>);
+
             // Field extraction from a fully-specified value
             {
                 UniqueEntryPtr root = ParseBuffer("t = 2024-12-24T15:30:00.123Z\n");
                 Entry* e = root? root->GetChild("t") : nullptr;
                 if(CHECK(e && e->GetType() == Type::Timestamp))
                 {
-                    Timestamp ts = e->GetValue<Timestamp>();
+                    const Timestamp ts = e->GetValue<Timestamp>()[0];
                     CHECK(ts.IsValid() && ts.bHasDate && ts.bHasTime);
                     CHECK(ts.year == 2024 && ts.month == 12 && ts.day == 24);
                     CHECK(ts.hour == 15 && ts.minute == 30 && ts.second == 0);
@@ -2768,7 +2917,10 @@ namespace fdf::detail
 
             // Epoch extraction: the famous Unix 1e9 instant, plus nanos and millis
             {
-                Timestamp ts = ParseBuffer("t = 2001-09-09T01:46:40Z\n")->GetChild("t")->GetValue<Timestamp>();
+                UniqueEntryPtr root = ParseBuffer("t = 2001-09-09T01:46:40Z\n");
+                Entry* e = root? root->GetChild("t") : nullptr;
+                REQUIRE(e && e->GetValue<Timestamp>().size() == 1);
+                const Timestamp ts = e->GetValue<Timestamp>()[0];
                 CHECK(ts.ToUnixSeconds() == 1'000'000'000);
                 CHECK(ts.ToUnixMillis() == 1'000'000'000'000);
                 CHECK(ts.ToUnixNanos()  == 1'000'000'000'000'000'000);
@@ -2776,65 +2928,137 @@ namespace fdf::detail
 
             // A timezone offset normalizes to the same UTC instant as its Z equivalent
             {
-                Timestamp off = ParseBuffer("t = 2024-01-01T12:00:00+05:00\n")->GetChild("t")->GetValue<Timestamp>();
-                Timestamp utc = ParseBuffer("t = 2024-01-01T07:00:00Z\n")->GetChild("t")->GetValue<Timestamp>();
+                UniqueEntryPtr offRoot = ParseBuffer("t = 2024-01-01T12:00:00+05:00\n");
+                UniqueEntryPtr utcRoot = ParseBuffer("t = 2024-01-01T07:00:00Z\n");
+                Entry* offEntry = offRoot? offRoot->GetChild("t") : nullptr;
+                Entry* utcEntry = utcRoot? utcRoot->GetChild("t") : nullptr;
+                REQUIRE(offEntry && utcEntry);
+                REQUIRE(offEntry->GetValue<Timestamp>().size() == 1 && utcEntry->GetValue<Timestamp>().size() == 1);
+                const Timestamp off = offEntry->GetValue<Timestamp>()[0];
+                const Timestamp utc = utcEntry->GetValue<Timestamp>()[0];
                 CHECK(off.ToUnixSeconds() == utc.ToUnixSeconds());
                 CHECK(off.tzOffsetMin == 300);
             }
 
-            // Ordinal and week dates normalize to the same calendar day, remembering their origin
+            // RFC 3339 §4.3 preserves -00:00 as UnknownOffset
             {
-                Timestamp ord  = ParseBuffer("t = 2024-359\n")->GetChild("t")->GetValue<Timestamp>();
-                Timestamp week = ParseBuffer("t = 2024-W52-2\n")->GetChild("t")->GetValue<Timestamp>();
-                Timestamp weekTime = ParseBuffer("t = 2024-W52-2T15:30:00Z\n")->GetChild("t")->GetValue<Timestamp>();
-                CHECK(ord.year == 2024 && ord.month == 12 && ord.day == 24);
-                CHECK(week.year == 2024 && week.month == 12 && week.day == 24);
-                CHECK(weekTime.year == 2024 && weekTime.month == 12 && weekTime.day == 24
-                    && weekTime.hour == 15 && weekTime.tzKind == Timestamp::TzKind::Utc);
-                CHECK(ord.dateKind == Timestamp::DateKind::Ordinal);
-                CHECK(week.dateKind == Timestamp::DateKind::Week);
+                UniqueEntryPtr root = ParseBuffer("a=2024-01-01T00:00:00-00:00\nb=2024-01-01T00:00:00+00:00\nc=2024-01-01T00:00:00Z\n");
+                REQUIRE(static_cast<bool>(root));
+                {
+                    Entry* ea = root->GetChild("a");
+                    Entry* eb = root->GetChild("b");
+                    Entry* ec = root->GetChild("c");
+                    REQUIRE(ea && eb && ec);
+                    REQUIRE(ea->GetValue<Timestamp>().size() == 1 && eb->GetValue<Timestamp>().size() == 1
+                            && ec->GetValue<Timestamp>().size() == 1);
+                    const Timestamp unknown = ea->GetValue<Timestamp>()[0];
+                    const Timestamp zero    = eb->GetValue<Timestamp>()[0];
+                    const Timestamp utc     = ec->GetValue<Timestamp>()[0];
+                    CHECK(unknown.tzKind == Timestamp::TzKind::UnknownOffset);
+                    CHECK(zero.tzKind == Timestamp::TzKind::Offset);
+                    CHECK(utc.tzKind == Timestamp::TzKind::Utc);
+                    CHECK(unknown != zero);
+                    CHECK(unknown.IsValid() && unknown.tzOffsetMin == 0);
+                    // same instant with different offset provenance
+                    CHECK(unknown.ToUnixSeconds() == zero.ToUnixSeconds());
+                    CHECK(unknown.ToUnixSeconds() == utc.ToUnixSeconds());
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) ==
+                          "a=2024-01-01T00:00:00-00:00\nb=2024-01-01T00:00:00+00:00\nc=2024-01-01T00:00:00Z\n");
+                }
+                // only -00:00 maps to UnknownOffset
+                const Timestamp near = Timestamp::FromText("2024-01-01T00:00:00-00:01");
+                CHECK(near.tzKind == Timestamp::TzKind::Offset && near.tzOffsetMin == -1);
             }
 
-            // ISO week years can cross calendar-year boundaries
             {
-                const Timestamp first = Timestamp::FromText("2020-W01-1");
-                const Timestamp last = Timestamp::FromText("2020-W53-7T23:59:59.123+05:30");
-                CHECK(first.IsValid() && first.year == 2019 && first.month == 12 && first.day == 30);
-                CHECK(last.IsValid() && last.year == 2021 && last.month == 1 && last.day == 3);
-                CHECK(last.hour == 23 && last.minute == 59 && last.second == 59);
-                CHECK(last.nanosecond == 123'000'000 && last.tzOffsetMin == 330);
-                CHECK(!Timestamp::FromText("2014-W53-1").IsValid());
-                CHECK(!Timestamp::FromText("2021-W53-7T00:00:00Z").IsValid());
-            }
-
-            // Time-only: no date present
-            {
-                Timestamp ts = ParseBuffer("t = 15:30:00\n")->GetChild("t")->GetValue<Timestamp>();
+                UniqueEntryPtr root = ParseBuffer("t = 15:30:00.5\n");
+                Entry* e = root? root->GetChild("t") : nullptr;
+                REQUIRE(e && e->GetValue<Timestamp>().size() == 1);
+                const Timestamp ts = e->GetValue<Timestamp>()[0];
                 CHECK(ts.IsValid() && ts.bHasTime && !ts.bHasDate);
-                CHECK(ts.hour == 15 && ts.minute == 30);
+                CHECK(ts.hour == 15 && ts.minute == 30 && ts.nanosecond == 500'000'000);
+                CHECK(ts.tzKind == Timestamp::TzKind::None);
             }
 
-            // Inject from components, read back the fields and the canonical text
+            // Fraction digit count is preserved exactly from zero through nine
+            for(uint8_t digits = 0; digits <= 9; digits++)
+            {
+                const std::string fraction = digits == 0? std::string() : "." + std::string(digits, '7');
+                const std::string raw = "15:30:00" + fraction;
+                UniqueEntryPtr root = ParseBuffer(std::format("t={}\n", raw));
+                Entry* e = root? root->GetChild("t") : nullptr;
+                if(CHECK_MSG(e && e->GetType() == Type::Timestamp, raw))
+                {
+                    const std::span<const Timestamp> span = std::as_const(*e).GetValue<Timestamp>();
+                    CHECK_MSG(span.size() == 1 && span[0].fracDigits == digits, raw);
+                    String out = WriteBuffer<Style{ .bCommas = false }>(*root);
+                    CHECK_MSG(out == std::format("t={}\n", raw), out);
+                }
+            }
+
+            // A leap second round-trips verbatim and maps to the following minute
+            {
+                UniqueEntryPtr root = ParseBuffer("t=2024-12-31T23:59:60.5Z\n");
+                Entry* e = root? root->GetChild("t") : nullptr;
+                REQUIRE(e && e->GetValue<Timestamp>().size() == 1);
+                const Timestamp leap = e->GetValue<Timestamp>()[0];
+                const Timestamp next = Timestamp::FromText("2025-01-01T00:00:00Z");
+                CHECK(leap.second == 60);
+                CHECK(leap.ToUnixSeconds() == next.ToUnixSeconds());
+                CHECK(leap.ToUnixMillis() == next.ToUnixMillis() + 500);
+                CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t=2024-12-31T23:59:60.5Z\n");
+            }
+
             {
                 UniqueEntryPtr root = NewEntry();
                 if(Entry* e = root->Emplace("t"); CHECK(e))
                 {
-                    e->SetValue(Timestamp::DateTime(2024, 12, 24, 15, 30, 0));
+                    const Timestamp values[] =
+                    {
+                        Timestamp::Date(2024, 12, 24),
+                        Timestamp::Time(15, 30, 0)
+                    };
+                    e->SetValue(std::span<const Timestamp>(values));
                     CHECK(e->GetType() == Type::Timestamp);
-                    CHECK(FirstString(*e) == "2024-12-24T15:30:00");
-                    Timestamp got = e->GetValue<Timestamp>();
-                    CHECK(got.year == 2024 && got.month == 12 && got.day == 24 && got.hour == 15);
+                    std::span<Timestamp> stored = e->GetValue<Timestamp>();
+                    CHECK(stored.size() == 2 && stored[0].day == 24 && stored[1].hour == 15);
+                    stored[0].year = 2025;
+                    stored[1].second = 45;
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t=2025-12-24|15:30:45\n");
                 }
             }
 
-            // Inject from epoch, round-trips back to the same instant and the expected text
+            // Invalid components write as null, re-parse yields a real Null
+            {
+                UniqueEntryPtr root = NewEntry();
+                if(Entry* e = root->Emplace("t"); CHECK(e))
+                {
+                    e->SetValue(Timestamp::Date(2024, 12, 24));
+                    e->Resize(3);
+                    CHECK(e->GetValue<Timestamp>().size() == 3);
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t=null\n");
+                    constexpr Style nilStyle{ .bCommas = false, .bUseNilInsteadOfNull = true };
+                    CHECK(WriteBuffer<nilStyle>(*root) == "t=nil\n");
+
+                    e->Resize(1);
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t=2024-12-24\n");
+                    e->GetValue<Timestamp>()[0] = Timestamp{};
+                    const String written = WriteBuffer<Style{ .bCommas = false }>(*root);
+                    CHECK(written == "t=null\n");
+
+                    UniqueEntryPtr reparsed = ParseBuffer(written);
+                    Entry* n = reparsed? reparsed->GetChild("t") : nullptr;
+                    CHECK(n && n->GetType() == Type::Null);
+                }
+            }
+
             {
                 UniqueEntryPtr root = NewEntry();
                 if(Entry* e = root->Emplace("t"); CHECK(e))
                 {
                     e->SetValue(Timestamp::FromUnixSeconds(1'000'000'000));
-                    CHECK(FirstString(*e) == "2001-09-09T01:46:40Z");
-                    CHECK(e->GetValue<Timestamp>().ToUnixSeconds() == 1'000'000'000);
+                    CHECK(e->GetValue<Timestamp>()[0].ToUnixSeconds() == 1'000'000'000);
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t=2001-09-09T01:46:40Z\n");
                 }
             }
 
@@ -2842,13 +3066,229 @@ namespace fdf::detail
             for(int64_t s : { int64_t(0), int64_t(1'000'000'000), int64_t(1'700'000'000), int64_t(-86400), int64_t(-1) })
                 CHECK_MSG(Timestamp::FromUnixSeconds(s).ToUnixSeconds() == s, std::format("epoch {}", s));
 
-            // parsed timestamps preserve ordinal and week notation through writes
-            // GetValue<Timestamp> decodes without changing stored text
-            for(std::string_view raw : { "2024-359", "2024-W52-2", "15:30:00", "2024-12-24T15:30:00.123Z" })
+            // Timestamp case is a writer style choice
             {
-                UniqueEntryPtr root = ParseBuffer(std::format("t = {}\n", raw));
-                String out = WriteBuffer<Style{ .bCommas = false }>(*root);
-                CHECK_MSG(out.contains(raw), out);
+                UniqueEntryPtr root = ParseBuffer("t=2024-12-24t15:30:00z\n");
+                String upper = WriteBuffer<Style{ .bCommas = false }>(*root);
+                String lower = WriteBuffer<Style{ .bCommas = false, .bUppercaseTimestamp = false }>(*root);
+                CHECK(upper == "t=2024-12-24T15:30:00Z\n");
+                CHECK(lower == "t=2024-12-24t15:30:00z\n");
+            }
+        }
+
+        static void DurationTest()
+        {
+            static_assert(sizeof(Duration) == 8 && alignof(Duration) == 8);
+            static_assert(std::is_trivially_copyable_v<Duration>);
+            static_assert(std::is_same_v<decltype(std::declval<Entry&>().GetValue<Duration>()), std::span<Duration>>);
+            static_assert(std::is_same_v<decltype(std::declval<const Entry&>().GetValue<Duration>()), std::span<const Duration>>);
+
+            struct Case
+            {
+                std::string_view source;
+                std::string_view canonical;
+            };
+            constexpr Case cases[] =
+            {
+                { "90s", "1m30s" },
+                { "90m", "1h30m" },
+                { "1h30m", "1h30m" },
+                { "1.5h", "1h30m" },
+                { "1.25ms", "1ms250us" },
+                { "-30m", "-30m" },
+                { "2w", "14d" },
+                { "10ms", "10ms" },
+                { "1s500ms", "1s500ms" },
+                { "0s", "0s" },
+                { "604800000000000ns", "7d" },
+                { "0.0000000005s0.5ns", "1ns" },
+            };
+
+            for(const Case& c : cases)
+            {
+                UniqueEntryPtr root = ParseBuffer(std::format("d={}\n", c.source));
+                Entry* entry = root? root->GetChild("d") : nullptr;
+                if(CHECK_MSG(entry && entry->GetType() == Type::Duration, c.source))
+                {
+                    const std::span<const Duration> value = std::as_const(*entry).GetValue<Duration>();
+                    CHECK_MSG(value.size() == 1, c.source);
+                    const String written = WriteBuffer<Style{ .bCommas = false }>(*root);
+                    CHECK_MSG(written == std::format("d={}\n", c.canonical), written);
+                }
+            }
+
+            {
+                UniqueEntryPtr root = ParseBuffer("d=1h|2h|30m\n");
+                Entry* entry = root? root->GetChild("d") : nullptr;
+                if(CHECK(entry && entry->GetType() == Type::Duration))
+                {
+                    std::span<Duration> values = entry->GetValue<Duration>();
+                    CHECK(values.size() == 3);
+                    CHECK(values[0] == Duration::Hours(1));
+                    CHECK(values[1] == Duration::Hours(2));
+                    CHECK(values[2] == Duration::Minutes(30));
+                    values[1] = Duration::Minutes(90);
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "d=1h|1h30m|30m\n");
+                }
+            }
+
+            {
+                UniqueEntryPtr root = NewEntry();
+                Entry* entry = root->Emplace("d");
+                if(CHECK(entry))
+                {
+                    entry->SetValue(Duration::Seconds(1));
+                    CHECK(entry->GetType() == Type::Duration);
+                    entry->Resize(3);
+                    std::span<Duration> values = entry->GetValue<Duration>();
+                    CHECK(values.size() == 3 && values[0] == Duration::Seconds(1));
+                    CHECK(values[1] == Duration{} && values[2] == Duration{});
+                    values[1] = Duration::Millis(500);
+                    values[2] = Duration::Micros(250);
+                    entry->Resize(2);
+                    CHECK(entry->GetValue<Duration>().size() == 2);
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "d=1s|500ms\n");
+
+                    const Duration replacement[] =
+                    {
+                        Duration::Days(1),
+                        Duration::Hours(12)
+                    };
+                    entry->SetValue(std::span<const Duration>(replacement));
+                    CHECK(entry->GetValue<Duration>().size() == 2);
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "d=1d|12h\n");
+                }
+            }
+
+            {
+                const Duration combined = Duration::Hours(1) + Duration::Minutes(30);
+                CHECK(combined.TotalNanos() == 5'400'000'000'000LL);
+                CHECK(combined.TotalMinutes() == 90);
+                CHECK(combined.TotalHours() == 1);
+                CHECK((combined - Duration::Minutes(30)) == Duration::Hours(1));
+                CHECK((-Duration::Seconds(3)) == Duration::Seconds(-3));
+                CHECK(Duration::Millis(250) * 4 == Duration::Seconds(1));
+                CHECK(Duration::Nanos(-1'500).TotalMicros() == -1);
+                CHECK(Duration::Weeks(2).TotalWeeks() == 2);
+                CHECK(Duration::Days(13).TotalWeeks() == 1);
+            }
+
+            {
+                const Timestamp base = Timestamp::FromUnixSeconds(100);
+                const Timestamp later = base + Duration::Seconds(30);
+                const Timestamp earlier = later - Duration::Minutes(1);
+                CHECK(later.ToUnixNanos() == 130'000'000'000LL);
+                CHECK(earlier.ToUnixNanos() == 70'000'000'000LL);
+                CHECK(later - base == Duration::Seconds(30));
+
+                const Timestamp midnight = Timestamp::Date(1970, 1, 2);
+                CHECK((midnight + Duration::Hours(1)).ToUnixSeconds() == 90'000);
+            }
+
+            // IsValid checks edited fields as well as bValid
+            {
+                CHECK(!Timestamp::Date(2024, 13, 99).IsValid());
+                CHECK(!Timestamp::Date(2023, 2, 29).IsValid());
+                CHECK(Timestamp::Date(2024, 2, 29).IsValid());
+                CHECK(!Timestamp::Time(25, 0, 0).IsValid());
+                CHECK(!Timestamp{}.IsValid());
+
+                Timestamp edited = Timestamp::Date(2024, 12, 24);
+                edited.month = 13;
+                CHECK(!edited.IsValid());
+            }
+
+            {
+                UniqueEntryPtr root = NewEntry();
+                if(Entry* e = root->Emplace("t"); CHECK(e))
+                {
+                    e->SetValue(Timestamp::Date(2024, 12, 24));
+                    e->GetValue<Timestamp>()[0].day = 99;
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t=null\n");
+                }
+            }
+
+            // epoch conversion is limited to years 0-9999
+            {
+                CHECK(!Timestamp::FromUnixSeconds(std::numeric_limits<int64_t>::max()).IsValid());
+                CHECK(!Timestamp::FromUnixSeconds(std::numeric_limits<int64_t>::min()).IsValid());
+                CHECK(!Timestamp::FromUnixSeconds(Timestamp::MaxUnixSecond() + 1).IsValid());
+                CHECK(Timestamp::FromUnixSeconds(Timestamp::MaxUnixSecond()).IsValid());
+                CHECK(Timestamp::FromUnixSeconds(Timestamp::MinUnixSecond()).IsValid());
+                // int64 nanoseconds span only ~1677-2262
+                constexpr int64_t MIN_NS = std::numeric_limits<int64_t>::min();
+                const Timestamp floor = Timestamp::FromUnixNanos(MIN_NS);
+                CHECK(floor.IsValid() && floor.year == 1677);
+                CHECK(floor.ToUnixNanos() == MIN_NS);
+                CHECK(Timestamp::FromUnixNanos(std::numeric_limits<int64_t>::max()).ToUnixNanos()
+                      == std::numeric_limits<int64_t>::max());
+            }
+
+            // constexpr boundary checks catch signed overflow on every compiler
+            {
+                constexpr int64_t MIN_NS = std::numeric_limits<int64_t>::min();
+                constexpr int64_t MAX_NS = std::numeric_limits<int64_t>::max();
+                static_assert(Timestamp::FromUnixNanos(MIN_NS).ToUnixNanos() == MIN_NS);
+                static_assert(Timestamp::FromUnixNanos(MAX_NS).ToUnixNanos() == MAX_NS);
+                static_assert(Timestamp::FromUnixNanos(0).ToUnixNanos() == 0);
+                static_assert(Timestamp::FromUnixNanos(-1).ToUnixNanos() == -1);
+                static_assert(Timestamp::SaturatingNanos(-9'223'372'037LL, 999'999'999) == -9'223'372'036'000'000'001LL);
+                static_assert(Timestamp::SaturatingNanos(-9'223'372'037LL, 145'224'192) == MIN_NS);
+                static_assert(Timestamp::SaturatingNanos(-9'223'372'038LL, 999'999'999) == MIN_NS);
+                static_assert(Timestamp::SaturatingNanos(9'223'372'036LL, 854'775'807) == MAX_NS);
+                static_assert(Timestamp::SaturatingNanos(9'223'372'036LL, 854'775'808) == MAX_NS);
+                static_assert((Timestamp::Date(0, 1, 1) - Timestamp::Date(9999, 1, 1)) == Duration::Nanos(MIN_NS));
+                static_assert((Timestamp::Date(9999, 1, 1) - Timestamp::Date(0, 1, 1)) == Duration::Nanos(MAX_NS));
+            }
+
+            // preserve representable values in the negative boundary second
+            {
+                Timestamp edge = Timestamp::FromUnixSeconds(-9223372037);
+                REQUIRE(edge.IsValid());
+                edge.nanosecond = 999'999'999;
+                edge.fracDigits = 9;
+                CHECK(edge.ToUnixNanos() == -9'223'372'036'000'000'001LL);
+
+                edge.nanosecond = 145'224'192;   // exactly int64 min
+                CHECK(edge.ToUnixNanos() == std::numeric_limits<int64_t>::min());
+                edge.nanosecond = 145'224'191;   // one below, saturates
+                CHECK(edge.ToUnixNanos() == std::numeric_limits<int64_t>::min());
+            }
+
+            {
+                CHECK(Timestamp::Date(9999, 1, 1).ToUnixNanos() == std::numeric_limits<int64_t>::max());
+                CHECK(Timestamp::Date(0, 1, 1).ToUnixNanos() == std::numeric_limits<int64_t>::min());
+                CHECK(Timestamp::FromUnixSeconds(0).ToUnixNanos() == 0);
+            }
+
+            // timestamp arithmetic boundaries
+            {
+                CHECK(!(Timestamp{} + Duration::Seconds(1)).IsValid());
+                CHECK((Timestamp{} - Timestamp{}) == Duration{});
+                CHECK((Timestamp::Date(5000, 1, 1) + Duration::Nanos(1)).IsValid());
+                CHECK(Timestamp::Date(5000, 1, 1) + Duration::Days(1) - Timestamp::Date(5000, 1, 2) == Duration{});
+                CHECK(!(Timestamp::Date(9999, 12, 31) + Duration::Days(1)).IsValid());
+                CHECK(!(Timestamp::Date(0, 1, 1) - Duration::Nanos(1)).IsValid());
+                CHECK(Timestamp::Date(9999, 1, 1) - Timestamp::Date(0, 1, 1) == Duration::Nanos(std::numeric_limits<int64_t>::max()));
+                CHECK(Timestamp::Date(0, 1, 1) - Timestamp::Date(9999, 1, 1) == Duration::Nanos(std::numeric_limits<int64_t>::min()));
+            }
+
+            // Existing scalar classification remains unchanged
+            struct ClassificationCase { std::string_view atom; Type type; };
+            constexpr ClassificationCase classifications[] =
+            {
+                { "123", Type::Int },
+                { "1.5", Type::Float },
+                { "1e5", Type::Float },
+                { "1E5", Type::Float },
+                { "1.2.3", Type::Version },
+                { "0xFF", Type::Hex },
+                { "2024-12-24", Type::Timestamp },
+            };
+            for(const ClassificationCase& c : classifications)
+            {
+                Type type = Type::Null;
+                CHECK_MSG(detail::ClassifyAtom(c.atom, type) && type == c.type, c.atom);
             }
         }
 
@@ -2881,7 +3321,9 @@ namespace fdf::detail
                 case Type::Version:                    return SpanEqual(a.GetValue<Version>(),  b.GetValue<Version>());
                 case Type::Float:                     return SpanEqual(a.GetValue<double>(),   b.GetValue<double>());
                 case Type::Hex:                       return SpanEqual(a.GetValue<Hex>(),      b.GetValue<Hex>());
-                case Type::String: case Type::Timestamp: return SpanEqual(a.GetValue<String>(), b.GetValue<String>());
+                case Type::Timestamp:                 return SpanEqual(a.GetValue<Timestamp>(), b.GetValue<Timestamp>());
+                case Type::Duration:                  return SpanEqual(a.GetValue<Duration>(), b.GetValue<Duration>());
+                case Type::String:                    return SpanEqual(a.GetValue<String>(),   b.GetValue<String>());
                 default:                              return false;
             }
         }
@@ -2961,8 +3403,8 @@ namespace fdf::detail
                 "ver4 = 1.2.3.4\n"
                 "tsDate = 2024-12-24\n"
                 "tsFull = 2024-12-24T15:30:00.123Z\n"
-                "tsOrd = 2024-359\n"
-                "tsWeek = 2024-W52-2\n"
+                "tsLeap = 2024-12-31T23:59:60Z\n"
+                "tsLower = 2024-12-24t15:30:00z\n"
                 "tsTime = 15:30:00\n"
                 "tmd = 2024-12-24|15:30:00\n"
                 "nn = null\n"
@@ -3367,36 +3809,32 @@ consteval bool VectorProbe()
 }
 static_assert(VectorProbe(), "consteval internal storage grows and preserves live elements");
 
-// ----- ISO-8601 timestamp validation -----
+// ----- RFC 3339-profile timestamp validation -----
 static_assert(fdf::detail::IsValidTimestamp("2024-12-24"),                "date");
 static_assert(fdf::detail::IsValidTimestamp("2024-02-29"),                "leap day");
-static_assert(fdf::detail::IsValidTimestamp("2024-359"),                  "ordinal");
-static_assert(fdf::detail::IsValidTimestamp("2024-W52-2"),                "week date");
-static_assert(fdf::detail::IsValidTimestamp("2020-W53-7"),                "valid week 53");
-static_assert(fdf::detail::IsValidTimestamp("2024-W52-2T15:30:00Z"),      "week date + time");
-static_assert(fdf::detail::IsValidTimestamp("2015-W53-7T23:59:59+05:30"), "week 53 + time + offset");
 static_assert(fdf::detail::IsValidTimestamp("15:30:00"),                  "time only");
+static_assert(fdf::detail::IsValidTimestamp("15:30:00.123456789"),        "time fraction");
 static_assert(fdf::detail::IsValidTimestamp("2024-12-24T15:30:00"),       "date + time");
+static_assert(fdf::detail::IsValidTimestamp("2024-12-24t15:30:00z"),      "lowercase date + time");
 static_assert(fdf::detail::IsValidTimestamp("2024-12-24T15:30:00Z"),      "utc");
 static_assert(fdf::detail::IsValidTimestamp("2024-12-24T15:30:00.123Z"),  "fractional + utc");
 static_assert(fdf::detail::IsValidTimestamp("2024-12-24T15:30:00+05:30"), "offset");
-static_assert(fdf::detail::IsValidTimestamp("15:30:00-05:00"),            "time only + offset");
+static_assert(fdf::detail::IsValidTimestamp("2024-12-31T23:59:60Z"),      "leap second");
 static_assert(!fdf::detail::IsValidTimestamp(""),                         "empty");
 static_assert(!fdf::detail::IsValidTimestamp("2024-13-01"),               "month 13");
 static_assert(!fdf::detail::IsValidTimestamp("2024-00-10"),               "month 00");
 static_assert(!fdf::detail::IsValidTimestamp("2024-12-32"),               "day 32");
 static_assert(!fdf::detail::IsValidTimestamp("2023-02-29"),               "non-leap feb 29");
-static_assert(!fdf::detail::IsValidTimestamp("2024-367"),                 "ordinal 367");
-static_assert(!fdf::detail::IsValidTimestamp("2024-W54-1"),               "week 54");
-static_assert(!fdf::detail::IsValidTimestamp("2021-W53-1"),               "invalid week 53 for year");
-static_assert(!fdf::detail::IsValidTimestamp("2014-W53-1"),               "another invalid week 53 year");
-static_assert(!fdf::detail::IsValidTimestamp("2024-W52-8"),               "weekday 8");
+static_assert(!fdf::detail::IsValidTimestamp("2024-359"),                 "ordinal rejected");
+static_assert(!fdf::detail::IsValidTimestamp("2024-W52-2"),               "week date rejected");
 static_assert(!fdf::detail::IsValidTimestamp("25:00:00"),                 "hour 25");
 static_assert(!fdf::detail::IsValidTimestamp("15:60:00"),                 "minute 60");
 static_assert(!fdf::detail::IsValidTimestamp("15:30:99"),                 "second 99");
+static_assert(!fdf::detail::IsValidTimestamp("15:30:00Z"),                "time-only zone rejected");
+static_assert(!fdf::detail::IsValidTimestamp("15:30:00.1234567890"),      "ten fraction digits");
 static_assert(!fdf::detail::IsValidTimestamp("2024-12-24T15:30:00+25:00"),"offset hour 25");
-static_assert(fdf::Timestamp::FromText("2020-W01-1").year == 2019,        "week 1 crosses calendar year");
-static_assert(fdf::Timestamp::FromText("2020-W53-7").year == 2021,        "week 53 crosses calendar year");
+static_assert(sizeof(fdf::Timestamp) == 16,                               "timestamp layout");
+static_assert(alignof(fdf::Timestamp) == 4,                               "timestamp alignment");
 
 // ----- Strict UTF-8 validation (all escaped so the test file's own encoding can't skew it) -----
 static_assert( fdf::detail::IsValidUtf8(""),                     "empty");
@@ -3416,17 +3854,17 @@ static_assert(!fdf::detail::IsValidUtf8("\xE2\x82"),            "truncated 3-byt
 static_assert(!fdf::detail::IsValidUtf8("\xC2\x20"),            "bad continuation");
 static_assert(fdf::detail::Utf8FirstInvalidByte("ok\xFF") == 2, "reports first bad offset");
 
-// ----- Timestamp struct: decode, epoch conversion, normalization (all consteval) -----
+// ----- Timestamp struct: decode and epoch conversion (all consteval) -----
 static_assert(fdf::Timestamp::FromText("1970-01-01T00:00:00Z").ToUnixSeconds() == 0,             "epoch zero");
 static_assert(fdf::Timestamp::FromText("2001-09-09T01:46:40Z").ToUnixSeconds() == 1'000'000'000, "famous epoch");
 static_assert(fdf::Timestamp::FromUnixSeconds(1'700'000'000).ToUnixSeconds() == 1'700'000'000,   "epoch round-trip");
 static_assert(fdf::Timestamp::FromUnixSeconds(-86400).ToUnixSeconds() == -86400,                  "pre-1970 round-trip");
-static_assert(fdf::Timestamp::FromText("2024-359").month == 12 && fdf::Timestamp::FromText("2024-359").day == 24,   "ordinal -> calendar");
-static_assert(fdf::Timestamp::FromText("2024-W52-2").month == 12 && fdf::Timestamp::FromText("2024-W52-2").day == 24, "week -> calendar");
 static_assert(fdf::Timestamp::FromText("15:30:00.5").nanosecond == 500'000'000,                   "fractional scaled to nanos");
 static_assert(!fdf::Timestamp::FromText("2024-13-01").IsValid(),                                  "invalid month -> not valid");
 static_assert(fdf::Timestamp::FromText("2024-01-01T12:00:00+05:00").ToUnixSeconds()
             == fdf::Timestamp::FromText("2024-01-01T07:00:00Z").ToUnixSeconds(),                   "offset normalizes to UTC");
+static_assert(fdf::Timestamp::FromText("2024-12-31T23:59:60Z").ToUnixSeconds()
+            == fdf::Timestamp::FromText("2025-01-01T00:00:00Z").ToUnixSeconds(),                   "leap second advances");
 
 // Inject a Timestamp into an entry and read it back at compile time
 consteval bool TimestampInjectProbe()
@@ -3436,12 +3874,72 @@ consteval bool TimestampInjectProbe()
     if(!e)
         return false;
     e->SetValue(fdf::Timestamp::FromUnixSeconds(1'000'000'000));
-    if(e->GetType() != fdf::Type::Timestamp || FirstString(*e) != "2001-09-09T01:46:40Z")
+    if(e->GetType() != fdf::Type::Timestamp)
         return false;
-    fdf::Timestamp got = e->GetValue<fdf::Timestamp>();
-    return got.IsValid() && got.year == 2001 && got.month == 9 && got.day == 9 && got.ToUnixSeconds() == 1'000'000'000;
+    const std::span<const fdf::Timestamp> got = std::as_const(*e).GetValue<fdf::Timestamp>();
+    const fdf::String out = fdf::WriteBuffer<fdf::Style{ .bCommas = false }>(*root);
+    return got.size() == 1 && got[0].IsValid() && got[0].year == 2001 && got[0].month == 9
+        && got[0].day == 9 && got[0].ToUnixSeconds() == 1'000'000'000
+        && out == "t=2001-09-09T01:46:40Z\n";
 }
 static_assert(TimestampInjectProbe(), "consteval timestamp inject + read back");
+
+consteval bool DurationTextProbe()
+{
+    bool bValid = false;
+    const fdf::Duration duration = fdf::Duration::FromText("-1.5h", bValid);
+    if(!bValid || duration != fdf::Duration::Minutes(-90))
+        return false;
+    fdf::String output;
+    duration.AppendTo(output);
+    return output == "-1h30m";
+}
+static_assert(DurationTextProbe(), "consteval duration FromText + AppendTo");
+
+consteval bool DurationStorageProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("d=1h30m|500ms\n");
+    if(!root)
+        return false;
+    fdf::Entry* entry = root->GetDirectChild("d");
+    if(!entry || entry->GetType() != fdf::Type::Duration || !entry->GetValue<fdf::String>().empty())
+        return false;
+
+    std::span<fdf::Duration> values = entry->GetValue<fdf::Duration>();
+    if(values.size() != 2 || values[0] != fdf::Duration::Minutes(90)
+        || values[1] != fdf::Duration::Millis(500))
+        return false;
+    values[1] = fdf::Duration::Seconds(2);
+
+    const fdf::Duration injected[] =
+    {
+        fdf::Duration::Days(1),
+        fdf::Duration::Hours(12)
+    };
+    fdf::Entry* second = root->Emplace("e");
+    if(!second)
+        return false;
+    second->SetValue(std::span<const fdf::Duration>(injected));
+
+    return fdf::WriteBuffer<fdf::Style{ .bCommas = false }>(*root)
+        == "d=1h30m|2s\ne=1d|12h\n";
+}
+static_assert(DurationStorageProbe(), "consteval duration parse + typed storage + write");
+
+consteval bool DurationArithmeticProbe()
+{
+    const fdf::Duration duration = (fdf::Duration::Hours(2) - fdf::Duration::Minutes(30)) * 2;
+    if(duration != fdf::Duration::Hours(3) || duration.TotalMinutes() != 180)
+        return false;
+
+    const fdf::Timestamp base = fdf::Timestamp::FromUnixSeconds(1'000);
+    const fdf::Timestamp later = base + fdf::Duration::Seconds(25);
+    const fdf::Timestamp earlier = later - fdf::Duration::Minutes(1);
+    return later.ToUnixSeconds() == 1'025
+        && earlier.ToUnixSeconds() == 965
+        && later - base == fdf::Duration::Seconds(25);
+}
+static_assert(DurationArithmeticProbe(), "consteval duration and timestamp arithmetic");
 
 static_assert(ExtractValue<int64_t>("value = 25|50") == 25, "consteval multidim int parse");
 static_assert(ExtractValue<bool>("value = true|false|true") == true, "consteval multidim bool parse");
@@ -3504,9 +4002,11 @@ consteval bool HexTimestampPackProbe()
     if(!h || h->GetType() != fdf::Type::Hex || !t || t->GetType() != fdf::Type::Timestamp)
         return false;
     const std::span<const fdf::Hex> hp = h->GetValue<fdf::Hex>();
-    const std::span<const fdf::String> tp = t->GetValue<fdf::String>();
+    const std::span<const fdf::Timestamp> tp = t->GetValue<fdf::Timestamp>();
     return hp.size() == 2 && HexEquals<uint8_t>(hp[0], 0xFF) && HexEquals<uint8_t>(hp[1], 0xAA)
-        && tp.size() == 2 && tp[0] == "2024-12-24" && tp[1] == "15:30:00";
+        && tp.size() == 2
+        && tp[0].bHasDate && !tp[0].bHasTime && tp[0].year == 2024 && tp[0].month == 12 && tp[0].day == 24
+        && !tp[1].bHasDate && tp[1].bHasTime && tp[1].hour == 15 && tp[1].minute == 30;
 }
 static_assert(HexTimestampPackProbe(), "consteval hex/timestamp pack parse");
 
@@ -3592,15 +4092,21 @@ consteval bool StringSelfAliasProbe()
 }
 static_assert(StringSelfAliasProbe(), "consteval String self-aliasing edits");
 
-consteval bool TimestampStringViewProbe()
+consteval bool TimestampStorageProbe()
 {
-    fdf::UniqueEntryPtr root = fdf::ParseBuffer("t = 2024-12-24T15:30:00\n");
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("t = 2024-12-24t15:30:00.123z\n");
     if(!root)
         return false;
     const fdf::Entry* t = root->GetDirectChild("t");
-    return t && t->GetType() == fdf::Type::Timestamp && FirstString(*t) == "2024-12-24T15:30:00";
+    if(!t || t->GetType() != fdf::Type::Timestamp || !t->GetValue<fdf::String>().empty())
+        return false;
+    const std::span<const fdf::Timestamp> values = t->GetValue<fdf::Timestamp>();
+    if(values.size() != 1 || values[0].fracDigits != 3 || values[0].nanosecond != 123'000'000)
+        return false;
+    return fdf::WriteBuffer<fdf::Style{ .bCommas = false }>(*root)
+        == "t=2024-12-24T15:30:00.123Z\n";
 }
-static_assert(TimestampStringViewProbe(), "consteval timestamp String[1] round-trip");
+static_assert(TimestampStorageProbe(), "consteval timestamp parse + typed storage + write");
 
 consteval bool HexStorageProbe()
 {
@@ -3804,7 +4310,12 @@ consteval bool TimestampProbe()
 {
     fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 2024-12-24T15:30:00Z\n");
     const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
-    return e && e->GetType() == fdf::Type::Timestamp && FirstString(*e) == "2024-12-24T15:30:00Z";
+    if(!e || e->GetType() != fdf::Type::Timestamp)
+        return false;
+    const std::span<const fdf::Timestamp> value = e->GetValue<fdf::Timestamp>();
+    return value.size() == 1 && value[0].year == 2024 && value[0].month == 12
+        && value[0].day == 24 && value[0].hour == 15 && value[0].minute == 30
+        && value[0].tzKind == fdf::Timestamp::TzKind::Utc;
 }
 
 static_assert(IntProbe(),       "consteval int parse");
@@ -4259,6 +4770,7 @@ int main(int argc, char** argv)
     RunCase("StringApiTest",       Test::StringApiTest);
     RunCase("FloatRoundTripTest",  Test::FloatRoundTripTest);
     RunCase("TimestampTest",       Test::TimestampTest);
+    RunCase("DurationTest",        Test::DurationTest);
     RunCase("AllocatorTest",       Test::AllocatorTest);
     RunCase("RoundTripTest",       Test::RoundTripTest);
 #if !FDF_NO_COMMENTS

@@ -18,6 +18,7 @@ and keep diffs small. Use a designated initializer to change individual fields, 
 | `bTopLevelCommas` | `false` | comma-terminate top-level entries |
 | `bGroupSimilarTypes` | `false` | off keeps source order, on groups by type |
 | `bUppercaseHex` | `true` | `0xFF` vs `0xff` |
+| `bUppercaseTimestamp` | `true` | `T`/`Z` vs `t`/`z` |
 | `bUseNilInsteadOfNull` | `false` | emit `nil` instead of `null` |
 | `bAlwaysUseDoubleQuoteForStrings` | `false` | force `"` quoting |
 

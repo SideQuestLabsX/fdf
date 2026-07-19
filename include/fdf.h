@@ -37,6 +37,7 @@
     #include <cassert>
     #include <cctype>
     #include <charconv>
+    #include <compare>
     #include <cstddef>
     #include <cstdint>
     #include <filesystem>
@@ -87,7 +88,8 @@ FDF_EXPORT namespace fdf
         String,
         Hex,
         Version,
-        Timestamp
+        Timestamp,
+        Duration
     };
 
 
@@ -115,6 +117,7 @@ FDF_EXPORT namespace fdf
         // General
         bool bGroupSimilarTypes = false;  // off = preserve source order (stable diffs); on = group by type
         bool bUppercaseHex = true;
+        bool bUppercaseTimestamp = true;
         bool bUseNilInsteadOfNull = false;
         bool bAlwaysUseDoubleQuoteForStrings = false;
     };
@@ -155,6 +158,7 @@ FDF_EXPORT namespace fdf
         InvalidToken,        // generic lexer failure with no more specific reason
         InvalidUtf8,         // non-fatal, bytes still pass through
         InputTooLarge,       // buffer would overflow the 32-bit offsets, refused before parsing
+        InvalidDuration,
     };
 
     // Passed to a DIAGNOSTIC_CALLBACK for every issue found while parsing
@@ -645,31 +649,47 @@ FDF_EXPORT namespace fdf
     }
 
 
-    // Decoded view of an ISO-8601 timestamp. Transient: a Timestamp entry stores the raw text
-    // (lossless round-trip), and GetValue<Timestamp>() parses that text into this struct on demand
-    // Ordinal (YYYY-DDD) and ISO week (YYYY-Www-D) dates are normalized to calendar year/month/day,
-    // with dateKind remembering the original spelling. Sub-second precision is capped at nanoseconds
+    // RFC 3339 timestamp profile
     struct Timestamp
     {
-        enum class TzKind   : uint8_t { None, Utc, Offset };
-        enum class DateKind : uint8_t { Calendar, Ordinal, Week };
+        // RFC 3339 §4.3: -00:00 is UTC with an unknown local offset
+        enum class TzKind : uint8_t { None, Utc, Offset, UnknownOffset };
 
         uint16_t year        = 0;   // 0-9999
         uint8_t  month       = 0;   // 1-12
         uint8_t  day         = 0;   // 1-31
         uint8_t  hour        = 0;   // 0-23
         uint8_t  minute      = 0;   // 0-59
-        uint8_t  second      = 0;   // 0-60
+        uint8_t  second      = 0;   // 0-60, 60 is a leap second
         uint8_t  fracDigits  = 0;   // sub-second digits as written, 0-9
         uint32_t nanosecond  = 0;   // 0-999'999'999
         int16_t  tzOffsetMin = 0;   // signed minutes from UTC (Offset kind only)
-        TzKind   tzKind      = TzKind::None;
-        DateKind dateKind    = DateKind::Calendar;
-        bool     bHasDate    = false;
-        bool     bHasTime    = false;
-        bool     bValid      = false;
+        TzKind   tzKind      : 2 = TzKind::None;
+        bool     bHasDate    : 1 = false;
+        bool     bHasTime    : 1 = false;
+        bool     bValid      : 1 = false;
 
-        [[nodiscard]] constexpr bool IsValid() const noexcept  { return bValid; }
+        // mutable fields make bValid a claim, so validate the full structure
+        [[nodiscard]] constexpr bool IsValid() const noexcept
+        {
+            if(!bValid || (!bHasDate && !bHasTime))
+                return false;
+            if(bHasDate? (year > 9999 || month < 1 || month > 12 || day < 1 || day > DaysInMonth(year, month))
+                       : (year != 0 || month != 0 || day != 0))
+                return false;
+            if(bHasTime? (hour > 23 || minute > 59 || second > 60 || nanosecond > 999'999'999 || fracDigits > 9)
+                       : (hour != 0 || minute != 0 || second != 0 || nanosecond != 0 || fracDigits != 0))
+                return false;
+            // RFC 3339 profile forbids zones on time-only values
+            if(tzKind != TzKind::None && !bHasDate)
+                return false;
+            return tzKind == TzKind::Offset? (tzOffsetMin >= -1439 && tzOffsetMin <= 1439) : tzOffsetMin == 0;
+        }
+        constexpr bool operator==(const Timestamp&) const noexcept = default;
+
+        // inclusive bounds for years 0-9999
+        [[nodiscard]] static constexpr int64_t MinUnixSecond() noexcept  { return DaysFromCivil(0, 1, 1) * 86400; }
+        [[nodiscard]] static constexpr int64_t MaxUnixSecond() noexcept  { return DaysFromCivil(9999, 12, 31) * 86400 + 86399; }
 
         // --- Extract ---------------------------------------------------------------------------
         // Seconds since the Unix epoch (UTC). A None/Utc zone is treated as UTC; an Offset is
@@ -683,7 +703,29 @@ FDF_EXPORT namespace fdf
             return secs;
         }
         [[nodiscard]] constexpr int64_t ToUnixMillis() const noexcept  { return ToUnixSeconds() * 1'000LL + nanosecond / 1'000'000; }
-        [[nodiscard]] constexpr int64_t ToUnixNanos()  const noexcept  { return ToUnixSeconds() * 1'000'000'000LL + nanosecond; }
+        // int64 nanoseconds end around year 2262, clamp outside that range
+        [[nodiscard]] constexpr int64_t ToUnixNanos()  const noexcept  { return SaturatingNanos(ToUnixSeconds(), nanosecond); }
+
+        // nanos must be in [0, 1e9), floor bounds preserve the negative boundary second
+        [[nodiscard]] static constexpr int64_t SaturatingNanos(const int64_t seconds, const int64_t nanos) noexcept
+        {
+            constexpr int64_t NS      = 1'000'000'000;
+            constexpr int64_t MAX     = std::numeric_limits<int64_t>::max();
+            constexpr int64_t MIN     = std::numeric_limits<int64_t>::min();
+            constexpr int64_t MAX_SEC = MAX / NS;
+            constexpr int64_t MAX_REM = MAX % NS;
+            constexpr int64_t MIN_SEC = -MAX_SEC - 1;
+            constexpr int64_t MIN_REM = NS - MAX_REM - 1;
+
+            if(seconds > MAX_SEC || (seconds == MAX_SEC && nanos > MAX_REM))
+                return MAX;
+            if(seconds < MIN_SEC || (seconds == MIN_SEC && nanos < MIN_REM))
+                return MIN;
+            // avoid overflowing MIN_SEC * NS
+            if(seconds == MIN_SEC)
+                return MIN + (nanos - MIN_REM);
+            return seconds * NS + nanos;
+        }
 
         // --- Inject ----------------------------------------------------------------------------
         [[nodiscard]] static constexpr Timestamp Date(uint16_t y, uint8_t mo, uint8_t d) noexcept
@@ -709,6 +751,10 @@ FDF_EXPORT namespace fdf
         }
         [[nodiscard]] static constexpr Timestamp FromUnixSeconds(int64_t s) noexcept
         {
+            // CivilFromDays stores the year in uint16_t
+            if(s < MinUnixSecond() || s > MaxUnixSecond())
+                return Timestamp{};
+
             const int64_t days = FloorDiv(s, 86400);
             const int64_t rem  = s - days * 86400;
             Timestamp t;
@@ -722,20 +768,34 @@ FDF_EXPORT namespace fdf
         }
         [[nodiscard]] static constexpr Timestamp FromUnixNanos(int64_t ns) noexcept
         {
-            const int64_t s = FloorDiv(ns, 1'000'000'000);
-            Timestamp t = FromUnixSeconds(s);
-            t.nanosecond = static_cast<uint32_t>(ns - s * 1'000'000'000);
+            Timestamp t = FromUnixSeconds(FloorDiv(ns, 1'000'000'000));
+            if(!t.bValid)
+                return t;
+            // subtraction form overflows at INT64_MIN
+            const int64_t rem = ns % 1'000'000'000;
+            t.nanosecond = static_cast<uint32_t>(rem < 0? rem + 1'000'000'000 : rem);
             t.fracDigits = 9;
             return t;
         }
 
         // --- Parse / serialize -----------------------------------------------------------------
         [[nodiscard]] static constexpr Timestamp FromText(std::string_view ts) noexcept;
-        constexpr void AppendTo(String& out) const noexcept;
+        constexpr void AppendTo(String& out, bool bUppercase = true) const noexcept;
 
     private:
         [[nodiscard]] static constexpr bool IsLeap(int y) noexcept  { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
-        [[nodiscard]] static constexpr int64_t FloorDiv(int64_t a, int64_t b) noexcept  { return a >= 0? a / b : -((-a + b - 1) / b); }
+        // callers must range-check the month first
+        [[nodiscard]] static constexpr uint8_t DaysInMonth(uint16_t y, uint8_t m) noexcept
+        {
+            constexpr uint8_t DAYS[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+            return m == 2 && IsLeap(y)? uint8_t{ 29 } : DAYS[m - 1];
+        }
+        // avoid negating INT64_MIN, callers pass a positive divisor
+        [[nodiscard]] static constexpr int64_t FloorDiv(int64_t a, int64_t b) noexcept
+        {
+            const int64_t q = a / b;
+            return a % b != 0 && (a < 0) != (b < 0)? q - 1 : q;
+        }
 
         // Howard Hinnant's civil <-> days-since-1970 algorithms (constexpr, no library calls)
         [[nodiscard]] static constexpr int64_t DaysFromCivil(int32_t y, uint32_t m, uint32_t d) noexcept
@@ -772,6 +832,9 @@ FDF_EXPORT namespace fdf
                 out.push_back(buf[--n]);
         }
     };
+    static_assert(sizeof(Timestamp) == 16);
+    static_assert(alignof(Timestamp) == alignof(uint32_t));
+    static_assert(std::is_trivially_copyable_v<Timestamp>);
 
 
     // parses and validates in one pass
@@ -800,70 +863,24 @@ FDF_EXPORT namespace fdf
 
         size_t pos = 0;
 
-        if(ts.size() >= 5 && digitsAt(0, 4) && ts[4] == '-')
+        if(ts.size() >= 10 && digitsAt(0, 4) && ts[4] == '-'
+            && digitsAt(5, 2) && ts[7] == '-' && digitsAt(8, 2))
         {
             t.year = static_cast<uint16_t>(num(0, 4));
+            const int month = num(5, 2);
+            const int day   = num(8, 2);
+            if(month < 1 || month > 12)
+                return t;
+            if(day < 1 || day > DaysInMonth(t.year, static_cast<uint8_t>(month)))
+                return t;
+
+            t.month = static_cast<uint8_t>(month);
+            t.day = static_cast<uint8_t>(day);
             t.bHasDate = true;
-            pos = 5;
-
-            if(pos < ts.size() && ts[pos] == 'W')
-            {
-                if(!(digitsAt(pos + 1, 2) && pos + 3 < ts.size() && ts[pos + 3] == '-' &&
-                     digitsAt(pos + 4, 1)))
-                    return t;
-                const int week    = num(pos + 1, 2);
-                const int weekday  = num(pos + 4, 1);
-                if(week < 1 || week > 53 || weekday < 1 || weekday > 7)
-                    return t;
-
-                const int64_t jan1 = DaysFromCivil(t.year, 1, 1);
-                const int jan1Mon0 = static_cast<int>(((jan1 % 7) + 7 + 3) % 7);
-                if(week == 53 && jan1Mon0 != 3 && !(jan1Mon0 == 2 && IsLeap(t.year)))
-                    return t;
-
-                // ISO week date -> the Monday of week 1 is the Monday on/before Jan 4
-                const int64_t jan4 = DaysFromCivil(t.year, 1, 4);
-                const int     jan4Mon0 = static_cast<int>(((jan4 % 7) + 7 + 3) % 7);
-                CivilFromDays(jan4 - jan4Mon0 + int64_t(week - 1) * 7 + (weekday - 1), t.year, t.month, t.day);
-                t.dateKind = DateKind::Week;
-                pos += 5;
-            }
-            else
-            {
-                if(!digitsAt(pos, 2))
-                    return t;
-
-                if(pos + 2 < ts.size() && ts[pos + 2] == '-')
-                {
-                    if(!digitsAt(pos + 3, 2))
-                        return t;
-                    const int month = num(pos, 2);
-                    const int day   = num(pos + 3, 2);
-                    constexpr int DAYS_IN_MONTH[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-                    if(month < 1 || month > 12)
-                        return t;
-                    const int maxDay = (month == 2 && IsLeap(t.year))? 29 : DAYS_IN_MONTH[month - 1];
-                    if(day < 1 || day > maxDay)
-                        return t;
-                    t.month = static_cast<uint8_t>(month);
-                    t.day   = static_cast<uint8_t>(day);
-                    pos += 5;
-                }
-                else if(pos + 2 < ts.size() && digit(ts[pos + 2]))
-                {
-                    const int ordinal = num(pos, 3);
-                    if(ordinal < 1 || ordinal > (IsLeap(t.year)? 366 : 365))
-                        return t;
-                    CivilFromDays(DaysFromCivil(t.year, 1, 1) + (ordinal - 1), t.year, t.month, t.day);
-                    t.dateKind = DateKind::Ordinal;
-                    pos += 3;
-                }
-                else
-                    return t;
-            }
+            pos = 10;
 
             if(pos == ts.size()) { t.bValid = true; return t; }
-            if(ts[pos] != 'T') return t;
+            if(ts[pos] != 'T' && ts[pos] != 't') return t;
             pos++;
         }
         else if(!digitsAt(0, 2))
@@ -874,7 +891,7 @@ FDF_EXPORT namespace fdf
            !digitsAt(pos + 3, 2) || pos + 5 >= ts.size() || ts[pos + 5] != ':' ||
            !digitsAt(pos + 6, 2))
             return t;
-        if(num(pos, 2) > 23 || num(pos + 3, 2) > 59 || num(pos + 6, 2) > 59)
+        if(num(pos, 2) > 23 || num(pos + 3, 2) > 59 || num(pos + 6, 2) > 60)
             return t;
         t.hour    = static_cast<uint8_t>(num(pos, 2));
         t.minute  = static_cast<uint8_t>(num(pos + 3, 2));
@@ -884,7 +901,7 @@ FDF_EXPORT namespace fdf
 
         if(pos == ts.size()) { t.bValid = true; return t; }
 
-        // Optional fractional seconds (kept to nanosecond precision; extra digits are validated but dropped)
+        // Optional fractional seconds
         if(ts[pos] == '.')
         {
             pos++;
@@ -893,11 +910,10 @@ FDF_EXPORT namespace fdf
             uint64_t frac = 0;
             while(pos < ts.size() && digit(ts[pos]))
             {
-                if(t.fracDigits < 9)
-                {
-                    frac = frac * 10 + static_cast<uint64_t>(ts[pos] - '0');
-                    t.fracDigits++;
-                }
+                if(t.fracDigits == 9)
+                    return t;
+                frac = frac * 10 + static_cast<uint64_t>(ts[pos] - '0');
+                t.fracDigits++;
                 pos++;
             }
             for(uint8_t i = t.fracDigits; i < 9; i++)
@@ -907,7 +923,9 @@ FDF_EXPORT namespace fdf
         }
 
         // Timezone
-        if(ts[pos] == 'Z')
+        if(!t.bHasDate)
+            return t;
+        if(ts[pos] == 'Z' || ts[pos] == 'z')
         {
             if(pos + 1 != ts.size()) return t;
             t.tzKind = TzKind::Utc;
@@ -925,13 +943,299 @@ FDF_EXPORT namespace fdf
             const int offMin  = num(pos + 3, 2);
             if(offHour > 23 || offMin > 59)
                 return t;
-            t.tzKind = TzKind::Offset;
-            t.tzOffsetMin = static_cast<int16_t>((bNeg? -1 : 1) * (offHour * 60 + offMin));
+            const int total = offHour * 60 + offMin;
+            t.tzKind = bNeg && total == 0? TzKind::UnknownOffset : TzKind::Offset;
+            t.tzOffsetMin = static_cast<int16_t>(bNeg? -total : total);
             t.bValid = true;
             return t;
         }
 
         return t;
+    }
+
+
+    struct Duration
+    {
+        int64_t nanoseconds = 0;
+
+        [[nodiscard]] static constexpr Duration Weeks(const int64_t value) noexcept   { return { value * 604'800'000'000'000LL }; }
+        [[nodiscard]] static constexpr Duration Days(const int64_t value) noexcept    { return { value * 86'400'000'000'000LL }; }
+        [[nodiscard]] static constexpr Duration Hours(const int64_t value) noexcept   { return { value * 3'600'000'000'000LL }; }
+        [[nodiscard]] static constexpr Duration Minutes(const int64_t value) noexcept { return { value * 60'000'000'000LL }; }
+        [[nodiscard]] static constexpr Duration Seconds(const int64_t value) noexcept { return { value * 1'000'000'000LL }; }
+        [[nodiscard]] static constexpr Duration Millis(const int64_t value) noexcept  { return { value * 1'000'000LL }; }
+        [[nodiscard]] static constexpr Duration Micros(const int64_t value) noexcept  { return { value * 1'000LL }; }
+        [[nodiscard]] static constexpr Duration Nanos(const int64_t value) noexcept   { return { value }; }
+
+        [[nodiscard]] constexpr int64_t TotalNanos() const noexcept   { return nanoseconds; }
+        [[nodiscard]] constexpr int64_t TotalMicros() const noexcept  { return nanoseconds / 1'000LL; }
+        [[nodiscard]] constexpr int64_t TotalMillis() const noexcept  { return nanoseconds / 1'000'000LL; }
+        [[nodiscard]] constexpr int64_t TotalSeconds() const noexcept { return nanoseconds / 1'000'000'000LL; }
+        [[nodiscard]] constexpr int64_t TotalMinutes() const noexcept { return nanoseconds / 60'000'000'000LL; }
+        [[nodiscard]] constexpr int64_t TotalHours() const noexcept   { return nanoseconds / 3'600'000'000'000LL; }
+        [[nodiscard]] constexpr int64_t TotalDays() const noexcept    { return nanoseconds / 86'400'000'000'000LL; }
+        [[nodiscard]] constexpr int64_t TotalWeeks() const noexcept   { return nanoseconds / 604'800'000'000'000LL; }
+
+        constexpr bool operator==(const Duration&) const noexcept = default;
+        constexpr auto operator<=>(const Duration&) const noexcept = default;
+
+        [[nodiscard]] constexpr Duration operator+(const Duration other) const noexcept { return { nanoseconds + other.nanoseconds }; }
+        [[nodiscard]] constexpr Duration operator-(const Duration other) const noexcept { return { nanoseconds - other.nanoseconds }; }
+        [[nodiscard]] constexpr Duration operator-() const noexcept                     { return { -nanoseconds }; }
+        [[nodiscard]] constexpr Duration operator*(const int64_t scalar) const noexcept  { return { nanoseconds * scalar }; }
+
+        [[nodiscard]] static constexpr Duration FromText(std::string_view text, bool& bValidOut) noexcept
+        {
+            bValidOut = false;
+            if(text.empty())
+                return {};
+
+            auto digit = [](const char c) noexcept { return c >= '0' && c <= '9'; };
+
+            const bool bNegative = text[0] == '-';
+            size_t pos = bNegative? 1 : 0;
+            if(pos == text.size())
+                return {};
+
+            struct Group
+            {
+                std::string_view integer;
+                std::string_view fraction;
+                uint64_t unitNanos;
+            };
+            Group groups[8];
+            uint8_t groupCount = 0;
+            int previousUnit = -1;
+
+            while(pos < text.size())
+            {
+                const size_t integerBegin = pos;
+                while(pos < text.size() && digit(text[pos]))
+                    pos++;
+                if(pos == integerBegin)
+                    return {};
+
+                const std::string_view integer = text.substr(integerBegin, pos - integerBegin);
+                std::string_view fraction;
+                if(pos < text.size() && text[pos] == '.')
+                {
+                    const size_t fractionBegin = ++pos;
+                    while(pos < text.size() && digit(text[pos]))
+                        pos++;
+                    if(pos == fractionBegin)
+                        return {};
+                    fraction = text.substr(fractionBegin, pos - fractionBegin);
+                    while(!fraction.empty() && fraction.back() == '0')
+                        fraction.remove_suffix(1);
+                }
+
+                int unit = -1;
+                uint64_t unitNanos = 0;
+                const std::string_view remaining = text.substr(pos);
+                if(remaining.starts_with("ms"))
+                {
+                    unit = 5;
+                    unitNanos = 1'000'000ULL;
+                    pos += 2;
+                }
+                else if(remaining.starts_with("us"))
+                {
+                    unit = 6;
+                    unitNanos = 1'000ULL;
+                    pos += 2;
+                }
+                else if(remaining.starts_with("ns"))
+                {
+                    unit = 7;
+                    unitNanos = 1ULL;
+                    pos += 2;
+                }
+                else if(pos < text.size())
+                {
+                    switch(text[pos])
+                    {
+                        case 'w': unit = 0; unitNanos = 604'800'000'000'000ULL; break;
+                        case 'd': unit = 1; unitNanos = 86'400'000'000'000ULL; break;
+                        case 'h': unit = 2; unitNanos = 3'600'000'000'000ULL; break;
+                        case 'm': unit = 3; unitNanos = 60'000'000'000ULL; break;
+                        case 's': unit = 4; unitNanos = 1'000'000'000ULL; break;
+                        default: return {};
+                    }
+                    pos++;
+                }
+                else
+                    return {};
+
+                if(unit <= previousUnit || groupCount == 8)
+                    return {};
+                previousUnit = unit;
+                groups[groupCount++] = { integer, fraction, unitNanos };
+            }
+
+            if(groupCount == 0)
+                return {};
+
+            const uint64_t limit = bNegative
+                ? static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + 1ULL
+                : static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+            uint64_t magnitude = 0;
+
+            for(uint8_t groupIndex = 0; groupIndex < groupCount; groupIndex++)
+            {
+                const Group& group = groups[groupIndex];
+                const uint64_t available = (limit - magnitude) / group.unitNanos;
+                uint64_t value = 0;
+                for(const char c : group.integer)
+                {
+                    const uint64_t d = static_cast<uint64_t>(c - '0');
+                    if(value > available / 10 || (value == available / 10 && d > available % 10))
+                        return {};
+                    value = value * 10 + d;
+                }
+                magnitude += value * group.unitNanos;
+            }
+
+            size_t maxFractionDigits = 0;
+            for(uint8_t groupIndex = 0; groupIndex < groupCount; groupIndex++)
+                maxFractionDigits = std::max(maxFractionDigits, groups[groupIndex].fraction.size());
+
+            if(maxFractionDigits != 0)
+            {
+                uint64_t carry = 0;
+                uint64_t fractionalWhole = 0;
+                uint64_t place = 1;
+                const size_t columnCount = maxFractionDigits + 15;
+
+                for(size_t column = 0; column < columnCount; column++)
+                {
+                    uint64_t columnValue = carry;
+                    for(uint8_t groupIndex = 0; groupIndex < groupCount; groupIndex++)
+                    {
+                        const Group& group = groups[groupIndex];
+                        if(group.fraction.empty())
+                            continue;
+
+                        const size_t shift = maxFractionDigits - group.fraction.size();
+                        if(column < shift)
+                            continue;
+
+                        const size_t productColumn = column - shift;
+                        uint64_t unit = group.unitNanos;
+                        for(size_t unitDigitIndex = 0; unit != 0; unitDigitIndex++)
+                        {
+                            if(productColumn >= unitDigitIndex)
+                            {
+                                const size_t fractionLeastIndex = productColumn - unitDigitIndex;
+                                if(fractionLeastIndex < group.fraction.size())
+                                {
+                                    const uint64_t fractionDigit = static_cast<uint64_t>(
+                                        group.fraction[group.fraction.size() - 1 - fractionLeastIndex] - '0');
+                                    columnValue += fractionDigit * (unit % 10);
+                                }
+                            }
+                            unit /= 10;
+                        }
+                    }
+
+                    const uint64_t outputDigit = columnValue % 10;
+                    carry = columnValue / 10;
+                    if(column < maxFractionDigits)
+                    {
+                        if(outputDigit != 0)
+                            return {};
+                    }
+                    else
+                    {
+                        fractionalWhole += outputDigit * place;
+                        if(column + 1 < columnCount)
+                            place *= 10;
+                    }
+                }
+
+                if(carry != 0 || fractionalWhole > limit - magnitude)
+                    return {};
+                magnitude += fractionalWhole;
+            }
+
+            Duration result;
+            if(!bNegative)
+                result.nanoseconds = static_cast<int64_t>(magnitude);
+            else if(magnitude == limit)
+                result.nanoseconds = std::numeric_limits<int64_t>::min();
+            else
+                result.nanoseconds = -static_cast<int64_t>(magnitude);
+
+            bValidOut = true;
+            return result;
+        }
+
+        constexpr void AppendTo(String& out) const noexcept;
+    };
+    static_assert(sizeof(Duration) == 8);
+    static_assert(alignof(Duration) == 8);
+    static_assert(std::is_trivially_copyable_v<Duration>);
+
+    namespace detail
+    {
+        // split into seconds because valid timestamps outlive int64 nanoseconds
+        [[nodiscard]] constexpr Timestamp ShiftTimestamp(const Timestamp& timestamp, const int64_t deltaNanos, const bool bNegate) noexcept
+        {
+            if(!timestamp.IsValid())
+                return Timestamp{};
+
+            int64_t seconds = deltaNanos / 1'000'000'000;
+            int64_t nanos   = deltaNanos % 1'000'000'000;
+            if(bNegate)
+            {
+                seconds = -seconds;
+                nanos = -nanos;
+            }
+            seconds += timestamp.ToUnixSeconds();
+            nanos += int64_t(timestamp.nanosecond);
+            if(nanos < 0)
+            {
+                nanos += 1'000'000'000;
+                seconds--;
+            }
+            else if(nanos >= 1'000'000'000)
+            {
+                nanos -= 1'000'000'000;
+                seconds++;
+            }
+
+            if(seconds < Timestamp::MinUnixSecond() || seconds > Timestamp::MaxUnixSecond())
+                return Timestamp{};
+
+            Timestamp result = Timestamp::FromUnixSeconds(seconds);
+            result.nanosecond = static_cast<uint32_t>(nanos);
+            result.fracDigits = 9;
+            return result;
+        }
+    }
+
+    // shifts outside years 0-9999 are invalid, oversized differences saturate
+    [[nodiscard]] constexpr Timestamp operator+(const Timestamp& timestamp, const Duration duration) noexcept
+    {
+        return detail::ShiftTimestamp(timestamp, duration.nanoseconds, false);
+    }
+    [[nodiscard]] constexpr Timestamp operator-(const Timestamp& timestamp, const Duration duration) noexcept
+    {
+        return detail::ShiftTimestamp(timestamp, duration.nanoseconds, true);
+    }
+    [[nodiscard]] constexpr Duration operator-(const Timestamp& a, const Timestamp& b) noexcept
+    {
+        // invalid operands return zero because Duration has no invalid state
+        if(!a.IsValid() || !b.IsValid())
+            return {};
+
+        int64_t seconds = a.ToUnixSeconds() - b.ToUnixSeconds();
+        int64_t nanos = int64_t(a.nanosecond) - int64_t(b.nanosecond);
+        if(nanos < 0)
+        {
+            nanos += 1'000'000'000;
+            seconds--;
+        }
+        return Duration::Nanos(Timestamp::SaturatingNanos(seconds, nanos));
     }
 
     using UniqueEntryPtr = std::unique_ptr<Entry, detail::EntryDeleter>;
@@ -1330,10 +1634,9 @@ FDF_EXPORT namespace fdf
         char* ptr = nullptr;
     };
 
-    // Serialize to canonical ISO-8601 calendar text (used when injecting a Timestamp value)
-    // Ordinal/week origins are emitted as the equivalent calendar date
-    constexpr void Timestamp::AppendTo(String& out) const noexcept
+    constexpr void Timestamp::AppendTo(String& out, const bool bUppercase) const noexcept
     {
+        assert(IsValid() && "Writer requires a valid Timestamp");
         if(bHasDate)
         {
             AppendPadded(out, year, 4);
@@ -1342,7 +1645,7 @@ FDF_EXPORT namespace fdf
             out.push_back('-');
             AppendPadded(out, day, 2);
             if(bHasTime)
-                out.push_back('T');
+                out.push_back(bUppercase? 'T' : 't');
         }
         if(bHasTime)
         {
@@ -1361,7 +1664,9 @@ FDF_EXPORT namespace fdf
             }
         }
         if(tzKind == TzKind::Utc)
-            out.push_back('Z');
+            out.push_back(bUppercase? 'Z' : 'z');
+        else if(tzKind == TzKind::UnknownOffset)
+            out.append("-00:00");
         else if(tzKind == TzKind::Offset)
         {
             out.push_back(tzOffsetMin < 0? '-' : '+');
@@ -1369,6 +1674,55 @@ FDF_EXPORT namespace fdf
             AppendPadded(out, abs / 60, 2);
             out.push_back(':');
             AppendPadded(out, abs % 60, 2);
+        }
+    }
+
+    namespace detail
+    {
+        constexpr void AppendUInt(String& s, uint64_t v) noexcept;
+    }
+
+    constexpr void Duration::AppendTo(String& out) const noexcept
+    {
+        uint64_t remaining;
+        if(nanoseconds < 0)
+        {
+            out.push_back('-');
+            remaining = static_cast<uint64_t>(-(nanoseconds + 1)) + 1ULL;
+        }
+        else
+            remaining = static_cast<uint64_t>(nanoseconds);
+
+        struct Component
+        {
+            uint64_t unitNanos;
+            std::string_view suffix;
+        };
+        constexpr Component COMPONENTS[] =
+        {
+            { 86'400'000'000'000ULL, "d" },
+            { 3'600'000'000'000ULL, "h" },
+            { 60'000'000'000ULL, "m" },
+            { 1'000'000'000ULL, "s" },
+            { 1'000'000ULL, "ms" },
+            { 1'000ULL, "us" },
+            { 1ULL, "ns" },
+        };
+
+        if(remaining == 0)
+        {
+            out.append("0s");
+            return;
+        }
+
+        for(const Component& component : COMPONENTS)
+        {
+            const uint64_t count = remaining / component.unitNanos;
+            if(count == 0)
+                continue;
+            detail::AppendUInt(out, count);
+            out.append(component.suffix);
+            remaining %= component.unitNanos;
         }
     }
 
@@ -1540,6 +1894,8 @@ FDF_EXPORT namespace fdf
             int64_t* i;
             Version* v;
             double* f;
+            Timestamp* t;
+            Duration* dur;
             String* s;
             Hex* h;
         };
@@ -1559,7 +1915,9 @@ FDF_EXPORT namespace fdf
                 case Type::Version:                       return !data.v;
                 case Type::Float:                         return !data.f;
                 case Type::Hex:                           return !data.h;
-                case Type::String: case Type::Timestamp:  return !data.s;
+                case Type::Timestamp:                     return !data.t;
+                case Type::Duration:                      return !data.dur;
+                case Type::String:                        return !data.s;
                 case Type::Array:  case Type::Map:        return !data.e;
                 default:                                  return true;   // Null / Nil hold no data
             }
@@ -1575,7 +1933,9 @@ FDF_EXPORT namespace fdf
                 case Type::Version:                       data.v = nullptr; break;
                 case Type::Float:                         data.f = nullptr; break;
                 case Type::Hex:                           data.h = nullptr; break;
-                case Type::String: case Type::Timestamp:  data.s = nullptr; break;
+                case Type::Timestamp:                     data.t = nullptr; break;
+                case Type::Duration:                      data.dur = nullptr; break;
+                case Type::String:                        data.s = nullptr; break;
                 case Type::Array:  case Type::Map:        data.e = nullptr; break;
                 default:                                  data.e = nullptr; break;
             }
@@ -1707,8 +2067,9 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr       Entry* GetDirectChild(uint32_t index) noexcept;
         [[nodiscard]] constexpr const Entry* GetDirectChild(uint32_t index) const noexcept;
 
-        [[nodiscard]] constexpr std::span<Entry*>         GetChildren() noexcept;
-        [[nodiscard]] constexpr std::span<const Entry*>   GetChildren() const noexcept;
+        [[nodiscard]] constexpr std::span<Entry*>            GetChildren() noexcept;
+        // prevent mutation of child slots through a const tree
+        [[nodiscard]] constexpr std::span<const Entry* const> GetChildren() const noexcept;
         [[nodiscard]] constexpr std::vector<Entry*>       GetChildrenRecursive() noexcept;
         [[nodiscard]] constexpr std::vector<const Entry*> GetChildrenRecursive() const noexcept;
         [[nodiscard]] constexpr size_t                    GetChildCountRecursive() const noexcept;
@@ -1750,6 +2111,7 @@ FDF_EXPORT namespace fdf
         constexpr void SetValue(char value) noexcept;
         constexpr void SetValue(const char* value) noexcept;
         constexpr void SetValue(const Timestamp& value) noexcept;
+        constexpr void SetValue(const Duration& value) noexcept;
         constexpr void SetValue(const Version& value) noexcept;
         constexpr void SetValue(const Hex& value) noexcept;
         constexpr void SetValue(Hex&& value) noexcept;
@@ -1762,6 +2124,8 @@ FDF_EXPORT namespace fdf
         template<std::unsigned_integral T>
         constexpr void SetValue(std::span<T> value) noexcept;
         constexpr void SetValue(std::span<const Version> value) noexcept;
+        constexpr void SetValue(std::span<const Timestamp> value) noexcept;
+        constexpr void SetValue(std::span<const Duration> value) noexcept;
         constexpr void SetValue(std::span<const Hex> value) noexcept;
         template<std::floating_point T>
         constexpr void SetValue(std::span<T> value) noexcept;
@@ -2627,7 +2991,7 @@ namespace fdf::detail
 
     // Resolve a single Atom's text into a concrete value type. Only structurally impossible input
     // returns false, content is validated by the per-type parse
-    [[nodiscard]] constexpr bool ClassifyAtom(std::string_view view, Type& outType) noexcept
+    FDF_EXPORT_INTERNAL [[nodiscard]] constexpr bool ClassifyAtom(std::string_view view, Type& outType) noexcept
     {
         if(view.empty())
             return false;
@@ -2669,6 +3033,20 @@ namespace fdf::detail
         {
             outType = Type::Timestamp;  // validated by the parse below
             return true;
+        }
+
+        const size_t numericStart = view[0] == '-'? 1 : 0;
+        if(numericStart < view.size() && constexpr_isdigit(view[numericStart]))
+        {
+            constexpr std::string_view DURATION_LETTERS = "wdhmsun";
+            for(size_t i = numericStart + 1; i < view.size(); i++)
+            {
+                if(DURATION_LETTERS.find(view[i]) != std::string_view::npos)
+                {
+                    outType = Type::Duration;
+                    return true;
+                }
+            }
         }
 
         uint8_t dotCount = 0;
@@ -2958,6 +3336,8 @@ namespace fdf::detail
             else if constexpr(std::is_same_v<T, int64_t >) return entry.data.i;
             else if constexpr(std::is_same_v<T, Version >) return entry.data.v;
             else if constexpr(std::is_same_v<T, double  >) return entry.data.f;
+            else if constexpr(std::is_same_v<T, Timestamp>) return entry.data.t;
+            else if constexpr(std::is_same_v<T, Duration>) return entry.data.dur;
             else if constexpr(std::is_same_v<T, String  >) return entry.data.s;
             else if constexpr(std::is_same_v<T, Hex     >) return entry.data.h;
             else static_assert(false);
@@ -2971,6 +3351,8 @@ namespace fdf::detail
             else if constexpr(std::is_same_v<T, int64_t >) entry.data.i = value;
             else if constexpr(std::is_same_v<T, Version >) entry.data.v = value;
             else if constexpr(std::is_same_v<T, double  >) entry.data.f = value;
+            else if constexpr(std::is_same_v<T, Timestamp>) entry.data.t = value;
+            else if constexpr(std::is_same_v<T, Duration>) entry.data.dur = value;
             else if constexpr(std::is_same_v<T, String  >) entry.data.s = value;
             else if constexpr(std::is_same_v<T, Hex     >) entry.data.h = value;
             else static_assert(false);
@@ -3309,7 +3691,9 @@ namespace fdf::detail
             else if constexpr(std::is_same_v<T, double >) return t == Type::Float;
             else if constexpr(std::is_same_v<T, Version>) return t == Type::Version;
             else if constexpr(std::is_same_v<T, Hex    >) return t == Type::Hex;
-            else if constexpr(std::is_same_v<T, String >) return t == Type::String || t == Type::Timestamp;
+            else if constexpr(std::is_same_v<T, Timestamp>) return t == Type::Timestamp;
+            else if constexpr(std::is_same_v<T, Duration>) return t == Type::Duration;
+            else if constexpr(std::is_same_v<T, String >) return t == Type::String;
             else if constexpr(std::is_same_v<T, Entry* >) return t == Type::Array || t == Type::Map;
             else return false;
         }
@@ -3322,8 +3706,9 @@ namespace fdf::detail
             else if constexpr(TYPE == Type::Float)   return std::type_identity<double>{};
             else if constexpr(TYPE == Type::Version) return std::type_identity<Version>{};
             else if constexpr(TYPE == Type::Hex)     return std::type_identity<Hex>{};
-            else if constexpr(TYPE == Type::String || TYPE == Type::Timestamp)
-                return std::type_identity<String>{};
+            else if constexpr(TYPE == Type::Timestamp) return std::type_identity<Timestamp>{};
+            else if constexpr(TYPE == Type::Duration) return std::type_identity<Duration>{};
+            else if constexpr(TYPE == Type::String) return std::type_identity<String>{};
             else if constexpr(TYPE == Type::Array || TYPE == Type::Map)
                 return std::type_identity<Entry*>{};
             else
@@ -3367,8 +3752,9 @@ namespace fdf::detail
                         case Type::Float:    raw = entry.data.f; oldElementSize = sizeof(double);  break;
                         case Type::Version:  raw = entry.data.v; oldElementSize = sizeof(Version); break;
                         case Type::Hex:      raw = entry.data.h; oldElementSize = sizeof(Hex);     break;
-                        case Type::String: case Type::Timestamp:
-                                             raw = entry.data.s; oldElementSize = sizeof(String);  break;
+                        case Type::Timestamp: raw = entry.data.t; oldElementSize = sizeof(Timestamp); break;
+                        case Type::Duration: raw = entry.data.dur; oldElementSize = sizeof(Duration); break;
+                        case Type::String:    raw = entry.data.s; oldElementSize = sizeof(String);  break;
                         case Type::Array: case Type::Map:
                                              raw = entry.data.e; oldElementSize = sizeof(Entry*);  break;
                         default: break;
@@ -3382,7 +3768,7 @@ namespace fdf::detail
                     if(raw && oldBytes >= sizeof(T) && static_cast<size_t>(count) * sizeof(T) <= oldBytes
                         && oldBytes % sizeof(T) == 0 && oldBytes / sizeof(T) <= UINT32_MAX_VALUE)
                     {
-                        if(entry.type == Type::String || entry.type == Type::Timestamp)
+                        if(entry.type == Type::String)
                         {
                             for(uint32_t i = 0; i < entry.size; i++)
                                 std::destroy_at(entry.data.s + i);
@@ -3954,8 +4340,13 @@ namespace fdf
             detail::GlobalAllocator::Release<double>(*this);
             break;
         case Type::String:
-        case Type::Timestamp:
             detail::GlobalAllocator::Release<String>(*this);
+            break;
+        case Type::Timestamp:
+            detail::GlobalAllocator::Release<Timestamp>(*this);
+            break;
+        case Type::Duration:
+            detail::GlobalAllocator::Release<Duration>(*this);
             break;
         case Type::Hex:
             detail::GlobalAllocator::Release<Hex>(*this);
@@ -4040,6 +4431,13 @@ namespace fdf
     {
         if(!e || !IsContainer() || e->parent)
             return nullptr;
+
+        // reject ancestor adoption to prevent ownership cycles
+        for(const Entry* ancestor = this; ancestor; ancestor = ancestor->parent)
+        {
+            if(ancestor == e.get())
+                return nullptr;
+        }
 
         e->parent = this;
 
@@ -4280,12 +4678,12 @@ namespace fdf
 
         return {data.e, size};
     }
-    constexpr std::span<const Entry*> Entry::GetChildren() const noexcept
+    constexpr std::span<const Entry* const> Entry::GetChildren() const noexcept
     {
         if(size == 0 || !IsContainer())
             return {};
 
-        return {const_cast<const Entry**>(const_cast<Entry*>(this)->data.e), size};
+        return {const_cast<const Entry* const*>(const_cast<Entry*>(this)->data.e), size};
     }
 
     constexpr std::span<Entry*> Entry::GetChildren_INTERNAL() noexcept
@@ -4625,6 +5023,18 @@ namespace fdf
     }
 
     template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<Timestamp>() noexcept
+    {
+        return type == Type::Timestamp? std::span<Timestamp>(data.t, size) : std::span<Timestamp>();
+    }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<Duration>() noexcept
+    {
+        return type == Type::Duration? std::span<Duration>(data.dur, size) : std::span<Duration>();
+    }
+
+    template<>
     [[nodiscard]] constexpr auto Entry::GetValue<Hex>() noexcept
     {
         return type == Type::Hex? std::span<Hex>(data.h, size) : std::span<Hex>();
@@ -4686,6 +5096,18 @@ namespace fdf
     }
 
     template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<Timestamp>() const noexcept
+    {
+        return type == Type::Timestamp? std::span<const Timestamp>(data.t, size) : std::span<const Timestamp>();
+    }
+
+    template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<Duration>() const noexcept
+    {
+        return type == Type::Duration? std::span<const Duration>(data.dur, size) : std::span<const Duration>();
+    }
+
+    template<>
     [[nodiscard]] constexpr auto Entry::GetValue<Hex>() const noexcept
     {
         return type == Type::Hex? std::span<const Hex>(data.h, size) : std::span<const Hex>();
@@ -4702,8 +5124,7 @@ namespace fdf
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<String>() const noexcept
     {
-        const bool bStringStorage = type == Type::String || type == Type::Timestamp;
-        return bStringStorage && !IsDataNull()? std::span<const String>(data.s, size) : std::span<const String>();
+        return type == Type::String && !IsDataNull()? std::span<const String>(data.s, size) : std::span<const String>();
     }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<char>() const noexcept  { return GetValue<String>(); }
@@ -4715,17 +5136,6 @@ namespace fdf
     [[nodiscard]] constexpr auto Entry::GetValue<char*>() const noexcept  { return GetValue<String>(); }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<const char*>() const noexcept  { return GetValue<String>(); }
-
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<Timestamp>() const noexcept
-    {
-        if(type != Type::Timestamp)
-            return Timestamp{};
-        const std::span<const String> text = GetValue<String>();
-        return text.empty()? Timestamp{} : Timestamp::FromText(text[0]);
-    }
-    template<>
-    [[nodiscard]] constexpr auto Entry::GetValue<Timestamp>() noexcept  { return std::as_const(*this).GetValue<Timestamp>(); }
 
 
 
@@ -4754,6 +5164,8 @@ namespace fdf
         case Type::Float:   detail::GlobalAllocator::Resize<double>(*this, _size);   break;
         case Type::String:  detail::GlobalAllocator::Resize<String>(*this, _size);   break;
         case Type::Version: detail::GlobalAllocator::Resize<Version>(*this, _size);  break;
+        case Type::Timestamp: detail::GlobalAllocator::Resize<Timestamp>(*this, _size); break;
+        case Type::Duration: detail::GlobalAllocator::Resize<Duration>(*this, _size); break;
         case Type::Hex:     detail::GlobalAllocator::Resize<Hex>(*this, _size);      break;
         default:            return;
         }
@@ -4840,10 +5252,12 @@ namespace fdf
 
     constexpr void Entry::SetValue(const Timestamp& value) noexcept
     {
-        String text;
-        value.AppendTo(text);
-        detail::GlobalAllocator::Repurpose<Type::Timestamp>(*this, 1);
-        data.s[0] = std::string_view(text);
+        SetValue(std::span<const Timestamp>(&value, 1));
+    }
+
+    constexpr void Entry::SetValue(const Duration& value) noexcept
+    {
+        SetValue(std::span<const Duration>(&value, 1));
     }
 
 
@@ -4885,6 +5299,20 @@ namespace fdf
         auto normalized = [](Version v) noexcept { if(!v.bHasRevision) v.revision = 0; return v; };
         for(size_t i = 0; i < size; i++)
             data.v[i] = normalized(value[i]);
+    }
+
+    constexpr void Entry::SetValue(const std::span<const Timestamp> value) noexcept
+    {
+        detail::GlobalAllocator::Repurpose<Type::Timestamp>(*this, static_cast<uint32_t>(value.size()));
+        for(size_t i = 0; i < size; i++)
+            data.t[i] = value[i];
+    }
+
+    constexpr void Entry::SetValue(const std::span<const Duration> value) noexcept
+    {
+        detail::GlobalAllocator::Repurpose<Type::Duration>(*this, static_cast<uint32_t>(value.size()));
+        for(size_t i = 0; i < size; i++)
+            data.dur[i] = value[i];
     }
 
     constexpr void Entry::SetValue(const Hex& value) noexcept
@@ -4969,16 +5397,34 @@ namespace fdf
 
             case Type::Timestamp:
             {
-                const std::span<const String> text = GetValue<String>();
-                if(text.empty())
+                const std::span<const Timestamp> span = GetValue<Timestamp>();
+                if(span.empty())
                     return {};
-                if(text.size() == 1)
-                    return std::string_view(text[0]);
+                // any invalid component sinks the whole value to null, a pack is one atomic value
+                for(const Timestamp& component : span)
+                {
+                    if(!component.IsValid())
+                        return STYLE.bUseNilInsteadOfNull? detail::KEYWORDS[1] : detail::KEYWORDS[0];
+                }
                 temp.clear();
-                for(size_t i = 0; i < text.size(); i++)
+                for(size_t i = 0; i < span.size(); i++)
                 {
                     if(i) temp.push_back('|');
-                    temp.append(std::string_view(text[i]));
+                    span[i].AppendTo(temp, STYLE.bUppercaseTimestamp);
+                }
+                return temp;
+            }
+
+            case Type::Duration:
+            {
+                const std::span<const Duration> span = GetValue<Duration>();
+                if(span.empty())
+                    return {};
+                temp.clear();
+                for(size_t i = 0; i < span.size(); i++)
+                {
+                    if(i) temp.push_back('|');
+                    span[i].AppendTo(temp);
                 }
                 return temp;
             }
@@ -5061,6 +5507,12 @@ namespace fdf
                 const auto span = GetValue<float>();
                 if(span.empty())
                     return {};
+                // an all-ones exponent is inf/nan, neither has text syntax
+                for(const double component : span)
+                {
+                    if((std::bit_cast<uint64_t>(component) >> 52 & 0x7FF) == 0x7FF)
+                        return STYLE.bUseNilInsteadOfNull? detail::KEYWORDS[1] : detail::KEYWORDS[0];
+                }
                 temp.clear();
                 for(size_t i = 0; i < span.size(); i++)
                 {
@@ -5238,11 +5690,12 @@ namespace fdf
                 return false;
         }
 
+        // serialize first because opening truncates the existing file
+        String buffer = detail::Utils<>::WriteBuffer<STYLE>(e);
+
         std::ofstream file(filepath);
         if(!file)
             return false;
-
-        String buffer = detail::Utils<>::WriteBuffer<STYLE>(e);
 
         file.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         return static_cast<bool>(file);
@@ -5451,10 +5904,11 @@ namespace fdf::detail
     {
         Token currentToken = tokenizer.Current();
         UniqueEntryPtr _temp(GlobalAllocator::Create<Entry>());
-        Entry* entry = parent.AddChild(_temp);
-        if(!entry)
+        if(!_temp)
             return false;
 
+        // parse detached so an invalid duplicate cannot replace the existing entry
+        Entry* entry = _temp.get();
         if(parent.type == Type::Map)
         {
             assert(tokenizer.Current().type == TokenType::Atom && "Sanity check!");
@@ -5495,22 +5949,26 @@ namespace fdf::detail
             FDF_CHECK_TOKEN_FOR_EOF(currentToken);
         }
 
+        bool bParsed = false;
         if(IsValueLiteral(currentToken.type) && (bHasEqual || parent.type == Type::Array))
-            return ParseSimpleValue(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
-
+            bParsed = ParseSimpleValue(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
         // '=' introduces a scalar value only; a container must follow the identifier directly
-        if(bHasEqual && (currentToken.type == TokenType::CurlyBraceOpen || currentToken.type == TokenType::SquareBraceOpen))
+        else if(bHasEqual && (currentToken.type == TokenType::CurlyBraceOpen || currentToken.type == TokenType::SquareBraceOpen))
         {
             Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken);
             return false;
         }
-        if(currentToken.type == TokenType::CurlyBraceOpen)
-            return ParseMap(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
-        if(currentToken.type == TokenType::SquareBraceOpen)
-            return ParseArray(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
+        else if(currentToken.type == TokenType::CurlyBraceOpen)
+            bParsed = ParseMap(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
+        else if(currentToken.type == TokenType::SquareBraceOpen)
+            bParsed = ParseArray(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
+        else
+        {
+            Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken);
+            return false;
+        }
 
-        Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken);
-        return false;  // unhandled token
+        return bParsed && parent.AddChild(_temp) != nullptr;
     }
     template<auto DIAGNOSTIC_CALLBACK>
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseSimpleValue(Tokenizer& tokenizer, Entry& entry    FDF_COMMENT_SWITCH(, Token comment)) noexcept
@@ -5582,6 +6040,7 @@ namespace fdf::detail
         bool bAllHex       = true;
         bool bAllVersion   = true;
         bool bAllTimestamp = true;
+        bool bAllDuration  = true;
         bool bAnyFloat     = false;
         auto includeType = [&](Type type)
         {
@@ -5591,6 +6050,7 @@ namespace fdf::detail
             bAllHex       = bAllHex       && type == Type::Hex;
             bAllVersion   = bAllVersion   && type == Type::Version;
             bAllTimestamp = bAllTimestamp && type == Type::Timestamp;
+            bAllDuration  = bAllDuration  && type == Type::Duration;
             bAnyFloat     = bAnyFloat     || type == Type::Float;
         };
         includeType(firstType);
@@ -5642,7 +6102,7 @@ namespace fdf::detail
         auto makeComponentReader = [&]() { return ComponentReader{ componentStart, componentCount }; };
 
         // packs need a common component type
-        if(componentCount > 1 && !bAllBool && !bAllNumeric && !bAllString && !bAllHex && !bAllVersion && !bAllTimestamp)
+        if(componentCount > 1 && !bAllBool && !bAllNumeric && !bAllString && !bAllHex && !bAllVersion && !bAllTimestamp && !bAllDuration)
         {
             Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidPack, tokenizer, valueToken);
             return false;
@@ -5819,7 +6279,8 @@ namespace fdf::detail
                 const std::string_view seg = componentReader.Next();
                 bool bOk = false;
                 const double result = detail::ParseDouble(seg.data(), seg.data() + seg.size(), &bOk);
-                if(!bOk)
+                // overflow returns +/-inf, which has no text syntax
+                if(!bOk || (std::bit_cast<uint64_t>(result) >> 52 & 0x7FF) == 0x7FF)
                 {
                     Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, valueToken);
                     entry.ReleaseData();
@@ -5853,8 +6314,8 @@ namespace fdf::detail
 
         if(bAllHex)
         {
-            detail::GlobalAllocator::Allocate<Hex>(entry, componentCount);
             entry.type = Type::Hex;
+            detail::GlobalAllocator::Allocate<Hex>(entry, componentCount);
 
             auto componentReader = makeComponentReader();
             for(uint32_t i = 0; i < componentCount; i++)
@@ -5871,25 +6332,45 @@ namespace fdf::detail
             return postProcess();
         }
 
-        // validate before the slab exists so recovery has no partial buffer
         if(bAllTimestamp)
         {
-            auto validationReader = makeComponentReader();
-            for(uint32_t i = 0; i < componentCount; i++)
-            {
-                if(!IsValidTimestamp(validationReader.Next()))
-                {
-                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidTimestamp, tokenizer, valueToken);
-                    return false;
-                }
-            }
-
-            entry.AllocateStringArray(componentCount);
             entry.type = Type::Timestamp;
+            detail::GlobalAllocator::Allocate<Timestamp>(entry, componentCount);
 
             auto componentReader = makeComponentReader();
             for(uint32_t i = 0; i < componentCount; i++)
-                entry.data.s[i] = componentReader.Next();
+            {
+                const Timestamp timestamp = Timestamp::FromText(componentReader.Next());
+                if(!timestamp.IsValid())
+                {
+                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidTimestamp, tokenizer, valueToken);
+                    entry.ReleaseData();
+                    return false;
+                }
+                entry.data.t[i] = timestamp;
+            }
+
+            return postProcess();
+        }
+
+        if(bAllDuration)
+        {
+            entry.type = Type::Duration;
+            detail::GlobalAllocator::Allocate<Duration>(entry, componentCount);
+
+            auto componentReader = makeComponentReader();
+            for(uint32_t i = 0; i < componentCount; i++)
+            {
+                bool bValid = false;
+                const Duration duration = Duration::FromText(componentReader.Next(), bValid);
+                if(!bValid)
+                {
+                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidDuration, tokenizer, valueToken);
+                    entry.ReleaseData();
+                    return false;
+                }
+                entry.data.dur[i] = duration;
+            }
 
             return postProcess();
         }
@@ -6012,6 +6493,14 @@ namespace fdf::detail
                     return false;
                 }
                 Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken);
+
+                if(currentToken.type == TokenType::CurlyBraceClose || currentToken.type == TokenType::SquareBraceClose)
+                {
+                    currentToken = tokenizer.Advance();
+                    FDF_CHECK_TOKEN(currentToken);
+                    continue;
+                }
+
                 SkipToNextEntry(tokenizer, true);
                 currentToken = tokenizer.Current();
             }

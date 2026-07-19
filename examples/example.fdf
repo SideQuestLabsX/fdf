@@ -23,6 +23,7 @@ tags="config"|"example"|"demo"  // string pack, strings work like any other scal
 
 value=null                // null
 value2=nil                // nil, same as null
+timeout=1h30m             // duration
 color=0xFF5733            // hex
 
 datetime=2024-12-24T15:30:00  // date and time

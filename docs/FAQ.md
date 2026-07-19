@@ -45,7 +45,8 @@ fdf figures out the type from the value, there is no type annotation.
 | String | `"text"` or `'text'` |
 | Hex | `0xFF5733` |
 | Version | `1.2.3` or `1.2.3.0` |
-| Timestamp | `2024-12-24T15:30:00`, or just a date or time (ISO-8601) |
+| Timestamp | `2024-12-24T15:30:00`, or just a date or time (RFC 3339 profile) |
+| Duration | `90s`, `1h30m`, `-500ms` |
 | Null / Nil | `null`, `nil` (same thing) |
 
 Plus packs, below.

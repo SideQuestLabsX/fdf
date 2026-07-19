@@ -6,6 +6,6 @@ mixed="ascii and 中文 and \t tab and 😀"
 
 // Timestamps
 fullTs=2024-12-24T15:30:00.123Z   // date, time, millis, zulu
-weekTs=2024-W52-2                 // ISO week date
-ordinalTs=2024-359                // ordinal (day of year)
-timeTz=15:30:00-05:00             // time with offset
+dateTs=2024-12-24
+timeTs=15:30:00
+offsetTs=2024-12-24T15:30:00-05:00

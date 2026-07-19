@@ -6,6 +6,7 @@ module;
 #include <cassert>
 #include <cctype>
 #include <charconv>
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
