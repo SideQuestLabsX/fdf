@@ -171,6 +171,7 @@ FDF_EXPORT namespace fdf
         InputTooLarge,       // buffer would overflow the 32-bit offsets, refused before parsing
         InvalidDuration,
         DuplicateKey,
+        NestingTooDeep,
     };
 
     // Passed to a DIAGNOSTIC_CALLBACK for every issue found while parsing
@@ -238,6 +239,15 @@ namespace fdf::detail
     inline constexpr auto UINT16_MAX_VALUE = std::numeric_limits<uint16_t>::max();
     inline constexpr auto UINT32_MAX_VALUE = std::numeric_limits<uint32_t>::max();
     inline constexpr auto UINT64_MAX_VALUE = std::numeric_limits<uint64_t>::max();
+
+    // Keep recursive parsing well below the native stack limit
+    FDF_EXPORT_INTERNAL inline constexpr uint32_t MAX_PARSE_DEPTH = 256;
+
+    [[nodiscard]] constexpr bool FitsElementCount(const size_t count) noexcept
+    {
+        assert(count <= UINT32_MAX_VALUE && "pack element count must fit in uint32_t");
+        return count <= UINT32_MAX_VALUE;
+    }
 
     // returns the first ill-formed byte offset or size() when valid
     // rejects overlong encodings, surrogates and code points above U+10FFFF
@@ -2249,6 +2259,9 @@ namespace fdf::detail
 
         [[nodiscard]] constexpr std::string_view ToView(Token token) const noexcept { return content.substr(token.startPosition, token.count); }
 
+        // Detached entries cannot report open nesting through their parent chain
+        uint32_t depth = 0;
+
     private:
         [[nodiscard]] constexpr Token GetNextToken() noexcept;
 
@@ -4197,6 +4210,8 @@ namespace fdf::detail
         [[nodiscard]] static constexpr bool           ParseMap        (Tokenizer& tokenizer, Entry& map      FDF_COMMENT_SWITCH(, Token comment)) noexcept;
         template<Type CONTAINER_TYPE>
         [[nodiscard]] static constexpr bool           ParseContainer  (Tokenizer& tokenizer, Entry& container FDF_COMMENT_SWITCH(, Token comment)) noexcept;
+        template<Type CONTAINER_TYPE>
+        [[nodiscard]] static constexpr bool           ParseContainerBody(Tokenizer& tokenizer, Entry& container FDF_COMMENT_SWITCH(, Token comment)) noexcept;
 
         template<Style STYLE>
         [[nodiscard]] static constexpr String WriteBuffer(const Entry& root) noexcept;
@@ -5374,6 +5389,9 @@ namespace fdf
 
     constexpr void Entry::SetValue(const std::span<const std::string_view> value) noexcept
     {
+        if(!detail::FitsElementCount(value.size()))
+            return;
+
         // A string value is at least one component, so an empty span becomes a single empty string
         const uint32_t count = value.empty()? 1U : static_cast<uint32_t>(value.size());
         detail::GlobalAllocator::Repurpose<Type::String>(*this, count);
@@ -5414,6 +5432,9 @@ namespace fdf
 
     constexpr void Entry::SetValue(std::span<bool> value) noexcept
     {
+        if(!detail::FitsElementCount(value.size()))
+            return;
+
         detail::GlobalAllocator::Repurpose<Type::Bool>(*this, static_cast<uint32_t>(value.size()));
         for(size_t i = 0; i < size; i++)
             data.b[i] = value[i];
@@ -5422,6 +5443,9 @@ namespace fdf
     template <std::signed_integral T>
     constexpr void Entry::SetValue(std::span<T> value) noexcept
     {
+        if(!detail::FitsElementCount(value.size()))
+            return;
+
         detail::GlobalAllocator::Repurpose<Type::Int>(*this, static_cast<uint32_t>(value.size()));
         for(size_t i = 0; i < size; i++)
             data.i[i] = static_cast<int64_t>(value[i]);
@@ -5430,6 +5454,9 @@ namespace fdf
     template <std::unsigned_integral T>
     constexpr void Entry::SetValue(std::span<T> value) noexcept
     {
+        if(!detail::FitsElementCount(value.size()))
+            return;
+
         detail::GlobalAllocator::Repurpose<Type::Int>(*this, static_cast<uint32_t>(value.size()));
         for(size_t i = 0; i < size; i++)
             data.i[i] = std::bit_cast<int64_t>(static_cast<uint64_t>(value[i]));
@@ -5442,6 +5469,9 @@ namespace fdf
 
     constexpr void Entry::SetValue(const std::span<const Version> value) noexcept
     {
+        if(!detail::FitsElementCount(value.size()))
+            return;
+
         detail::GlobalAllocator::Repurpose<Type::Version>(*this, static_cast<uint32_t>(value.size()));
         // a missing revision flag normalizes revision to zero
         auto normalized = [](Version v) noexcept { if(!v.bHasRevision) v.revision = 0; return v; };
@@ -5451,6 +5481,9 @@ namespace fdf
 
     constexpr void Entry::SetValue(const std::span<const Timestamp> value) noexcept
     {
+        if(!detail::FitsElementCount(value.size()))
+            return;
+
         detail::GlobalAllocator::Repurpose<Type::Timestamp>(*this, static_cast<uint32_t>(value.size()));
         for(size_t i = 0; i < size; i++)
             data.t[i] = value[i];
@@ -5458,6 +5491,9 @@ namespace fdf
 
     constexpr void Entry::SetValue(const std::span<const Duration> value) noexcept
     {
+        if(!detail::FitsElementCount(value.size()))
+            return;
+
         detail::GlobalAllocator::Repurpose<Type::Duration>(*this, static_cast<uint32_t>(value.size()));
         for(size_t i = 0; i < size; i++)
             data.dur[i] = value[i];
@@ -5470,6 +5506,9 @@ namespace fdf
 
     constexpr void Entry::SetValue(const std::span<const Hex> value) noexcept
     {
+        if(!detail::FitsElementCount(value.size()))
+            return;
+
         if(type == Type::Hex && value.data())
         {
             for(uint32_t sourceOffset = 0; sourceOffset < size; sourceOffset++)
@@ -5509,6 +5548,9 @@ namespace fdf
     template <std::floating_point T>
     constexpr void Entry::SetValue(std::span<T> value) noexcept
     {
+        if(!detail::FitsElementCount(value.size()))
+            return;
+
         detail::GlobalAllocator::Repurpose<Type::Float>(*this, static_cast<uint32_t>(value.size()));
         for(size_t i = 0; i < size; i++)
             data.f[i] = static_cast<double>(value[i]);
@@ -5858,12 +5900,47 @@ namespace fdf
         // serialize first because opening truncates the existing file
         String buffer = detail::Utils<>::WriteBuffer<STYLE>(e);
 
-        std::ofstream file(filepath);
-        if(!file)
+        std::filesystem::path tempPath;
+        for(uint32_t attempt = 0; attempt < 1024; attempt++)
+        {
+            std::filesystem::path candidate = filepath;
+            candidate += std::format(".{}.tmp", attempt);
+            const bool bTaken = std::filesystem::exists(candidate, ec);
+            if(ec)
+                return false;
+            if(!bTaken)
+            {
+                tempPath = std::move(candidate);
+                break;
+            }
+        }
+        if(tempPath.empty())
             return false;
 
-        file.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-        return static_cast<bool>(file);
+        {
+            // Preserve platform newline translation
+            std::ofstream file(tempPath);
+            if(!file)
+                return false;
+
+            file.write(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            file.flush();
+            if(!file)
+            {
+                file.close();
+                std::filesystem::remove(tempPath, ec);
+                return false;
+            }
+        }
+
+        std::filesystem::rename(tempPath, filepath, ec);
+        if(ec)
+        {
+            std::error_code cleanupEc;
+            std::filesystem::remove(tempPath, cleanupEc);
+            return false;
+        }
+        return true;
     }
     template<Style STYLE>
     constexpr String WriteBuffer(const Entry& root) noexcept
@@ -6568,6 +6645,22 @@ namespace fdf::detail
     template<auto DIAGNOSTIC_CALLBACK>
     template<Type CONTAINER_TYPE>
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseContainer(Tokenizer& tokenizer, Entry& container FDF_COMMENT_SWITCH(, Token comment)) noexcept
+    {
+        if(tokenizer.depth >= MAX_PARSE_DEPTH)
+        {
+            Diagnose(DiagnosticSeverity::Error, DiagnosticType::NestingTooDeep, tokenizer, tokenizer.Current());
+            return false;
+        }
+
+        tokenizer.depth++;
+        const bool bParsed = ParseContainerBody<CONTAINER_TYPE>(tokenizer, container FDF_COMMENT_SWITCH(, comment));
+        tokenizer.depth--;
+        return bParsed;
+    }
+
+    template<auto DIAGNOSTIC_CALLBACK>
+    template<Type CONTAINER_TYPE>
+    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseContainerBody(Tokenizer& tokenizer, Entry& container FDF_COMMENT_SWITCH(, Token comment)) noexcept
     {
         static_assert(CONTAINER_TYPE == Type::Array || CONTAINER_TYPE == Type::Map);
         constexpr TokenType CLOSE_TOKEN = CONTAINER_TYPE == Type::Array? TokenType::SquareBraceClose : TokenType::CurlyBraceClose;

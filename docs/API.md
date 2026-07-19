@@ -29,6 +29,10 @@ and work inside a `consteval` function. The optional
 `WriteFile(..., false)` only overwrites an existing regular file. The default creates the
 file and missing parent directories. Bare filenames use the current directory.
 
+`WriteFile` writes to a sibling temporary, then renames it over the target after the close
+succeeds. An interrupted or failed write leaves the existing target readable and removes the
+temporary. The destination directory needs room for both copies during the write.
+
 `Type` is the tag every entry carries
 
 ```cpp

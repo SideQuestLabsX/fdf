@@ -37,9 +37,17 @@ Diagnostics work the same at runtime and at compile time.
 | `InvalidTimestamp` | Error | RFC 3339 profile structure or range violation |
 | `InvalidDuration` | Error | malformed, out-of-order, non-integral or overflowing duration |
 | `DuplicateKey` | Error | repeated direct map key, the duplicate is dropped and parsing continues |
+| `NestingTooDeep` | Error | container nesting past 256 levels, the inner levels are dropped and parsing continues |
 | `UnexpectedEndOfFile` | Fatal | input ends inside a container |
 | `UnterminatedString` | Fatal | missing closing quote |
 | `UnterminatedComment` | Fatal | block comment missing `*/` |
 | `InvalidComment` | Fatal | `/` not followed by `/` or `*` |
 | `InvalidToken` | Fatal | lexer failure with no more specific reason |
 | `InputTooLarge` | Fatal | input would overflow the 32-bit offsets, refused before parsing |
+
+## Nesting limit
+
+Parsing recurses once per container and stops at 256 levels. Past the limit, the parser reports
+`NestingTooDeep`, drops the deeper containers and continues with the outer structure and later
+entries. A caller that ignores diagnostics receives an incomplete tree, so untrusted input should
+always use a diagnostic callback.

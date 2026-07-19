@@ -334,6 +334,9 @@ namespace fdf::test
 #define REQUIRE(cond)        do { if(!CHECK(cond))          return; } while(false)
 #define REQUIRE_MSG(cond, m) do { if(!CHECK_MSG(cond, (m))) return; } while(false)
 
+// GCC cannot infer pointer validity through ReportCheck
+#define REQUIRE_PTR(p) do { if(!CHECK((p) != nullptr) || (p) == nullptr) return; } while(false)
+
 
 
 
@@ -687,6 +690,23 @@ namespace fdf::detail
             CHECK(static_cast<bool>(ParseFile(nestedFile)));
             CHECK(!WriteFile(*root, nestedDir, true));
 
+            {
+                const std::filesystem::path replaced = nestedDir / "replace.fdf";
+                std::filesystem::remove(replaced, ec);
+                CHECK(WriteFile(*root, replaced, true));
+                CHECK(WriteFile(*root, replaced, false));
+                CHECK(std::filesystem::is_regular_file(replaced));
+                CHECK(static_cast<bool>(ParseFile(replaced)));
+                CHECK(!std::filesystem::exists(replaced.string() + ".0.tmp"));
+
+                const std::filesystem::path blockedTemp = replaced.string() + ".0.tmp";
+                CHECK(std::filesystem::create_directory(blockedTemp, ec) && !ec);
+                CHECK(WriteFile(*root, replaced, false));
+                CHECK(std::filesystem::is_directory(blockedTemp));
+                CHECK(!std::filesystem::exists(replaced.string() + ".1.tmp"));
+                std::filesystem::remove(blockedTemp, ec);
+            }
+
             const std::filesystem::path emptyFile = nestedDir / "empty.fdf";
             { std::ofstream createEmpty(emptyFile, std::ios::binary); }
             if(UniqueEntryPtr empty = ParseFile(emptyFile); CHECK(static_cast<bool>(empty)))
@@ -936,7 +956,7 @@ namespace fdf::detail
             CHECK(root->GetChild("k19") != nullptr);
 
             // Orphan detaches the node without destroying it
-            if(UniqueEntryPtr orphan = root->OrphanChild("k10"); CHECK(static_cast<bool>(orphan)))
+            if(UniqueEntryPtr orphan = root->OrphanChild("k10"); CHECK(static_cast<bool>(orphan)) && orphan)
             {
                 CHECK(orphan->GetParent() == nullptr);
                 CHECK(root->GetChild("k10") == nullptr);
@@ -1388,7 +1408,7 @@ namespace fdf::detail
                 if(!CHECK_MSG(static_cast<bool>(root), src))
                     return;
                 Entry* m = root->GetChild("m");
-                if(CHECK(m && m->GetType() == Type::Map))
+                if(CHECK(m && m->GetType() == Type::Map) && m)
                 {
                     CHECK(m->GetChildCount() == 2);
                     CHECK(m->GetChild("a") != nullptr);
@@ -1403,7 +1423,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("arr [ 1, = , 3 ]\n"); CHECK(static_cast<bool>(root)))
             {
                 Entry* arr = root->GetChild("arr");
-                if(CHECK(arr && arr->GetType() == Type::Array))
+                if(CHECK(arr && arr->GetType() == Type::Array) && arr)
                     CHECK(arr->GetChildCount() == 2);
             }
 
@@ -1482,7 +1502,7 @@ namespace fdf::detail
                         continue;
                     const Entry* scope = src.starts_with("m")? root->GetChild("m") : root.get();
                     const Entry* a = scope? scope->GetChild("a") : nullptr;
-                    if(CHECK_MSG(a && a->GetType() == Type::Int, src))
+                    if(CHECK_MSG(a && a->GetType() == Type::Int, src) && a)
                         CHECK_MSG(FirstIntEquals(a, 1), src);
                 }
             }
@@ -1573,6 +1593,53 @@ namespace fdf::detail
         }
 
 
+        static void NestingDepthTest()
+        {
+            auto nestedMap = [](size_t levels)
+            {
+                std::string src;
+                for(size_t i = 0; i < levels; i++)
+                    src += "a {";
+                src += " x=1 ";
+                for(size_t i = 0; i < levels; i++)
+                    src += "}";
+                return src + "\n";
+            };
+            auto nestedArray = [](size_t levels)
+            {
+                std::string src = "v";
+                for(size_t i = 0; i < levels; i++)
+                    src += "[";
+                src += "1";
+                for(size_t i = 0; i < levels; i++)
+                    src += "]";
+                return src + "\n";
+            };
+
+            // The root map does not pass through ParseContainer
+            constexpr size_t DEEPEST = MAX_PARSE_DEPTH;
+            for(const auto& build : { +nestedMap, +nestedArray })
+            {
+                if(UniqueEntryPtr root = ParseBuffer(build(DEEPEST)); CHECK(static_cast<bool>(root)) && root)
+                    CHECK(root->GetChildCount() == 1);
+
+                test::g_diagnostics = 0;
+                test::g_lastDiagnostic = {};
+                const std::string overLimit = build(DEEPEST + 1) + "after=7\n";
+                if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(overLimit);
+                   CHECK(static_cast<bool>(root)) && root)
+                {
+                    CHECK(FirstIntEquals(root->GetChild("after"), 7));
+                    CHECK(root->GetChildCount() == 2);
+                }
+                CHECK(test::g_diagnostics >= 1);
+                CHECK(test::g_lastDiagnostic.type == DiagnosticType::NestingTooDeep);
+                CHECK(test::g_lastDiagnostic.severity == DiagnosticSeverity::Error);
+            }
+
+            CHECK(static_cast<bool>(ParseBuffer("a { b { c=1 } }\n")));
+        }
+
         static void DuplicateKeyPolicyTest()
         {
             test::g_diagnostics = 0;
@@ -1594,7 +1661,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("m { a=1, a=2 }\n"); CHECK(static_cast<bool>(root)))
             {
                 Entry* m = root->GetChild("m");
-                if(CHECK(m && m->GetType() == Type::Map))
+                if(CHECK(m && m->GetType() == Type::Map) && m)
                 {
                     CHECK(m->GetChildCount() == 1);
                     CHECK(FirstIntEquals(m->GetChild("a"), 1));
@@ -1815,7 +1882,7 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer(std::format("t = {}\n", ts.source));
                 Entry* e = root? root->GetChild("t") : nullptr;
-                if(CHECK_MSG(e && e->GetType() == Type::Timestamp, ts.source))
+                if(CHECK_MSG(e && e->GetType() == Type::Timestamp, ts.source) && e)
                 {
                     CHECK_MSG(e->GetValue<Timestamp>().size() == 1, ts.source);
                     String out = WriteBuffer<Style{ .bCommas = false }>(*root);
@@ -1842,10 +1909,10 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer(std::format("v = {}\n", src));
                 Entry* e = root? root->GetChild("v") : nullptr;
-                if(!CHECK_MSG(e && e->GetType() == Type::Int, src))
+                if(!CHECK_MSG(e && e->GetType() == Type::Int, src) || !e)
                     return;
-                auto s = e->GetValue<int64_t>();
-                if(!CHECK_MSG(s.size() == exp.size(), src))
+                const std::span<const int64_t> s = std::as_const(*e).GetValue<int64_t>();
+                if(!CHECK_MSG(s.size() == exp.size(), src) || s.size() != exp.size())
                     return;
                 size_t i = 0;
                 for(int64_t x : exp)
@@ -1855,10 +1922,10 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer(std::format("v = {}\n", src));
                 Entry* e = root? root->GetChild("v") : nullptr;
-                if(!CHECK_MSG(e && e->GetType() == Type::Float, src))
+                if(!CHECK_MSG(e && e->GetType() == Type::Float, src) || !e)
                     return;
-                auto s = e->GetValue<double>();
-                if(!CHECK_MSG(s.size() == exp.size(), src))
+                const std::span<const double> s = std::as_const(*e).GetValue<double>();
+                if(!CHECK_MSG(s.size() == exp.size(), src) || s.size() != exp.size())
                     return;
                 size_t i = 0;
                 for(double x : exp)
@@ -1868,10 +1935,10 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer(std::format("v = {}\n", src));
                 Entry* e = root? root->GetChild("v") : nullptr;
-                if(!CHECK_MSG(e && e->GetType() == Type::Bool, src))
+                if(!CHECK_MSG(e && e->GetType() == Type::Bool, src) || !e)
                     return;
-                auto s = e->GetValue<bool>();
-                if(!CHECK_MSG(s.size() == exp.size(), src))
+                const std::span<const bool> s = std::as_const(*e).GetValue<bool>();
+                if(!CHECK_MSG(s.size() == exp.size(), src) || s.size() != exp.size())
                     return;
                 size_t i = 0;
                 for(bool x : exp)
@@ -1881,10 +1948,10 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer(std::format("v = {}\n", src));
                 Entry* e = root? root->GetChild("v") : nullptr;
-                if(!CHECK_MSG(e && e->GetType() == Type::String, src))
+                if(!CHECK_MSG(e && e->GetType() == Type::String, src) || !e)
                     return;
-                const std::span<const String> parts = e->GetValue<String>();
-                if(!CHECK_MSG(parts.size() == exp.size(), src))
+                const std::span<const String> parts = std::as_const(*e).GetValue<String>();
+                if(!CHECK_MSG(parts.size() == exp.size(), src) || parts.size() != exp.size())
                     return;
                 size_t i = 0;
                 for(std::string_view x : exp)
@@ -1894,10 +1961,10 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer(std::format("v = {}\n", src));
                 Entry* e = root? root->GetChild("v") : nullptr;
-                if(!CHECK_MSG(e && e->GetType() == Type::Version, src))
+                if(!CHECK_MSG(e && e->GetType() == Type::Version, src) || !e)
                     return;
-                const std::span<const Version> versions = e->GetValue<Version>();
-                if(!CHECK_MSG(versions.size() == exp.size(), src))
+                const std::span<const Version> versions = std::as_const(*e).GetValue<Version>();
+                if(!CHECK_MSG(versions.size() == exp.size(), src) || versions.size() != exp.size())
                     return;
                 size_t i = 0;
                 for(const Version& version : exp)
@@ -1954,7 +2021,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("v = 1|2|18446744073709551615\n"))
             {
                 Entry* e = root->GetChild("v");
-                if(CHECK(e && e->GetType() == Type::Int))
+                if(CHECK(e && e->GetType() == Type::Int) && e)
                 {
                     auto s = e->GetValue<uint64_t>();
                     CHECK(s.size() == 3 && s[0] == 1 && s[1] == 2 && s[2] == 18446744073709551615ull);
@@ -1965,7 +2032,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("v = -1|18446744073709551615\n"))
             {
                 Entry* e = root->GetChild("v");
-                if(CHECK(e && e->GetType() == Type::Int))
+                if(CHECK(e && e->GetType() == Type::Int) && e)
                 {
                     auto s = e->GetValue<int64_t>();
                     CHECK(s.size() == 2 && s[0] == -1 && s[1] == -1);
@@ -1981,7 +2048,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("v = 2024-12-24|15:30:00\n"))
             {
                 const Entry* e = root? root->GetChild("v") : nullptr;
-                if(CHECK(e && e->GetType() == Type::Timestamp))
+                if(CHECK(e && e->GetType() == Type::Timestamp) && e)
                 {
                     const std::span<const Timestamp> parts = e->GetValue<Timestamp>();
                     CHECK(parts.size() == 2);
@@ -1993,7 +2060,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("v = 0xFF|0xAA\n"))
             {
                 const Entry* e = root->GetChild("v");
-                if(CHECK(e && e->GetType() == Type::Hex))
+                if(CHECK(e && e->GetType() == Type::Hex) && e)
                 {
                     const std::span<const Hex> parts = e->GetValue<Hex>();
                     CHECK(parts.size() == 2
@@ -2004,7 +2071,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("v = 0x1|0x2|0x3\n"))
             {
                 const Entry* e = root->GetChild("v");
-                if(CHECK(e && e->GetType() == Type::Hex))
+                if(CHECK(e && e->GetType() == Type::Hex) && e)
                 {
                     const std::span<const Hex> parts = e->GetValue<Hex>();
                     CHECK(parts.size() == 3);
@@ -2020,7 +2087,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("v = 2024-12-24T15:30:00Z|2024-12-25t16:45:30+05:30\n"))
             {
                 Entry* e = root->GetChild("v");
-                if(CHECK(e && e->GetType() == Type::Timestamp))
+                if(CHECK(e && e->GetType() == Type::Timestamp) && e)
                 {
                     const std::span<Timestamp> parts = e->GetValue<Timestamp>();
                     REQUIRE(parts.size() == 2);
@@ -2090,7 +2157,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("v = \"first\"|\"second\"\n"))
             {
                 Entry* e = root->GetChild("v");
-                if(CHECK(e && e->GetType() == Type::String))
+                if(CHECK(e && e->GetType() == Type::String) && e)
                 {
                     CHECK(FirstString(*e) == "first");
 
@@ -2169,7 +2236,7 @@ namespace fdf::detail
 
                     UniqueEntryPtr reparsed = ParseBuffer(out);
                     Entry* r = reparsed? reparsed->GetChild("v") : nullptr;
-                    if(CHECK_MSG(r && r->GetType() == Type::String, out))
+                    if(CHECK_MSG(r && r->GetType() == Type::String, out) && r)
                     {
                         const std::span<const String> comps = r->GetValue<String>();
                         if(CHECK_MSG(comps.size() == 5, out))
@@ -2202,7 +2269,7 @@ namespace fdf::detail
                 {
                     CHECK_MSG(root->GetChild("bad") == nullptr, src);   // malformed entry skipped
                     Entry* ok = root->GetChild("ok");
-                    if(CHECK_MSG(ok && ok->GetType() == Type::Int, src))
+                    if(CHECK_MSG(ok && ok->GetType() == Type::Int, src) && ok)
                         CHECK_MSG(FirstIntEquals(ok, 7), src);
                 }
             }
@@ -2297,7 +2364,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("v = \"hello\"\n"))
             {
                 Entry* e = root->GetChild("v");
-                if(CHECK(e && e->GetType() == Type::String))
+                if(CHECK(e && e->GetType() == Type::String) && e)
                 {
                     const std::span<String> comps = e->GetValue<String>();
                     CHECK(comps.size() == 1 && comps[0] == "hello" && comps[0].size() == 5);
@@ -2355,7 +2422,7 @@ namespace fdf::detail
                     String out = WriteBuffer<Style{ .bCommas = false }>(*root);
                     UniqueEntryPtr reparsed = ParseBuffer(out);
                     Entry* r = reparsed? reparsed->GetChild("v") : nullptr;
-                    if(CHECK_MSG(r && r->GetType() == Type::String, out))
+                    if(CHECK_MSG(r && r->GetType() == Type::String, out) && r)
                         CHECK_MSG(FirstString(*r) == "second value", out);
                 }
             }
@@ -2391,7 +2458,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("h = 0xFF5733\n"))
             {
                 Entry* e = root->GetChild("h");
-                if(CHECK(e && e->GetType() == Type::Hex))
+                if(CHECK(e && e->GetType() == Type::Hex) && e)
                 {
                     const std::span<Hex> s = e->GetValue<Hex>();
                     REQUIRE(s.size() == 1);
@@ -2418,7 +2485,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("h = 0xABC\n"))
             {
                 Entry* e = root->GetChild("h");
-                if(CHECK(e && e->GetType() == Type::Hex))
+                if(CHECK(e && e->GetType() == Type::Hex) && e)
                 {
                     const std::span<Hex> s = e->GetValue<Hex>();
                     REQUIRE(s.size() == 1);
@@ -2443,7 +2510,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("h = 0x01020304\n"))
             {
                 Entry* e = root->GetChild("h");
-                if(CHECK(e && e->GetType() == Type::Hex))
+                if(CHECK(e && e->GetType() == Type::Hex) && e)
                 {
                     const std::span<Hex> s = e->GetValue<Hex>();
                     REQUIRE(s.size() == 1);
@@ -2462,7 +2529,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("h = 0x0100FF\n"))
             {
                 Entry* e = root->GetChild("h");
-                if(CHECK(e && e->GetType() == Type::Hex))
+                if(CHECK(e && e->GetType() == Type::Hex) && e)
                 {
                     const std::span<Hex> s = e->GetValue<Hex>();
                     REQUIRE(s.size() == 1);
@@ -2482,7 +2549,7 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer("h = 0xFF5733\n");
                 Entry* e = root? root->GetChild("h") : nullptr;
-                if(CHECK(e && e->GetType() == Type::Hex))
+                if(CHECK(e && e->GetType() == Type::Hex) && e)
                 {
                     const std::span<Hex> s = e->GetValue<Hex>();
                     REQUIRE(s.size() == 1);
@@ -2612,7 +2679,9 @@ namespace fdf::detail
                     Hex source(std::span<const std::byte>(raw, 2));
                     e->SetValue(source);
                     CHECK(source.Write<uint16_t>(0x0000, 0));
-                    CHECK(HexEquals<uint16_t>(e->GetValue<Hex>()[0], 0xFF57));
+                    const std::span<const Hex> stored = std::as_const(*e).GetValue<Hex>();
+                    REQUIRE(stored.size() == 1);
+                    CHECK(HexEquals<uint16_t>(stored[0], 0xFF57));
 
                     const Hex pack[2] = { Hex(std::span<const std::byte>(raw, 1)), Hex(std::span<const std::byte>(raw, 3)) };
                     e->SetValue(std::span<const Hex>(pack, 2));
@@ -2739,10 +2808,15 @@ namespace fdf::detail
             {
                 Entry* empty = root->GetChild("empty");
                 Entry* pack = root->GetChild("pack");
-                CHECK(empty && empty->GetType() == Type::Hex && empty->GetValue<Hex>().size() == 1
-                    && empty->GetValue<Hex>()[0].IsEmpty() && empty->GetValue<Hex>()[0].DigitCount() == 0);
-                CHECK(HexEquals<uint32_t>(empty->GetValue<Hex>()[0], 0u));
-                CHECK(pack && pack->GetValue<Hex>().size() == 2 && pack->GetValue<Hex>()[1].IsEmpty());
+                REQUIRE_PTR(empty);
+                REQUIRE_PTR(pack);
+                const std::span<const Hex> emptyValues = std::as_const(*empty).GetValue<Hex>();
+                const std::span<const Hex> packValues = std::as_const(*pack).GetValue<Hex>();
+                CHECK(empty->GetType() == Type::Hex);
+                REQUIRE(emptyValues.size() == 1 && packValues.size() == 2);
+                CHECK(emptyValues[0].IsEmpty() && emptyValues[0].DigitCount() == 0);
+                CHECK(HexEquals<uint32_t>(emptyValues[0], 0u));
+                CHECK(packValues[1].IsEmpty());
                 String out = WriteBuffer<Style{ .bCommas = false }>(*root);
                 CHECK_MSG(out.contains("empty=0x") && out.contains("pack=0xFF|0x"), out);
                 UniqueEntryPtr reparsed = ParseBuffer(out);
@@ -2758,7 +2832,7 @@ namespace fdf::detail
                 if(CHECK(static_cast<bool>(root)))
                 {
                     Entry* e = root->GetChild("big");
-                    if(CHECK(e && e->GetType() == Type::Hex))
+                    if(CHECK(e && e->GetType() == Type::Hex) && e)
                     {
                         const std::span<Hex> s = e->GetValue<Hex>();
                         REQUIRE(s.size() == 1);
@@ -3005,7 +3079,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("d = 1.5|2.0e3|0.001\n"))
             {
                 Entry* e = root->GetChild("d");
-                if(CHECK(e && e->GetType() == Type::Float))
+                if(CHECK(e && e->GetType() == Type::Float) && e)
                 {
                     auto s = e->GetValue<double>();
                     CHECK(s.size() == 3 && s[0] == 1.5 && s[1] == 2.0e3 && s[2] == 0.001);
@@ -3016,7 +3090,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("d = 0.5|-0.5|1.0\n"))
             {
                 Entry* e = root->GetChild("d");
-                if(CHECK(e && e->GetType() == Type::Float))
+                if(CHECK(e && e->GetType() == Type::Float) && e)
                 {
                     auto s = e->GetValue<double>();
                     CHECK(s.size() == 3 && s[0] == 0.5 && s[1] == -0.5 && s[2] == 1.0);
@@ -3027,7 +3101,7 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("d = 1.5e3|-2.5\n"))
             {
                 Entry* e = root->GetChild("d");
-                if(CHECK(e && e->GetType() == Type::Float))
+                if(CHECK(e && e->GetType() == Type::Float) && e)
                 {
                     auto s = e->GetValue<double>();
                     CHECK(s.size() == 2 && s[0] == 1.5e3 && s[1] == -2.5);
@@ -3079,7 +3153,7 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer("t = 2024-12-24T15:30:00.123Z\n");
                 Entry* e = root? root->GetChild("t") : nullptr;
-                if(CHECK(e && e->GetType() == Type::Timestamp))
+                if(CHECK(e && e->GetType() == Type::Timestamp) && e)
                 {
                     const std::span<const Timestamp> values = std::as_const(*e).GetValue<Timestamp>();
                     REQUIRE(values.size() == 1);
@@ -3096,7 +3170,7 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer("t = 2001-09-09T01:46:40Z\n");
                 Entry* e = root? root->GetChild("t") : nullptr;
-                REQUIRE(e);
+                REQUIRE_PTR(e);
                 const std::span<const Timestamp> values = std::as_const(*e).GetValue<Timestamp>();
                 REQUIRE(values.size() == 1);
                 const Timestamp ts = values[0];
@@ -3156,7 +3230,7 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer("t = 15:30:00.5\n");
                 Entry* e = root? root->GetChild("t") : nullptr;
-                REQUIRE(e);
+                REQUIRE_PTR(e);
                 const std::span<const Timestamp> values = std::as_const(*e).GetValue<Timestamp>();
                 REQUIRE(values.size() == 1);
                 const Timestamp ts = values[0];
@@ -3172,7 +3246,7 @@ namespace fdf::detail
                 const std::string raw = "15:30:00" + fraction;
                 UniqueEntryPtr root = ParseBuffer(std::format("t={}\n", raw));
                 Entry* e = root? root->GetChild("t") : nullptr;
-                if(CHECK_MSG(e && e->GetType() == Type::Timestamp, raw))
+                if(CHECK_MSG(e && e->GetType() == Type::Timestamp, raw) && e)
                 {
                     const std::span<const Timestamp> span = std::as_const(*e).GetValue<Timestamp>();
                     CHECK_MSG(span.size() == 1 && span[0].fracDigits == digits, raw);
@@ -3185,7 +3259,7 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer("t=2024-12-31T23:59:60.5Z\n");
                 Entry* e = root? root->GetChild("t") : nullptr;
-                REQUIRE(e);
+                REQUIRE_PTR(e);
                 const std::span<const Timestamp> values = std::as_const(*e).GetValue<Timestamp>();
                 REQUIRE(values.size() == 1);
                 const Timestamp leap = values[0];
@@ -3298,7 +3372,7 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer(std::format("d={}\n", c.source));
                 Entry* entry = root? root->GetChild("d") : nullptr;
-                if(CHECK_MSG(entry && entry->GetType() == Type::Duration, c.source))
+                if(CHECK_MSG(entry && entry->GetType() == Type::Duration, c.source) && entry)
                 {
                     const std::span<const Duration> value = std::as_const(*entry).GetValue<Duration>();
                     CHECK_MSG(value.size() == 1, c.source);
@@ -3310,7 +3384,7 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer("d=1h|2h|30m\n");
                 Entry* entry = root? root->GetChild("d") : nullptr;
-                if(CHECK(entry && entry->GetType() == Type::Duration))
+                if(CHECK(entry && entry->GetType() == Type::Duration) && entry)
                 {
                     const std::span<Duration> values = entry->GetValue<Duration>();
                     REQUIRE(values.size() == 3);
@@ -3330,8 +3404,9 @@ namespace fdf::detail
                     entry->SetValue(Duration::Seconds(1));
                     CHECK(entry->GetType() == Type::Duration);
                     entry->Resize(3);
-                    std::span<Duration> values = entry->GetValue<Duration>();
-                    CHECK(values.size() == 3 && values[0] == Duration::Seconds(1));
+                    const std::span<Duration> values = entry->GetValue<Duration>();
+                    REQUIRE(values.size() == 3);
+                    CHECK(values[0] == Duration::Seconds(1));
                     CHECK(values[1] == Duration{} && values[2] == Duration{});
                     values[1] = Duration::Millis(500);
                     values[2] = Duration::Micros(250);
@@ -3593,12 +3668,12 @@ namespace fdf::detail
             {
                 const Entry* ints = root->GetChild("ints");
                 const Entry* hex = root->GetChild("hex");
-                if(CHECK(ints && ints->GetType() == Type::Int))
+                if(CHECK(ints && ints->GetType() == Type::Int) && ints)
                 {
                     const std::span<const int64_t> values = ints->GetValue<int64_t>();
                     CHECK(values.size() == 2 && values[0] == 1000 && values[1] == 2000);
                 }
-                if(CHECK(hex && hex->GetType() == Type::Hex))
+                if(CHECK(hex && hex->GetType() == Type::Hex) && hex)
                 {
                     const std::span<const Hex> values = hex->GetValue<Hex>();
                     CHECK(values.size() == 2 && HexEquals<uint8_t>(values[0], 0xFF) && HexEquals<uint8_t>(values[1], 0x80));
@@ -5080,6 +5155,7 @@ int main(int argc, char** argv)
     RunCase("RegressionTest",      Test::RegressionTest);
     RunCase("RecoveryTest",        Test::RecoveryTest);
     RunCase("DuplicateKeyPolicyTest", Test::DuplicateKeyPolicyTest);
+    RunCase("NestingDepthTest",    Test::NestingDepthTest);
     RunCase("NegativeTest",        Test::NegativeTest);
     RunCase("PackTest",            Test::PackTest);
     RunCase("DigitSeparatorTest",  Test::DigitSeparatorTest);
