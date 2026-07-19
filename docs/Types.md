@@ -8,7 +8,7 @@
 | Int | `12345`, `-7` | 64-bit, literals accepted in `-2^63..2^64-1` |
 | Float | `3.14`, `1.0e21` | 64-bit, scientific notation supported. `inf`/`nan` not representable |
 | String | `"text"`, `'text'` | single or double quotes |
-| Hex | `0xFF5733` | `0x`/`0X` prefix marks it as hex |
+| Hex | `0xFF5733`, `0xABC` and `0x` | `0x`/`0X` prefix marks it as hex, stored as bytes |
 | Version | `1.0.0`, `1.0.0.0` | three- or four-component dotted numeric version |
 | Timestamp | `2024-12-24T15:30:00`, `2024-12-24`, `15:30:00` | ISO-8601 date, time or both |
 | Null / Nil | `null`, `nil` | absence of a value, `nil` is an alias of `null` |
@@ -20,6 +20,10 @@ years that contain it.
 Int stores 64 bits with no separate unsigned type. Literals above `2^63-1` keep their unsigned
 bit pattern and read back exactly through `GetValue<uint64_t>()`. They re-serialize in signed
 form: `18446744073709551615` is written back as `-1`, same bits.
+
+Hex is a byte string. Length is part of the value, so `0x00FFFF` and `0xFFFF` differ, and `0x` is the
+zero-byte value. Odd-length literals are accepted: `0xABC` stores `0A BC` with an implied zero
+leading nibble and comes back as `0x0ABC`. Digit case is a writer style choice.
 
 ## Packs
 

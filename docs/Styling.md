@@ -22,3 +22,6 @@ and keep diffs small. Use a designated initializer to change individual fields, 
 | `bAlwaysUseDoubleQuoteForStrings` | `false` | force `"` quoting |
 
 `STYLE` is a template argument, so a style can't be picked at runtime.
+
+Hex writes whole bytes, so an odd-length literal like `0xABC` is emitted as `0x0ABC`. Same bytes,
+the leading zero nibble is the only difference.

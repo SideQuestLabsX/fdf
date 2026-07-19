@@ -5,6 +5,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -118,12 +119,136 @@ inline void CountDiagnostics(const fdf::Diagnostic& diagnostic) noexcept
         fdf::test::g_sawAlreadyHasComment = true;
 }
 
-// Component 0 of a string-ish entry (String/Hex/Timestamp) as a view, via the read-only span
 [[nodiscard]] constexpr std::string_view FirstString(const fdf::Entry& e) noexcept
 {
     const std::span<const fdf::String> parts = e.GetValue<fdf::String>();
     return parts.empty()? std::string_view{} : std::string_view(parts[0]);
 }
+
+template<typename T>
+[[nodiscard]] constexpr bool HexEquals(const fdf::Hex& hex, const T& expected, const size_t byteOffset = 0) noexcept
+{
+    T value{};
+    return hex.Read(value, byteOffset) && value == expected;
+}
+
+struct Rgb { uint8_t r = 0, g = 0, b = 0; };
+[[nodiscard]] constexpr bool ReadHex(fdf::HexReader& reader, Rgb& value) noexcept
+{
+    return reader.Read(value.r) && reader.Read(value.g) && reader.Read(value.b);
+}
+[[nodiscard]] constexpr bool WriteHex(fdf::HexWriter& writer, const Rgb& value) noexcept
+{
+    return writer.Write(value.r) && writer.Write(value.g) && writer.Write(value.b);
+}
+
+// WriteHex only
+struct RgbWriteOnly { uint8_t r = 0, g = 0, b = 0; };
+[[nodiscard]] constexpr bool WriteHex(fdf::HexWriter& writer, const RgbWriteOnly& value) noexcept
+{
+    return writer.Write(value.r) && writer.Write(value.g) && writer.Write(value.b);
+}
+
+struct EmptyHook {};
+[[nodiscard]] constexpr bool WriteHex(fdf::HexWriter&, const EmptyHook&) noexcept
+{
+    return true;
+}
+
+struct HookFailure { uint8_t byte; };
+[[nodiscard]] constexpr bool WriteHex(fdf::HexWriter& writer, const HookFailure& value) noexcept
+{
+    return writer.Write(value.byte) && false;
+}
+
+struct CountedUnbounded
+{
+    int* calls;
+    uint8_t byte;
+};
+[[nodiscard]] constexpr bool WriteHex(fdf::HexWriter& writer, const CountedUnbounded& value) noexcept
+{
+    (*value.calls)++;
+    return writer.Write(value.byte);
+}
+
+struct GrowingUnbounded { int* calls; };
+[[nodiscard]] constexpr bool WriteHex(fdf::HexWriter& writer, const GrowingUnbounded& value) noexcept
+{
+    (*value.calls)++;
+    return writer.Write(uint64_t{0x0102030405060708ull});
+}
+
+struct ResourceValue { fdf::String bytes; };
+[[nodiscard]] constexpr bool WriteHex(fdf::HexWriter& writer, const ResourceValue& value) noexcept
+{
+    for(const char byte : value.bytes)
+    {
+        if(!writer.Write(static_cast<uint8_t>(byte)))
+            return false;
+    }
+    return true;
+}
+
+struct NestedHook
+{
+    RgbWriteOnly color;
+    uint8_t tail;
+};
+[[nodiscard]] constexpr bool WriteHex(fdf::HexWriter& writer, const NestedHook& value) noexcept
+{
+    return writer.Write(value.color) && writer.Write(value.tail);
+}
+
+struct ReadNested
+{
+    Rgb color;
+    uint8_t tail;
+};
+[[nodiscard]] constexpr bool ReadHex(fdf::HexReader& reader, ReadNested& value) noexcept
+{
+    return reader.Read(value.color) && reader.Read(value.tail);
+}
+
+struct PoisonParent { uint8_t tail; };
+[[nodiscard]] constexpr bool WriteHex(fdf::HexWriter& writer, const PoisonParent& value) noexcept
+{
+    (void)writer.Write(HookFailure{ 0x11 });
+    return writer.Write(value.tail);
+}
+
+[[nodiscard]] constexpr bool WritePair(fdf::HexWriter& writer, const uint8_t a, const uint8_t b) noexcept
+{
+    return writer.Write(a) && writer.Write(b);
+}
+
+struct HelperComposed { uint8_t head = 0, a = 0, b = 0, tail = 0; };
+[[nodiscard]] constexpr bool WriteHex(fdf::HexWriter& writer, const HelperComposed& value) noexcept
+{
+    return writer.Write(value.head)
+        && WritePair(writer, value.a, value.b) && writer.Write(value.tail);
+}
+
+struct ReaderPoison
+{
+    uint16_t wide = 0xCAFE;
+    uint8_t tail = 0xA5;
+};
+[[nodiscard]] constexpr bool ReadHex(fdf::HexReader& reader, ReaderPoison& value) noexcept
+{
+    (void)reader.Read(value.wide);
+    return reader.Read(value.tail);
+}
+
+struct HookLess { uint16_t a; };
+template<typename T>
+inline constexpr bool HexTransfers = requires(fdf::Hex& h, T& v) { h.Read(v); h.Write(v); };
+template<typename T>
+inline constexpr bool HexWrites = requires(fdf::Hex& h, const T& v) { h.Write(v); };
+static_assert(HexTransfers<uint32_t> && HexTransfers<Rgb> && !HexTransfers<HookLess>);
+static_assert(HexWrites<RgbWriteOnly> && !HexWrites<HookLess>);
+static_assert(fdf::detail::HasHexWriter<Rgb> && fdf::detail::HasHexWriter<RgbWriteOnly>
+    && !fdf::detail::HasHexWriter<HookLess>);
 
 [[nodiscard]] constexpr bool FirstIntEquals(const fdf::Entry* e, int64_t expected) noexcept
 {
@@ -910,13 +1035,18 @@ namespace fdf::detail
                 CHECK(e->GetType() == Type::Bool && v.size() == 3 && v[0] == false && v[1] == false && v[2] == false);
             }
 
-            // Hex/Timestamp reject Resize: an empty component isn't valid hex or timestamp text
+            // Timestamp ignores Resize
             if(UniqueEntryPtr doc = ParseBuffer("h = 0xFF|0x80\nt = 2024-01-02|2024-03-04\n"))
             {
                 if(Entry* h = doc->GetChild("h"); CHECK(h && h->GetType() == Type::Hex))
                 {
                     h->Resize(4);
-                    CHECK(std::as_const(*h).GetValue<String>().size() == 2);   // unchanged, Resize was a no-op
+                    auto grown = h->GetValue<Hex>();
+                    CHECK(grown.size() == 4 && HexEquals<uint8_t>(grown[0], 0xFF) && HexEquals<uint8_t>(grown[1], 0x80)
+                        && grown[2].IsEmpty() && grown[3].IsEmpty());
+                    h->Resize(1);
+                    auto shrunk = h->GetValue<Hex>();
+                    CHECK(shrunk.size() == 1 && HexEquals<uint8_t>(shrunk[0], 0xFF));
                 }
                 if(Entry* t = doc->GetChild("t"); CHECK(t && t->GetType() == Type::Timestamp))
                 {
@@ -1546,7 +1676,6 @@ namespace fdf::detail
             checkStrings("\"a\\\"q\"|'b\\tc'",           { "a\"q", "b\tc" });
             checkStrings("\"\"|\"x\"",                   { "", "x" });
 
-            // hex and timestamp packs expose preserved text through a const span
             auto checkText = [](std::string_view src, Type type, std::initializer_list<std::string_view> exp)
             {
                 UniqueEntryPtr root = ParseBuffer(std::format("v = {}\n", src));
@@ -1560,10 +1689,34 @@ namespace fdf::detail
                 for(std::string_view x : exp)
                     CHECK_MSG(parts[i++] == x, src);
             };
-            checkText("0xFF|0xAA",                Type::Hex,       { "0xFF", "0xAA" });
-            checkText("0x1|0x2|0x3",              Type::Hex,       { "0x1", "0x2", "0x3" });
             checkText("2024-12-24|15:30:00",      Type::Timestamp, { "2024-12-24", "15:30:00" });
             checkText("2024-12-24T15:30:00Z|2024-359", Type::Timestamp, { "2024-12-24T15:30:00Z", "2024-359" });
+
+            if(UniqueEntryPtr root = ParseBuffer("v = 0xFF|0xAA\n"))
+            {
+                const Entry* e = root->GetChild("v");
+                if(CHECK(e && e->GetType() == Type::Hex))
+                {
+                    const std::span<const Hex> parts = e->GetValue<Hex>();
+                    CHECK(parts.size() == 2
+                        && parts[0].Size() == 1 && HexEquals<uint8_t>(parts[0], 0xFF)
+                        && parts[1].Size() == 1 && HexEquals<uint8_t>(parts[1], 0xAA));
+                }
+            }
+            if(UniqueEntryPtr root = ParseBuffer("v = 0x1|0x2|0x3\n"))
+            {
+                const Entry* e = root->GetChild("v");
+                if(CHECK(e && e->GetType() == Type::Hex))
+                {
+                    const std::span<const Hex> parts = e->GetValue<Hex>();
+                    CHECK(parts.size() == 3);
+                    for(size_t i = 0; i < parts.size(); i++)
+                    {
+                        CHECK(parts[i].Size() == 1
+                            && HexEquals<uint8_t>(parts[i], static_cast<uint8_t>(i + 1)));
+                    }
+                }
+            }
 
             // GetValue<Timestamp> on a timestamp pack decodes component 0
             if(UniqueEntryPtr root = ParseBuffer("v = 2024-12-24|15:30:00\n"))
@@ -1576,26 +1729,50 @@ namespace fdf::detail
                 }
             }
 
-            // hex/timestamp pack write -> reparse round trip, unquoted atoms joined with '|'
-            for(std::string_view src : { "v = 0xFF|0xAA\n", "v = 2024-12-24|15:30:00\n" })
             {
+                constexpr std::string_view src = "v = 2024-12-24|15:30:00\n";
                 UniqueEntryPtr root = ParseBuffer(src);
-                if(!CHECK_MSG(static_cast<bool>(root), src))
-                    continue;
-                String out = WriteBuffer<Style{ .bCommas = false }>(*root);
-                CHECK_MSG(!out.contains('"') && !out.contains('\''), out);
-
-                UniqueEntryPtr reparsed = ParseBuffer(out);
-                const Entry* a = root->GetChild("v");
-                const Entry* b = reparsed? reparsed->GetChild("v") : nullptr;
-                if(CHECK_MSG(a && b && a->GetType() == b->GetType(), out))
+                if(CHECK_MSG(static_cast<bool>(root), src))
                 {
-                    const std::span<const String> pa = a->GetValue<String>();
-                    const std::span<const String> pb = b->GetValue<String>();
-                    if(CHECK_MSG(pa.size() == pb.size(), out))
+                    String out = WriteBuffer<Style{ .bCommas = false }>(*root);
+                    CHECK_MSG(!out.contains('"') && !out.contains('\''), out);
+
+                    UniqueEntryPtr reparsed = ParseBuffer(out);
+                    const Entry* a = root->GetChild("v");
+                    const Entry* b = reparsed? reparsed->GetChild("v") : nullptr;
+                    if(CHECK_MSG(a && b && a->GetType() == b->GetType(), out))
                     {
-                        for(size_t i = 0; i < pa.size(); i++)
-                            CHECK_MSG(pa[i] == pb[i], out);
+                        const std::span<const String> pa = a->GetValue<String>();
+                        const std::span<const String> pb = b->GetValue<String>();
+                        if(CHECK_MSG(pa.size() == pb.size(), out))
+                        {
+                            for(size_t i = 0; i < pa.size(); i++)
+                                CHECK_MSG(pa[i] == pb[i], out);
+                        }
+                    }
+                }
+            }
+
+            {
+                constexpr std::string_view src = "v = 0xFF|0xaBc\n";
+                UniqueEntryPtr root = ParseBuffer(src);
+                if(CHECK_MSG(static_cast<bool>(root), src))
+                {
+                    String out = WriteBuffer<Style{ .bCommas = false }>(*root);
+                    CHECK_MSG(!out.contains('"') && !out.contains('\''), out);
+
+                    UniqueEntryPtr reparsed = ParseBuffer(out);
+                    const Entry* a = root->GetChild("v");
+                    const Entry* b = reparsed? reparsed->GetChild("v") : nullptr;
+                    if(CHECK_MSG(a && b && a->GetType() == b->GetType(), out))
+                    {
+                        const std::span<const Hex> pa = a->GetValue<Hex>();
+                        const std::span<const Hex> pb = b->GetValue<Hex>();
+                        if(CHECK_MSG(pa.size() == pb.size(), out))
+                        {
+                            for(size_t i = 0; i < pa.size(); i++)
+                                CHECK_MSG(pa[i] == pb[i], out);
+                        }
                     }
                 }
             }
@@ -1882,19 +2059,392 @@ namespace fdf::detail
                 }
             }
 
-            // hex and timestamps expose String[1] only through a const span
             if(UniqueEntryPtr root = ParseBuffer("h = 0xFF5733\nt = 2024-12-24T15:30:00\n"))
             {
                 Entry* h = root->GetChild("h");
                 Entry* t = root->GetChild("t");
-                CHECK(h && h->GetType() == Type::Hex && FirstString(*h) == "0xFF5733");
+                CHECK(h && h->GetType() == Type::Hex);
                 CHECK(t && t->GetType() == Type::Timestamp && FirstString(*t) == "2024-12-24T15:30:00");
                 if(h && t)
                 {
-                    CHECK(std::as_const(*h).GetValue<String>().size() == 1);   // const gate: readable
                     CHECK(std::as_const(*t).GetValue<String>().size() == 1);
-                    CHECK(h->GetValue<String>().empty());                      // mutable gate: String-only
                     CHECK(t->GetValue<String>().empty());
+                    CHECK(std::as_const(*h).GetValue<String>().empty());
+                    CHECK(h->GetValue<String>().empty());
+                    CHECK(h->GetValue<Hex>().size() == 1 && HexEquals<uint32_t>(h->GetValue<Hex>()[0], 0x00FF5733u));
+                }
+            }
+        }
+
+
+
+
+        static void HexStorageTest()
+        {
+            static_assert(sizeof(Hex) == 16 && alignof(Hex) == 8);
+
+            if(UniqueEntryPtr root = ParseBuffer("h = 0xFF5733\n"))
+            {
+                Entry* e = root->GetChild("h");
+                if(CHECK(e && e->GetType() == Type::Hex))
+                {
+                    std::span<Hex> s = e->GetValue<Hex>();
+                    CHECK(s.size() == 1 && s[0].Size() == 3 && !s[0].IsEmpty() && s[0].DigitCount() == 6);
+
+                    const std::span<const std::byte> bytes = std::as_const(s[0]).Bytes();
+                    CHECK(bytes.size() == 3 && bytes[0] == std::byte{0xFF}
+                        && bytes[1] == std::byte{0x57} && bytes[2] == std::byte{0x33});
+
+                    CHECK(HexEquals<uint32_t>(s[0], 0x00FF5733u));
+                    CHECK(HexEquals<uint64_t>(s[0], 0x00FF5733ull));
+                    CHECK(HexEquals<uint8_t>(s[0], 0xFF));
+                    CHECK(HexEquals<uint8_t>(s[0], 0x57, 1));
+                    CHECK(HexEquals<uint16_t>(s[0], 0x5733, 1));
+
+                    CHECK(s[0].Write<uint8_t>(0x99, 1));
+                    CHECK(HexEquals<uint32_t>(s[0], 0x00FF9933u));
+                    s[0].Bytes()[0] = std::byte{0x01};
+                    CHECK(HexEquals<uint32_t>(s[0], 0x00019933u));
+                }
+            }
+
+            // odd literal re-emits padded
+            if(UniqueEntryPtr root = ParseBuffer("h = 0xABC\n"))
+            {
+                Entry* e = root->GetChild("h");
+                if(CHECK(e && e->GetType() == Type::Hex))
+                {
+                    std::span<Hex> s = e->GetValue<Hex>();
+                    CHECK(s.size() == 1 && s[0].Size() == 2 && s[0].DigitCount() == 4);
+                    CHECK(HexEquals<uint16_t>(s[0], 0x0ABC));
+
+                    String out = WriteBuffer<Style{ .bCommas = false }>(*root);
+                    CHECK_MSG(out.contains("h=0x0ABC"), out);
+                    UniqueEntryPtr reparsed = ParseBuffer(out);
+                    CHECK(reparsed && TreeEqual(*root, *reparsed));
+                }
+            }
+
+            if(UniqueEntryPtr root = ParseBuffer("h = 0XfF5733\n"))
+            {
+                String upper = WriteBuffer<Style{ .bCommas = false }>(*root);
+                CHECK_MSG(upper.contains("h=0xFF5733"), upper);
+                String lower = WriteBuffer<Style{ .bCommas = false, .bUppercaseHex = false }>(*root);
+                CHECK_MSG(lower.contains("h=0xff5733"), lower);
+            }
+
+            if(UniqueEntryPtr root = ParseBuffer("h = 0x01020304\n"))
+            {
+                Entry* e = root->GetChild("h");
+                if(CHECK(e && e->GetType() == Type::Hex))
+                {
+                    std::span<Hex> s = e->GetValue<Hex>();
+                    CHECK(HexEquals<uint32_t>(s[0], 0x01020304u) && HexEquals<uint16_t>(s[0], 0x0304, 2));
+                    CHECK(s[0].Write<uint32_t>(0xAABBCCDDu, 0));
+                    const std::span<const std::byte> bytes = std::as_const(s[0]).Bytes();
+                    CHECK(bytes[0] == std::byte{0xAA} && bytes[3] == std::byte{0xDD});
+
+                    CHECK(s[0].Write<float>(1.0f, 0));
+                    CHECK(HexEquals<uint32_t>(s[0], 0x3F800000u));
+                    CHECK(HexEquals<float>(s[0], 1.0f));
+                }
+            }
+
+            // bool is one byte, nonzero reads true
+            if(UniqueEntryPtr root = ParseBuffer("h = 0x0100FF\n"))
+            {
+                Entry* e = root->GetChild("h");
+                if(CHECK(e && e->GetType() == Type::Hex))
+                {
+                    std::span<Hex> s = e->GetValue<Hex>();
+                    bool a = false, b = true, c = false;
+                    CHECK(s[0].Read(a) && a);              // 0x01
+                    CHECK(s[0].Read(b, 1) && !b);          // 0x00
+                    CHECK(s[0].Read(c, 2) && c);           // 0xFF nonzero
+                    CHECK(s[0].Write(true, 1) && std::as_const(s[0]).Bytes()[1] == std::byte{1});
+                    CHECK(s[0].Write(false, 0) && std::as_const(s[0]).Bytes()[0] == std::byte{0});
+
+                    Hex flag;
+                    bool set = false;
+                    CHECK(flag.Write(true) && flag.Size() == 1 && flag.Read(set) && set);
+                }
+            }
+
+            {
+                UniqueEntryPtr root = ParseBuffer("h = 0xFF5733\n");
+                Entry* e = root? root->GetChild("h") : nullptr;
+                if(CHECK(e && e->GetType() == Type::Hex))
+                {
+                    std::span<Hex> s = e->GetValue<Hex>();
+                    Rgb c{};
+                    CHECK(s[0].Read(c) && c.r == 0xFF && c.g == 0x57 && c.b == 0x33);
+                    CHECK(s[0].Write(Rgb{ 0x11, 0x22, 0x33 }, 0));
+                    CHECK(HexEquals<uint32_t>(s[0], 0x00112233u));
+
+                    // an offset past the end has nothing to overwrite
+                    Hex fresh;
+                    CHECK(!fresh.Write(Rgb{ 0xAA, 0xBB, 0xCC }, 1) && fresh.IsEmpty());
+                    CHECK(!fresh.Write(uint8_t{0xAA}, 1) && fresh.IsEmpty());
+
+                    Hex appended;
+                    CHECK(appended.Write(uint8_t{0x11}) && appended.Write(RgbWriteOnly{ 0x22, 0x33, 0x44 })
+                        && appended.Size() == 4 && HexEquals<uint32_t>(appended, 0x11223344u));
+
+                    Hex explicitOffset;
+                    CHECK(explicitOffset.Write(uint16_t{0xAABB}, 0)
+                        && explicitOffset.Write(RgbWriteOnly{ 0xCC, 0xDD, 0xEE }, 2)
+                        && explicitOffset.Size() == 5 && HexEquals<uint64_t>(explicitOffset, 0xAABBCCDDEEull));
+
+                    Hex emptySlice;
+                    CHECK(emptySlice.Write(EmptyHook{}) && emptySlice.Size() == 0);
+                    CHECK(!emptySlice.Write(EmptyHook{}, 2) && emptySlice.Size() == 0);
+
+                    Hex resource;
+                    CHECK(resource.Write(ResourceValue{ String("owned") })
+                        && resource.Size() == 5 && resource.Bytes()[0] == static_cast<std::byte>('o')
+                        && resource.Bytes()[4] == static_cast<std::byte>('d'));
+
+                    Hex nested;
+                    CHECK(nested.Write(NestedHook{ { 5, 6, 7 }, 8 })
+                        && HexEquals<uint32_t>(nested, 0x05060708u));
+
+                    ReadNested nestedRead{};
+                    CHECK(nested.Read(nestedRead) && nestedRead.color.r == 5
+                        && nestedRead.color.g == 6 && nestedRead.color.b == 7 && nestedRead.tail == 8);
+
+                    // interior overwrite keeps the suffix, an overlapping one extends
+                    Hex interior;
+                    CHECK(interior.Write(uint32_t{0xA1A2A3A4u}) && interior.Write(Rgb{ 1, 2, 3 }, 0)
+                        && interior.Size() == 4 && HexEquals<uint32_t>(interior, 0x010203A4u));
+                    CHECK(interior.Write(Rgb{ 4, 5, 6 }, 2) && interior.Size() == 5
+                        && HexEquals<uint64_t>(interior, 0x0102040506ull));
+                }
+            }
+
+            // sticky poison survives a hook that ignores a failed write
+            {
+                const std::byte raw[] = { std::byte{0x10}, std::byte{0x20}, std::byte{0x30} };
+                Hex h(std::span<const std::byte>{raw});
+                const Hex original = h;
+                CHECK(!h.Write(PoisonParent{ 0xEE }, 1));
+                CHECK(h == original && h.Size() == original.Size());
+            }
+
+            {
+                Hex composed;
+                CHECK(composed.Write(HelperComposed{ 1, 2, 3, 4 }) && HexEquals<uint32_t>(composed, 0x01020304u));
+            }
+
+            // a failure mid-hook restores the overwrite and append paths
+            {
+                const std::byte raw[] = { std::byte{0x10}, std::byte{0x20}, std::byte{0x30} };
+                for(const size_t offset : { size_t{0}, size_t{1}, size_t{3} })
+                {
+                    Hex h(std::span<const std::byte>{raw});
+                    const Hex original = h;
+                    CHECK(!h.Write(HookFailure{ 0xEE }, offset));
+                    CHECK(h == original && h.Size() == original.Size());
+                }
+
+                Hex h(std::span<const std::byte>{raw});
+                const Hex original = h;
+                CHECK(!h.Write(HookFailure{ 0xEE }, 4) && h == original);
+                CHECK(!h.Write(RgbWriteOnly{ 1, 2, 3 }, 4) && h == original);
+                CHECK(!h.Decode("AB", 4) && h == original);
+            }
+
+            // allocation failure restores bytes and size
+            {
+                const std::byte raw[] = { std::byte{0x10}, std::byte{0x20}, std::byte{0x30}, std::byte{0x40} };
+
+                Hex appendFailure;
+                int unboundedCalls = 0;
+                detail::GlobalAllocator::FailAllocationAfter(0);
+                CHECK(!appendFailure.Write(CountedUnbounded{ &unboundedCalls, 0xEE }));
+                detail::GlobalAllocator::ResetAllocationFailure();
+                CHECK(unboundedCalls == 1 && appendFailure.IsEmpty());
+
+                Hex growthFailure(std::span<const std::byte>{raw});
+                const Hex growthFailureOriginal = growthFailure;
+                unboundedCalls = 0;
+                detail::GlobalAllocator::FailAllocationAfter(0);
+                CHECK(!growthFailure.Write(GrowingUnbounded{ &unboundedCalls }, 1));
+                detail::GlobalAllocator::ResetAllocationFailure();
+                CHECK(unboundedCalls == 1 && growthFailure == growthFailureOriginal
+                    && growthFailure.Size() == growthFailureOriginal.Size());
+            }
+
+            // cursor reads want the complete scalar, poison sticks
+            {
+                const std::byte one[] = { std::byte{0x7F} };
+                Hex shortInput(std::span<const std::byte>{one});
+                Rgb rgb{ 1, 2, 3 };
+                CHECK(!shortInput.Read(rgb));
+
+                ReaderPoison poisoned{};
+                CHECK(!shortInput.Read(poisoned));
+                CHECK(poisoned.wide == 0xCAFE && poisoned.tail == 0xA5);
+
+                uint32_t widened = 0;
+                CHECK(shortInput.Read(widened) && widened == 0x7Fu);
+            }
+
+            if(UniqueEntryPtr root = NewEntry())
+            {
+                Entry* e = root->Emplace("h");
+                if(CHECK(static_cast<bool>(e)))
+                {
+                    const std::byte raw[3] = { std::byte{0xFF}, std::byte{0x57}, std::byte{0x33} };
+                    e->SetValue(Hex(std::span<const std::byte>(raw, 3)));
+                    CHECK(e->GetType() == Type::Hex && e->GetValue<Hex>().size() == 1
+                        && HexEquals<uint32_t>(e->GetValue<Hex>()[0], 0x00FF5733u));
+
+                    Hex source(std::span<const std::byte>(raw, 2));
+                    e->SetValue(source);
+                    CHECK(source.Write<uint16_t>(0x0000, 0));
+                    CHECK(HexEquals<uint16_t>(e->GetValue<Hex>()[0], 0xFF57));
+
+                    const Hex pack[2] = { Hex(std::span<const std::byte>(raw, 1)), Hex(std::span<const std::byte>(raw, 3)) };
+                    e->SetValue(std::span<const Hex>(pack, 2));
+                    std::span<Hex> s = e->GetValue<Hex>();
+                    CHECK(s.size() == 2 && s[0].Size() == 1 && s[1].Size() == 3 && s[0] == pack[0] && s[1] == pack[1]);
+
+                    s[0] = pack[1];
+                    CHECK(s[0] == pack[1] && HexEquals<uint32_t>(s[0], 0x00FF5733u));
+
+                    e->SetValue(std::span<const Hex>(s).subspan(1));
+                    CHECK(e->GetValue<Hex>().size() == 1 && e->GetValue<Hex>()[0] == pack[1]);
+
+                    // moving from a component of this very entry survives Repurpose
+                    e->SetValue(std::move(e->GetValue<Hex>()[0]));
+                    CHECK(e->GetValue<Hex>().size() == 1 && e->GetValue<Hex>()[0] == pack[1]);
+
+                    String owned("moved");
+                    e->SetValue(std::move(owned));
+                    CHECK(e->GetType() == Type::String && owned.empty()
+                        && std::as_const(*e).GetValue<String>()[0] == "moved");
+                }
+            }
+
+            {
+                Hex h;
+                CHECK(h.Assign("0xFF5733") && h.Size() == 3 && HexEquals<uint32_t>(h, 0x00FF5733u));
+                CHECK(h.Assign("aBc") && h.Size() == 2 && HexEquals<uint16_t>(h, 0x0ABC));
+                CHECK(h.Assign("0X01") && h.Size() == 1 && HexEquals<uint8_t>(h, 0x01));
+                CHECK(h.Assign("") && h.IsEmpty());
+                CHECK(h.Assign("0x") && h.IsEmpty());
+
+                Hex built;
+                CHECK(built.Decode("0xFF57") && built.Decode("33")
+                    && built.Size() == 3 && HexEquals<uint32_t>(built, 0x00FF5733u));
+
+                CHECK(h.Assign("FF5733") && h.Decode("ABC")
+                    && h.Size() == 5 && HexEquals<uint64_t>(h, 0xFF57330ABCull));
+                CHECK(h.Decode("0x01") && h.Size() == 6);
+
+                CHECK(h.Assign("FF5733") && h.Decode("99", 1)
+                    && h.Size() == 3 && HexEquals<uint32_t>(h, 0x00FF9933u));
+                // an overlapping overwrite extends
+                CHECK(h.Decode("AABB", 2) && h.Size() == 4
+                    && HexEquals<uint32_t>(h, 0xFF99AABBu));
+                CHECK(h.Decode("CC", 4) && h.Size() == 5);
+                CHECK(h.Decode("", 2) && h.Size() == 5);
+                CHECK(!h.Decode("DD", 6) && h.Size() == 5);
+                CHECK(!h.Decode("", 6) && h.Size() == 5);
+
+                // a rejected string leaves the value untouched on every entry point
+                const Hex original = h;
+                for(const std::string_view bad : { "0xZZ", "12G4", " 12", "0x1 2", "-1" })
+                {
+                    CHECK_MSG(!h.Assign(bad), bad);
+                    CHECK_MSG(h == original && h.Size() == original.Size(), bad);
+                    CHECK_MSG(!h.Decode(bad), bad);
+                    CHECK_MSG(h == original && h.Size() == original.Size(), bad);
+                    CHECK_MSG(!h.Decode(bad, 1), bad);
+                    CHECK_MSG(h == original && h.Size() == original.Size(), bad);
+                }
+            }
+
+            if(UniqueEntryPtr root = NewEntry())
+            {
+                Entry* e = root->Emplace("reuseHex");
+                if(CHECK(static_cast<bool>(e)))
+                {
+                    const std::byte raw[3] = { std::byte{0xAA}, std::byte{0xBB}, std::byte{0xCC} };
+                    int64_t ints[2] = { 1, 2 };
+                    e->SetValue(std::span(ints, 2));
+                    const void* p = static_cast<const void*>(e->GetValue<int64_t>().data());
+                    e->SetValue(Hex(std::span<const std::byte>(raw, 3)));
+                    CHECK(e->GetType() == Type::Hex
+                        && static_cast<const void*>(e->GetValue<Hex>().data()) == p
+                        && HexEquals<uint32_t>(e->GetValue<Hex>()[0], 0x00AABBCCu));
+
+                    const Hex pack[2] = { Hex(std::span<const std::byte>(raw, 1)), Hex(std::span<const std::byte>(raw, 2)) };
+                    e->SetValue(std::span<const Hex>(pack, 2));
+                    const void* pv = static_cast<const void*>(e->GetValue<Hex>().data());
+                    double dbls[4] = { 1.0, 2.0, 3.0, 4.0 };
+                    e->SetValue(std::span(dbls, 4));
+                    CHECK(e->GetType() == Type::Float
+                        && static_cast<const void*>(e->GetValue<double>().data()) == pv
+                        && e->GetValue<double>()[3] == 4.0);
+                }
+            }
+
+            {
+                Hex h;
+                CHECK(!h.Write<uint16_t>(0xABCD, 1) && h.IsEmpty());
+                CHECK(h.Write<uint8_t>(0x00, 0) && h.Write<uint16_t>(0xABCD, 1));
+                CHECK(h.Size() == 3 && h.Bytes()[0] == std::byte{0}
+                    && h.Bytes()[1] == std::byte{0xAB} && h.Bytes()[2] == std::byte{0xCD});
+                CHECK(HexEquals<uint32_t>(h, 0x00ABCDu));
+
+                CHECK(h.Write<uint8_t>(0xEF) && h.Size() == 4 && HexEquals<uint32_t>(h, 0x00ABCDEFu));
+                // rejected before anything is allocated
+                const Hex original = h;
+                for(const size_t bad : { size_t{5}, Hex::MaxSize() - 2, Hex::MaxSize(),
+                                         std::numeric_limits<size_t>::max() })
+                {
+                    CHECK(!h.Write<uint8_t>(0x12, bad) && h == original && h.Size() == original.Size());
+                    CHECK(!h.Write(RgbWriteOnly{ 1, 2, 3 }, bad) && h == original);
+                }
+
+                uint32_t unchanged = 123;
+                CHECK(!h.Read(unchanged, std::numeric_limits<size_t>::max()) && unchanged == 123);
+
+                Hex tooShort;
+                float decodedFloat = 42.0f;
+                CHECK(!tooShort.Read(decodedFloat) && decodedFloat == 42.0f);
+            }
+
+            if(UniqueEntryPtr root = ParseBuffer("empty = 0x\npack = 0xFF|0x\n"))
+            {
+                Entry* empty = root->GetChild("empty");
+                Entry* pack = root->GetChild("pack");
+                CHECK(empty && empty->GetType() == Type::Hex && empty->GetValue<Hex>().size() == 1
+                    && empty->GetValue<Hex>()[0].IsEmpty() && empty->GetValue<Hex>()[0].DigitCount() == 0);
+                CHECK(HexEquals<uint32_t>(empty->GetValue<Hex>()[0], 0u));
+                CHECK(pack && pack->GetValue<Hex>().size() == 2 && pack->GetValue<Hex>()[1].IsEmpty());
+                String out = WriteBuffer<Style{ .bCommas = false }>(*root);
+                CHECK_MSG(out.contains("empty=0x") && out.contains("pack=0xFF|0x"), out);
+                UniqueEntryPtr reparsed = ParseBuffer(out);
+                CHECK(reparsed && TreeEqual(*root, *reparsed));
+            }
+
+            // no size cap
+            {
+                std::string large = "big = 0x";
+                large.append(131071, 'F');
+                large += "\n";
+                UniqueEntryPtr root = ParseBuffer(large);
+                if(CHECK(static_cast<bool>(root)))
+                {
+                    Entry* e = root->GetChild("big");
+                    if(CHECK(e && e->GetType() == Type::Hex))
+                    {
+                        std::span<Hex> s = e->GetValue<Hex>();
+                        CHECK(s.size() == 1 && s[0].Size() == 65536
+                            && s[0].Bytes()[0] == std::byte{0x0F} && s[0].Bytes()[65535] == std::byte{0xFF});
+                    }
                 }
             }
         }
@@ -2318,19 +2868,7 @@ namespace fdf::detail
             return true;
         }
 
-        static bool EqualIgnoreCase(std::string_view a, std::string_view b)
-        {
-            if(a.size() != b.size())
-                return false;
-            auto up = [](char c) { return (c >= 'a' && c <= 'z')? static_cast<char>(c - 32) : c; };
-            for(size_t i = 0; i < a.size(); i++)
-                if(up(a[i]) != up(b[i]))
-                    return false;
-            return true;
-        }
-
-        // Semantic value equality (not byte equality): hex is case-insensitive, floats compare as the
-        // decoded doubles, Null/Nil are the same type. Containers are handled by TreeEqual
+        // containers go through TreeEqual
         static bool ValueEqual(const Entry& a, const Entry& b)
         {
             if(a.GetType() != b.GetType())
@@ -2342,20 +2880,8 @@ namespace fdf::detail
                 case Type::Int:                       return SpanEqual(a.GetValue<int64_t>(),  b.GetValue<int64_t>());
                 case Type::Version:                    return SpanEqual(a.GetValue<Version>(),  b.GetValue<Version>());
                 case Type::Float:                     return SpanEqual(a.GetValue<double>(),   b.GetValue<double>());
+                case Type::Hex:                       return SpanEqual(a.GetValue<Hex>(),      b.GetValue<Hex>());
                 case Type::String: case Type::Timestamp: return SpanEqual(a.GetValue<String>(), b.GetValue<String>());
-                case Type::Hex:
-                {
-                    const std::span<const String> ha = a.GetValue<String>();
-                    const std::span<const String> hb = b.GetValue<String>();
-                    if(ha.size() != hb.size())
-                        return false;
-                    for(size_t i = 0; i < ha.size(); i++)
-                    {
-                        if(!EqualIgnoreCase(ha[i], hb[i]))
-                            return false;
-                    }
-                    return true;
-                }
                 default:                              return false;
             }
         }
@@ -2428,6 +2954,8 @@ namespace fdf::detail
                 "sCtrl = \"tab\\there\"\n"
                 "smd = \"a\"|\"b|c\"|\"\"\n"
                 "hexv = 0xFF00AA\n"
+                "hexOdd = 0xABC\n"
+                "hexMixedCase = 0xfF00aA\n"
                 "hmd = 0xFF|0xAA|0x01\n"
                 "ver3 = 1.2.3\n"
                 "ver4 = 1.2.3.4\n"
@@ -2975,9 +3503,9 @@ consteval bool HexTimestampPackProbe()
     const fdf::Entry* t = root? root->GetDirectChild("t") : nullptr;
     if(!h || h->GetType() != fdf::Type::Hex || !t || t->GetType() != fdf::Type::Timestamp)
         return false;
-    const std::span<const fdf::String> hp = h->GetValue<fdf::String>();
+    const std::span<const fdf::Hex> hp = h->GetValue<fdf::Hex>();
     const std::span<const fdf::String> tp = t->GetValue<fdf::String>();
-    return hp.size() == 2 && hp[0] == "0xFF" && hp[1] == "0xAA"
+    return hp.size() == 2 && HexEquals<uint8_t>(hp[0], 0xFF) && HexEquals<uint8_t>(hp[1], 0xAA)
         && tp.size() == 2 && tp[0] == "2024-12-24" && tp[1] == "15:30:00";
 }
 static_assert(HexTimestampPackProbe(), "consteval hex/timestamp pack parse");
@@ -3064,17 +3592,138 @@ consteval bool StringSelfAliasProbe()
 }
 static_assert(StringSelfAliasProbe(), "consteval String self-aliasing edits");
 
-consteval bool HexTimestampStringViewProbe()
+consteval bool TimestampStringViewProbe()
 {
-    fdf::UniqueEntryPtr root = fdf::ParseBuffer("h = 0xFF5733\nt = 2024-12-24T15:30:00\n");
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("t = 2024-12-24T15:30:00\n");
+    if(!root)
+        return false;
+    const fdf::Entry* t = root->GetDirectChild("t");
+    return t && t->GetType() == fdf::Type::Timestamp && FirstString(*t) == "2024-12-24T15:30:00";
+}
+static_assert(TimestampStringViewProbe(), "consteval timestamp String[1] round-trip");
+
+consteval bool HexStorageProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("h = 0xfF5733\nodd = 0xABC\nempty = 0x\n");
     if(!root)
         return false;
     const fdf::Entry* h = root->GetDirectChild("h");
-    const fdf::Entry* t = root->GetDirectChild("t");
-    return h && h->GetType() == fdf::Type::Hex && FirstString(*h) == "0xFF5733"
-        && t && t->GetType() == fdf::Type::Timestamp && FirstString(*t) == "2024-12-24T15:30:00";
+    if(!h || h->GetType() != fdf::Type::Hex || !h->GetValue<fdf::String>().empty())
+        return false;
+    const std::span<const fdf::Hex> hs = h->GetValue<fdf::Hex>();
+    if(hs.size() != 1 || hs[0].Size() != 3
+        || !HexEquals<uint32_t>(hs[0], 0x00FF5733u) || !HexEquals<uint8_t>(hs[0], 0x57, 1))
+        return false;
+
+    const fdf::Entry* odd = root->GetDirectChild("odd");
+    if(!odd || odd->GetType() != fdf::Type::Hex)
+        return false;
+    const std::span<const fdf::Hex> os = odd->GetValue<fdf::Hex>();
+    if(os.size() != 1 || os[0].Size() != 2
+        || os[0].DigitCount() != 4 || !HexEquals<uint16_t>(os[0], 0x0ABC))
+        return false;
+
+    const fdf::Entry* empty = root->GetDirectChild("empty");
+    if(!empty || empty->GetType() != fdf::Type::Hex || empty->GetValue<fdf::Hex>().size() != 1
+        || !empty->GetValue<fdf::Hex>()[0].IsEmpty())
+        return false;
+
+    fdf::Entry* injected = root->Emplace("injected");
+    if(!injected)
+        return false;
+    const std::byte bytes[3] = { std::byte{0xFF}, std::byte{0x57}, std::byte{0x33} };
+    injected->SetValue(fdf::Hex(std::span<const std::byte>(bytes, 3)));
+    if(injected->GetType() != fdf::Type::Hex)
+        return false;
+    std::span<fdf::Hex> is = injected->GetValue<fdf::Hex>();
+    if(is.size() != 1 || !HexEquals<uint32_t>(is[0], 0x00FF5733u))
+        return false;
+    if(!is[0].Write<uint8_t>(0x99, 1))
+        return false;
+    if(!HexEquals<uint32_t>(is[0], 0x00FF9933u))
+        return false;
+
+    fdf::Hex grown;
+    if(grown.Write<uint16_t>(0xABCD, 1))
+        return false;
+    if(!grown.Write<uint8_t>(0x00) || !grown.Write<uint16_t>(0xABCD, 1) || !grown.Write<uint8_t>(0xEF)
+        || grown.Size() != 4 || !HexEquals<uint32_t>(grown, 0x00ABCDEFu))
+        return false;
+
+    fdf::Hex decoded;
+    if(!decoded.Decode("0xFF57") || !decoded.Decode("3")
+        || decoded.Size() != 3 || !HexEquals<uint32_t>(decoded, 0x00FF5703u))
+        return false;
+    if(!decoded.Decode("99", 1) || decoded.Size() != 3
+        || !HexEquals<uint32_t>(decoded, 0x00FF9903u))
+        return false;
+    if(!decoded.Assign("0xABC") || decoded.Size() != 2)
+        return false;
+    const fdf::Hex beforeBadDigits = decoded;
+    if(decoded.Decode("0xZZ") || decoded != beforeBadDigits)
+        return false;
+
+    fdf::Hex hooked;
+    Rgb rgb{};
+    return hooked.Write(Rgb{ 0xFF, 0x57, 0x33 }) && HexEquals<uint32_t>(hooked, 0x00FF5733u)
+        && hooked.Read(rgb) && rgb.r == 0xFF && rgb.g == 0x57 && rgb.b == 0x33;
 }
-static_assert(HexTimestampStringViewProbe(), "consteval hex/timestamp String[1] round-trip");
+static_assert(HexStorageProbe(), "consteval hex parse + typed access + inject");
+
+consteval bool HexCursorProbe()
+{
+    fdf::Hex chained;
+    if(!chained.Write(Rgb{ 1, 2, 3 }) || !chained.Write(uint8_t{4})
+        || !HexEquals<uint32_t>(chained, 0x01020304u))
+        return false;
+
+    fdf::Hex nestedHex;
+    if(!nestedHex.Write(NestedHook{ { 5, 6, 7 }, 8 })
+        || !HexEquals<uint32_t>(nestedHex, 0x05060708u))
+        return false;
+
+    fdf::Hex empty;
+    if(!empty.Write(EmptyHook{}) || empty.Size() != 0)
+        return false;
+    if(empty.Write(EmptyHook{}, 2) || empty.Size() != 0)
+        return false;
+
+    const fdf::Hex original = nestedHex;
+    if(nestedHex.Write(HookFailure{ 0xEE }, 1) || nestedHex != original)
+        return false;
+
+    ReadNested nested{};
+    if(!nestedHex.Read(nested) || nested.color.r != 5 || nested.color.g != 6
+        || nested.color.b != 7 || nested.tail != 8)
+        return false;
+
+    fdf::Hex composed;
+    if(!composed.Write(HelperComposed{ 1, 2, 3, 4 }) || !HexEquals<uint32_t>(composed, 0x01020304u))
+        return false;
+
+    if(!composed.Write(Rgb{ 9, 8, 7 }, 0) || composed.Size() != 4
+        || !HexEquals<uint32_t>(composed, 0x09080704u))
+        return false;
+
+    const std::byte one[] = { std::byte{0x7F} };
+    const fdf::Hex shortInput(std::span<const std::byte>{one});
+    ReaderPoison poisoned{};
+    return !shortInput.Read(poisoned) && poisoned.wide == 0xCAFE && poisoned.tail == 0xA5;
+}
+static_assert(HexCursorProbe(), "consteval hex cursor transfers and recovery");
+
+consteval bool HexWriteProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("h = 0xff5733\nodd = 0xabc\np = 0xFF|0xAA\n");
+    if(!root)
+        return false;
+    fdf::String upper = fdf::WriteBuffer<fdf::Style{}>(*root);
+    if(!upper.contains("h=0xFF5733") || !upper.contains("odd=0x0ABC") || !upper.contains("p=0xFF|0xAA"))
+        return false;
+    fdf::String lower = fdf::WriteBuffer<fdf::Style{ .bUppercaseHex = false }>(*root);
+    return lower.contains("h=0xff5733") && lower.contains("odd=0x0abc") && lower.contains("p=0xff|0xaa");
+}
+static_assert(HexWriteProbe(), "consteval hex write");
 
 // one consteval parse probe per scalar type
 consteval bool IntProbe()
@@ -3606,6 +4255,7 @@ int main(int argc, char** argv)
     RunCase("PackTest",            Test::PackTest);
     RunCase("StringRoundTripTest", Test::StringRoundTripTest);
     RunCase("StringStorageTest",   Test::StringStorageTest);
+    RunCase("HexStorageTest",      Test::HexStorageTest);
     RunCase("StringApiTest",       Test::StringApiTest);
     RunCase("FloatRoundTripTest",  Test::FloatRoundTripTest);
     RunCase("TimestampTest",       Test::TimestampTest);

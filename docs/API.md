@@ -72,6 +72,70 @@ element writes all work. Each element is bit-cast, so values above `2^63-1` read
 full `uint32_t` range. `bHasRevision` distinguishes `1.2.3` from `1.2.3.0`. Packs may mix both
 forms: `1.0.0|2.0.0.0`.
 
+`Hex` stores decoded bytes in source order. `0x` is the empty byte string. `Read(value, offset)` and
+`Write(value, offset)` convert between the stored big-endian bytes and a host value, returning `bool`
+for success. Integral reads use the available bytes and zero-extend, floats need their full width,
+and a `bool` is one byte (nonzero reads true).
+
+Offsets run `0` to `Size()` on both sides. `Size()` itself reads zero bytes, so it decodes to `0`,
+and writes there append. An overwrite may run past the end and extend the value, but an offset past
+`Size()` has nothing to overwrite and is rejected, so a write never leaves a gap.
+
+| Member | Meaning |
+|---|---|
+| `Bytes()` | byte span over the value |
+| `Size()` | byte count |
+| `DigitCount()` | `Size() * 2` |
+| `IsEmpty()` | `Size() == 0` |
+| `MaxSize()` | largest byte count a `Hex` can hold |
+
+`Hex(std::span<const std::byte>)` and `Assign(std::span<const std::byte>)` copy raw bytes in.
+
+A class type joins `Read`/`Write` through cursor ADL hooks: `WriteHex(fdf::HexWriter&, const T&)`
+and `ReadHex(fdf::HexReader&, T&)`. Cursors advance on each call, so hooks chain member
+transfers without offset arithmetic:
+
+```cpp
+struct Rgb { uint8_t r, g, b; };
+constexpr bool ReadHex(fdf::HexReader& reader, Rgb& v) noexcept
+{
+    return reader.Read(v.r) && reader.Read(v.g) && reader.Read(v.b);
+}
+constexpr bool WriteHex(fdf::HexWriter& writer, const Rgb& v) noexcept
+{
+    return writer.Write(v.r) && writer.Write(v.g) && writer.Write(v.b);
+}
+```
+
+Cursor reads want the scalar's full width. Zero-extension stays on direct `Hex::Read`. A failed hook
+leaves the value unchanged: an overwrite stages its bytes past the current end and splices them into
+place only on success.
+
+`Assign` replaces, `Decode` appends and `Decode` at an offset overwrites, under the same offset rule.
+All accept an optional `0x`/`0X` prefix and leave the value untouched when a digit is invalid. There
+is no `string_view` constructor, since bad digits would have no way to reach the caller. Decode into
+a default-constructed `Hex` and check the result.
+
+```cpp
+Hex h;
+bool bOk = h.Assign("0xFF5733");   // FF 57 33
+bool bMore = h.Decode("ABC");      // FF 57 33 0A BC
+bool bAt = h.Decode("99", 1);      // FF 99 33 0A BC
+bool bBad = h.Decode("99", 9);     // false, nothing at offset 9 to overwrite
+```
+
+Digit width is cosmetic: `0xABC` and `0x0ABC` hold the same two bytes. Hex writes whole bytes, so an
+odd-length literal comes back padded (`0xABC` → `0x0ABC`), and an odd digit count decodes with a
+leading zero nibble.
+
+```cpp
+Hex& color = e->GetChild("color")->GetValue<Hex>()[0];   // 0xFF5733
+uint32_t rgb = 0;
+bool bRead = color.Read(rgb);                            // rgb = 0x00FF5733 on every host
+bool bAppended = color.Write(uint8_t{0xAA});              // color = 0xFF5733AA
+bool bWrote = color.Write(uint8_t{0x99}, 1);              // color = 0xFF9933AA
+```
+
 A string value is stored as an array of `fdf::String` (see [fdf::String](#fdfstring)).
 
 ```cpp
@@ -114,12 +178,13 @@ root->ForEach<fdf::ForEachFlags::Recursive>([](const fdf::Entry& e)
 Entry* Emplace(std::string_view key);    // add a child, returns it ("" for array items)
 Entry* AddChild(UniqueEntryPtr& e);      // adopt an existing node
 
-void SetValue(value);                    // bool, integer, float, string, Version, Timestamp...
+void SetValue(value);                    // bool, integer, float, string, Version, Timestamp, Hex...
                                          // pass std::span for a pack, or edit components through
-                                         // GetValue(); the component count stays fixed
+                                         // GetValue(); an rvalue String or Hex is moved
 bool SetIdentifier(std::string_view);
 void SetType(Type);
-void Resize(uint32_t);                   // grow/shrink a bool/int/uint/float/version/string pack; tail zero/empty
+void Resize(uint32_t);                   // grow/shrink a bool/int/float/string/version/hex pack,
+                                         // tail zero or empty. Timestamp packs ignore it
 
 bool RemoveChild(child | key | index);
 bool ClearChildren();

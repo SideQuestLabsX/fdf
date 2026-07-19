@@ -32,10 +32,12 @@
 
 #if !FDF_USE_CPP_MODULES
     #include <algorithm>
+    #include <array>
     #include <bit>
     #include <cassert>
     #include <cctype>
     #include <charconv>
+    #include <cstddef>
     #include <cstdint>
     #include <filesystem>
     #include <limits>
@@ -168,6 +170,9 @@ FDF_EXPORT namespace fdf
 
     class Entry;
     class String;
+    class Hex;
+    class HexWriter;
+    class HexReader;
 }
 
 
@@ -186,6 +191,24 @@ namespace fdf::detail
 
     template<typename Callable>
     constexpr bool IsValidDiagnosticCallback = std::is_invocable_v<Callable, const Diagnostic&>;
+
+    template<typename T>
+    concept IsHexScalar = std::integral<T> || (std::floating_point<T> && (sizeof(T) == 4 || sizeof(T) == 8));
+
+    template<typename T>
+    inline constexpr size_t HexScalarWidth = std::same_as<T, bool>? 1 : sizeof(T);
+
+    FDF_EXPORT_INTERNAL template<typename T>
+    concept HasHexReader = std::is_class_v<T> && requires(HexReader& reader, T& value)
+    {
+        { ReadHex(reader, value) } noexcept -> std::same_as<bool>;
+    };
+
+    FDF_EXPORT_INTERNAL template<typename T>
+    concept HasHexWriter = std::is_class_v<T> && requires(HexWriter& writer, const T& value)
+    {
+        { WriteHex(writer, value) } noexcept -> std::same_as<bool>;
+    };
 
     inline constexpr size_t MAX_IDENTIFIER_LENGTH = FDF_NO_COMMENTS && FDF_EXTENDED_NO_COMMENT_IDENTIFIERS? 38 : 30;
 
@@ -288,6 +311,338 @@ FDF_EXPORT namespace fdf
     };
     static_assert(sizeof(Version) == 16);
     static_assert(alignof(Version) == alignof(uint32_t));
+
+
+    class HexWriter
+    {
+    public:
+        HexWriter(const HexWriter&) = delete;
+        HexWriter(HexWriter&&) = delete;
+        HexWriter& operator=(const HexWriter&) = delete;
+        HexWriter& operator=(HexWriter&&) = delete;
+
+        template<typename T> requires(detail::IsHexScalar<T> || detail::HasHexWriter<T>)
+        [[nodiscard]] constexpr bool Write(const T& value) noexcept;
+
+    private:
+        friend class Hex;
+        constexpr HexWriter(Hex& target_, const size_t cursor_) noexcept
+            : target(&target_), cursor(cursor_)  { }
+        constexpr void Poison() noexcept  { bPoisoned = true; }
+
+        Hex* target;
+        size_t cursor;
+        bool bPoisoned = false;
+    };
+
+
+    class HexReader
+    {
+    public:
+        HexReader(const HexReader&) = delete;
+        HexReader(HexReader&&) = delete;
+        HexReader& operator=(const HexReader&) = delete;
+        HexReader& operator=(HexReader&&) = delete;
+
+        template<typename T> requires(detail::IsHexScalar<T> || detail::HasHexReader<T>)
+        [[nodiscard]] constexpr bool Read(T& value) noexcept;
+
+    private:
+        friend class Hex;
+        constexpr HexReader(const Hex& target_, const size_t cursor_) noexcept
+            : target(&target_), cursor(cursor_)  { }
+        constexpr void Poison() noexcept  { bPoisoned = true; }
+
+        const Hex* target;
+        size_t cursor;
+        bool bPoisoned = false;
+    };
+
+
+    // big-endian byte string
+    class Hex
+    {
+    public:
+        constexpr Hex() noexcept = default;
+        explicit constexpr Hex(std::span<const std::byte> bytes) noexcept  { (void)Assign(bytes); }
+        constexpr Hex(const Hex& other) noexcept  { (void)Assign(other.Bytes()); }
+        constexpr Hex(Hex&& other) noexcept
+            : ptr(other.ptr), size(other.size), capacity(other.capacity)
+        {
+            other.ptr = nullptr;
+            other.size = 0;
+            other.capacity = 0;
+        }
+        constexpr ~Hex() noexcept  { Free(); }
+
+        constexpr Hex& operator=(const Hex& other) noexcept
+        {
+            if(this != &other)
+                (void)Assign(other.Bytes());
+            return *this;
+        }
+        constexpr Hex& operator=(Hex&& other) noexcept
+        {
+            if(this != &other)
+            {
+                Free();
+                ptr = other.ptr;
+                size = other.size;
+                capacity = other.capacity;
+                other.ptr = nullptr;
+                other.size = 0;
+                other.capacity = 0;
+            }
+            return *this;
+        }
+
+        [[nodiscard]] static constexpr size_t MaxSize() noexcept  { return detail::UINT32_MAX_VALUE; }
+
+        [[nodiscard]] constexpr size_t Size()    const noexcept  { return size; }
+        [[nodiscard]] constexpr bool   IsEmpty() const noexcept  { return size == 0; }
+        [[nodiscard]] constexpr size_t DigitCount() const noexcept  { return static_cast<size_t>(size) * 2; }
+
+        [[nodiscard]] constexpr std::span<std::byte>       Bytes()       noexcept  { return { ptr, size }; }
+        [[nodiscard]] constexpr std::span<const std::byte> Bytes() const noexcept  { return { ptr, size }; }
+
+        [[nodiscard]] constexpr bool operator==(const Hex& other) const noexcept
+        {
+            if(size != other.size)
+                return false;
+            for(uint32_t i = 0; i < size; i++)
+            {
+                if(ptr[i] != other.ptr[i])
+                    return false;
+            }
+            return true;
+        }
+
+        // integers zero-extend, byteOffset == Size() reads nothing and decodes to 0 like 0x does
+        template<typename T> requires(detail::IsHexScalar<T> || detail::HasHexReader<T>)
+        [[nodiscard]] constexpr bool Read(T& value, size_t byteOffset = 0) const noexcept
+        {
+            if constexpr(!detail::IsHexScalar<T>)
+            {
+                if(byteOffset > size)
+                    return false;
+
+                HexReader reader(*this, byteOffset);
+                const bool bResult = ReadHex(reader, value);
+                if(!bResult)
+                    reader.Poison();
+                return bResult && !reader.bPoisoned;
+            }
+            else if constexpr(std::same_as<T, bool>)
+            {
+                if(byteOffset > size)
+                    return false;
+                value = byteOffset < size && ptr[byteOffset] != std::byte{0};
+                return true;
+            }
+            else if constexpr(std::integral<T>)
+            {
+                if(byteOffset > size)
+                    return false;
+                using U = std::make_unsigned_t<T>;
+                const size_t count = std::min(sizeof(T), static_cast<size_t>(size) - byteOffset);
+                U decoded = 0;
+                for(size_t i = 0; i < count; i++)
+                    decoded = static_cast<U>(decoded << 8 | std::to_integer<U>(ptr[byteOffset + i]));
+                value = static_cast<T>(decoded);
+                return true;
+            }
+            else if constexpr(std::floating_point<T>)
+            {
+                if(byteOffset > size || sizeof(T) > static_cast<size_t>(size) - byteOffset)
+                    return false;
+                std::array<std::byte, sizeof(T)> image = {};
+                for(size_t i = 0; i < sizeof(T); i++)
+                    image[i] = ptr[byteOffset + i];
+                if constexpr(std::endian::native == std::endian::little)
+                {
+                    for(size_t i = 0; i < sizeof(T) / 2; i++)
+                        std::swap(image[i], image[sizeof(T) - 1 - i]);
+                }
+                value = std::bit_cast<T>(image);
+                return true;
+            }
+            else
+                { static_assert(false); return false; }
+        }
+
+        template<typename T> requires(detail::IsHexScalar<T> || detail::HasHexWriter<T>)
+        [[nodiscard]] constexpr bool Write(const T& value) noexcept
+        {
+            return Write(value, size);
+        }
+
+        template<typename T> requires(detail::IsHexScalar<T> || detail::HasHexWriter<T>)
+        [[nodiscard]] constexpr bool Write(const T& value, size_t byteOffset) noexcept;
+
+        // Assign replaces, Decode appends, Decode at an offset overwrites. Optional 0x/0X prefix,
+        // an odd digit count pads a leading zero nibble, a rejected string leaves the value alone
+        [[nodiscard]] constexpr bool Assign(std::span<const std::byte> bytes) noexcept;
+        [[nodiscard]] constexpr bool Assign(std::string_view digits) noexcept;
+        [[nodiscard]] constexpr bool Decode(std::string_view digits) noexcept;
+        [[nodiscard]] constexpr bool Decode(std::string_view digits, size_t byteOffset) noexcept;
+
+    private:
+        [[nodiscard]] static constexpr bool StripAndValidate(std::string_view& digits) noexcept;
+
+        // leaves size untouched on failure
+        template<typename T>
+        [[nodiscard]] constexpr bool WriteScalarAt(const T& value, size_t byteOffset) noexcept;
+
+        [[nodiscard]] constexpr bool TryAssign(std::span<const std::byte> bytes) noexcept;
+        [[nodiscard]] constexpr bool Decode_UNSAFE(std::string_view digits, uint32_t byteOffset) noexcept;
+        [[nodiscard]] constexpr bool Reallocate(uint32_t byteCount) noexcept;
+        constexpr void Free() noexcept;
+
+        template<auto DIAGNOSTIC_CALLBACK>
+        friend struct detail::Utils;
+        friend class HexWriter;
+        friend class HexReader;
+
+        std::byte* ptr = nullptr;
+        uint32_t size = 0;
+        uint32_t capacity = 0;
+    };
+    static_assert(sizeof(Hex) == 16);
+    static_assert(alignof(Hex) == 8);
+
+
+    template<typename T> requires(detail::IsHexScalar<T> || detail::HasHexWriter<T>)
+    constexpr bool HexWriter::Write(const T& value) noexcept
+    {
+        if(bPoisoned)
+            return false;
+
+        if constexpr(detail::IsHexScalar<T>)
+        {
+            if(!target->WriteScalarAt(value, cursor))
+            {
+                Poison();
+                return false;
+            }
+            cursor += detail::HexScalarWidth<T>;
+            return true;
+        }
+        else
+        {
+            const bool bResult = WriteHex(*this, value);
+            if(!bResult)
+                Poison();
+            return bResult && !bPoisoned;
+        }
+    }
+
+
+    template<typename T> requires(detail::IsHexScalar<T> || detail::HasHexReader<T>)
+    constexpr bool HexReader::Read(T& value) noexcept
+    {
+        if(bPoisoned)
+            return false;
+
+        if constexpr(detail::IsHexScalar<T>)
+        {
+            constexpr size_t byteWidth = detail::HexScalarWidth<T>;
+            if(cursor > target->size || byteWidth > static_cast<size_t>(target->size) - cursor)
+            {
+                Poison();
+                return false;
+            }
+
+            const bool bResult = target->Read(value, cursor);
+            if(!bResult)
+            {
+                Poison();
+                return false;
+            }
+            cursor += byteWidth;
+            return true;
+        }
+        else
+        {
+            const bool bResult = ReadHex(*this, value);
+            if(!bResult)
+                Poison();
+            return bResult && !bPoisoned;
+        }
+    }
+
+
+    template<typename T>
+    constexpr bool Hex::WriteScalarAt(const T& value, const size_t byteOffset) noexcept
+    {
+        constexpr size_t byteWidth = detail::HexScalarWidth<T>;
+        // no gaps: an offset past the end has nothing to overwrite
+        if(byteOffset > size || byteWidth > MaxSize() - byteOffset)
+            return false;
+
+        const uint32_t requiredSize = static_cast<uint32_t>(byteOffset + byteWidth);
+        if(requiredSize > size)
+        {
+            if(!Reallocate(requiredSize))
+                return false;
+            size = requiredSize;
+        }
+
+        if constexpr(std::same_as<T, bool>)
+            ptr[byteOffset] = value? std::byte{1} : std::byte{0};
+        else if constexpr(std::integral<T>)
+        {
+            using U = std::make_unsigned_t<T>;
+            const U encoded = static_cast<U>(value);
+            for(size_t i = 0; i < sizeof(T); i++)
+            {
+                const size_t shift = (sizeof(T) - 1 - i) * 8;
+                ptr[byteOffset + i] = static_cast<std::byte>((encoded >> shift) & static_cast<U>(0xFFu));
+            }
+        }
+        else
+        {
+            auto image = std::bit_cast<std::array<std::byte, sizeof(T)>>(value);
+            if constexpr(std::endian::native == std::endian::little)
+            {
+                for(size_t i = 0; i < sizeof(T) / 2; i++)
+                    std::swap(image[i], image[sizeof(T) - 1 - i]);
+            }
+            for(size_t i = 0; i < sizeof(T); i++)
+                ptr[byteOffset + i] = image[i];
+        }
+        return true;
+    }
+
+
+    template<typename T> requires(detail::IsHexScalar<T> || detail::HasHexWriter<T>)
+    constexpr bool Hex::Write(const T& value, const size_t byteOffset) noexcept
+    {
+        if constexpr(detail::IsHexScalar<T>)
+            return WriteScalarAt(value, byteOffset);
+        else
+        {
+            if(byteOffset > size)
+                return false;
+
+            // stage at the tail, splice down on success, shrink back on failure
+            const uint32_t originalSize = size;
+            HexWriter writer(*this, originalSize);
+            if(!writer.Write(value))
+            {
+                size = originalSize;
+                return false;
+            }
+
+            const size_t consumed = writer.cursor - originalSize;
+            if(byteOffset < originalSize && consumed != 0)
+            {
+                for(size_t i = 0; i < consumed; i++)
+                    ptr[byteOffset + i] = ptr[originalSize + i];
+                size = static_cast<uint32_t>(std::max<size_t>(originalSize, byteOffset + consumed));
+            }
+            return true;
+        }
+    }
 
 
     // Decoded view of an ISO-8601 timestamp. Transient: a Timestamp entry stores the raw text
@@ -1186,6 +1541,7 @@ FDF_EXPORT namespace fdf
             Version* v;
             double* f;
             String* s;
+            Hex* h;
         };
         DataPtr data;
     #if !FDF_NO_COMMENTS
@@ -1198,13 +1554,14 @@ FDF_EXPORT namespace fdf
         {
             switch(type)
             {
-                case Type::Bool:                                          return !data.b;
-                case Type::Int:                                           return !data.i;
-                case Type::Version:                                       return !data.v;
-                case Type::Float:                                         return !data.f;
-                case Type::String: case Type::Hex: case Type::Timestamp:  return !data.s;
-                case Type::Array:  case Type::Map:                        return !data.e;
-                default:                                                  return true;   // Null / Nil hold no data
+                case Type::Bool:                          return !data.b;
+                case Type::Int:                           return !data.i;
+                case Type::Version:                       return !data.v;
+                case Type::Float:                         return !data.f;
+                case Type::Hex:                           return !data.h;
+                case Type::String: case Type::Timestamp:  return !data.s;
+                case Type::Array:  case Type::Map:        return !data.e;
+                default:                                  return true;   // Null / Nil hold no data
             }
         }
 
@@ -1213,13 +1570,14 @@ FDF_EXPORT namespace fdf
         {
             switch(type)
             {
-                case Type::Bool:                                         data.b = nullptr; break;
-                case Type::Int:                                          data.i = nullptr; break;
-                case Type::Version:                                      data.v = nullptr; break;
-                case Type::Float:                                        data.f = nullptr; break;
-                case Type::String: case Type::Hex: case Type::Timestamp: data.s = nullptr; break;
-                case Type::Array:  case Type::Map:                       data.e = nullptr; break;
-                default:                                                 data.e = nullptr; break;
+                case Type::Bool:                          data.b = nullptr; break;
+                case Type::Int:                           data.i = nullptr; break;
+                case Type::Version:                       data.v = nullptr; break;
+                case Type::Float:                         data.f = nullptr; break;
+                case Type::Hex:                           data.h = nullptr; break;
+                case Type::String: case Type::Timestamp:  data.s = nullptr; break;
+                case Type::Array:  case Type::Map:        data.e = nullptr; break;
+                default:                                  data.e = nullptr; break;
             }
         }
 
@@ -1393,6 +1751,9 @@ FDF_EXPORT namespace fdf
         constexpr void SetValue(const char* value) noexcept;
         constexpr void SetValue(const Timestamp& value) noexcept;
         constexpr void SetValue(const Version& value) noexcept;
+        constexpr void SetValue(const Hex& value) noexcept;
+        constexpr void SetValue(Hex&& value) noexcept;
+        constexpr void SetValue(String&& value) noexcept;
         constexpr void SetValue(auto* value) = delete; // no pointer types (except char*)
 
         constexpr void SetValue(std::span<bool> value) noexcept;
@@ -1401,6 +1762,7 @@ FDF_EXPORT namespace fdf
         template<std::unsigned_integral T>
         constexpr void SetValue(std::span<T> value) noexcept;
         constexpr void SetValue(std::span<const Version> value) noexcept;
+        constexpr void SetValue(std::span<const Hex> value) noexcept;
         template<std::floating_point T>
         constexpr void SetValue(std::span<T> value) noexcept;
 
@@ -2280,7 +2642,7 @@ namespace fdf::detail
             }
         }
 
-        if(view.size() >= 3 && view[0] == '0' && (view[1] == 'x' || view[1] == 'X'))
+        if(view.size() >= 2 && view[0] == '0' && (view[1] == 'x' || view[1] == 'X'))
         {
             for(size_t i = 2; i < view.size(); i++)
             {
@@ -2546,6 +2908,10 @@ namespace fdf::detail
 
     FDF_EXPORT_INTERNAL class GlobalAllocator
     {
+    #if defined(FDF_TESTING)
+        inline static size_t allocationsUntilFailure = SIZE_T_MAX_VALUE;
+    #endif
+
         // bucket ladder bounds, MIN_BUCKET leaves room for a free-list pointer
         static constexpr size_t MIN_BUCKET = 8U;
         static constexpr size_t MAX_BUCKET = 256U;
@@ -2593,6 +2959,7 @@ namespace fdf::detail
             else if constexpr(std::is_same_v<T, Version >) return entry.data.v;
             else if constexpr(std::is_same_v<T, double  >) return entry.data.f;
             else if constexpr(std::is_same_v<T, String  >) return entry.data.s;
+            else if constexpr(std::is_same_v<T, Hex     >) return entry.data.h;
             else static_assert(false);
         }
 
@@ -2605,10 +2972,23 @@ namespace fdf::detail
             else if constexpr(std::is_same_v<T, Version >) entry.data.v = value;
             else if constexpr(std::is_same_v<T, double  >) entry.data.f = value;
             else if constexpr(std::is_same_v<T, String  >) entry.data.s = value;
+            else if constexpr(std::is_same_v<T, Hex     >) entry.data.h = value;
             else static_assert(false);
         }
 
     public:
+    #if defined(FDF_TESTING)
+        static void FailAllocationAfter(const size_t successfulAllocationCount) noexcept
+        {
+            allocationsUntilFailure = successfulAllocationCount;
+        }
+
+        static void ResetAllocationFailure() noexcept
+        {
+            allocationsUntilFailure = SIZE_T_MAX_VALUE;
+        }
+    #endif
+
         struct AllocationResult
         {
             constexpr AllocationResult(void* ptr_, size_t size_) noexcept : ptr(ptr_), size(size_)  { }
@@ -2636,6 +3016,18 @@ namespace fdf::detail
         // size = the bucket actually granted (>= request), or the exact request for the heap fallback
         [[nodiscard]] static AllocationResult Allocate(size_t size) noexcept
         {
+        #if defined(FDF_TESTING)
+            if(allocationsUntilFailure != SIZE_T_MAX_VALUE)
+            {
+                if(allocationsUntilFailure == 0)
+                {
+                    allocationsUntilFailure = SIZE_T_MAX_VALUE;
+                    return { nullptr, size };
+                }
+                allocationsUntilFailure--;
+            }
+        #endif
+
             if constexpr(FDF_DISABLE_SLAB_ALLOCATOR)
             {
                 void* p = ::operator new(size, std::nothrow);
@@ -2782,11 +3174,11 @@ namespace fdf::detail
                 capacity = static_cast<uint32_t>(allocation.Size() / sizeof(T));
             }
 
-            if constexpr(std::is_same_v<T, char>)
+            if constexpr(std::is_same_v<T, char> || std::is_same_v<T, std::byte>)
             {
                 if consteval
                 {
-                    // Clang requires explicit char lifetimes before constexpr header writes
+                    // Clang requires explicit char/byte lifetimes before constexpr buffer writes
                     for(uint32_t i = 0; i < capacity; i++)
                         std::construct_at(ptr + i);
                 }
@@ -2819,7 +3211,7 @@ namespace fdf::detail
             }
             else
             {
-                if constexpr(!std::is_same_v<T, char>)
+                if constexpr(!std::is_same_v<T, char> && !std::is_same_v<T, std::byte>)
                 {
                     for(uint32_t i = 0; i < liveCount; i++)
                         std::destroy_at(ptr + i);
@@ -2916,7 +3308,8 @@ namespace fdf::detail
             else if constexpr(std::is_same_v<T, int64_t>) return t == Type::Int;
             else if constexpr(std::is_same_v<T, double >) return t == Type::Float;
             else if constexpr(std::is_same_v<T, Version>) return t == Type::Version;
-            else if constexpr(std::is_same_v<T, String >) return t == Type::String || t == Type::Hex || t == Type::Timestamp;
+            else if constexpr(std::is_same_v<T, Hex    >) return t == Type::Hex;
+            else if constexpr(std::is_same_v<T, String >) return t == Type::String || t == Type::Timestamp;
             else if constexpr(std::is_same_v<T, Entry* >) return t == Type::Array || t == Type::Map;
             else return false;
         }
@@ -2928,7 +3321,8 @@ namespace fdf::detail
             else if constexpr(TYPE == Type::Int)     return std::type_identity<int64_t>{};
             else if constexpr(TYPE == Type::Float)   return std::type_identity<double>{};
             else if constexpr(TYPE == Type::Version) return std::type_identity<Version>{};
-            else if constexpr(TYPE == Type::String || TYPE == Type::Hex || TYPE == Type::Timestamp)
+            else if constexpr(TYPE == Type::Hex)     return std::type_identity<Hex>{};
+            else if constexpr(TYPE == Type::String || TYPE == Type::Timestamp)
                 return std::type_identity<String>{};
             else if constexpr(TYPE == Type::Array || TYPE == Type::Map)
                 return std::type_identity<Entry*>{};
@@ -2972,7 +3366,8 @@ namespace fdf::detail
                         case Type::Int:      raw = entry.data.i; oldElementSize = sizeof(int64_t); break;
                         case Type::Float:    raw = entry.data.f; oldElementSize = sizeof(double);  break;
                         case Type::Version:  raw = entry.data.v; oldElementSize = sizeof(Version); break;
-                        case Type::String: case Type::Hex: case Type::Timestamp:
+                        case Type::Hex:      raw = entry.data.h; oldElementSize = sizeof(Hex);     break;
+                        case Type::String: case Type::Timestamp:
                                              raw = entry.data.s; oldElementSize = sizeof(String);  break;
                         case Type::Array: case Type::Map:
                                              raw = entry.data.e; oldElementSize = sizeof(Entry*);  break;
@@ -2987,10 +3382,15 @@ namespace fdf::detail
                     if(raw && oldBytes >= sizeof(T) && static_cast<size_t>(count) * sizeof(T) <= oldBytes
                         && oldBytes % sizeof(T) == 0 && oldBytes / sizeof(T) <= UINT32_MAX_VALUE)
                     {
-                        if(entry.type == Type::String || entry.type == Type::Hex || entry.type == Type::Timestamp)
+                        if(entry.type == Type::String || entry.type == Type::Timestamp)
                         {
                             for(uint32_t i = 0; i < entry.size; i++)
                                 std::destroy_at(entry.data.s + i);
+                        }
+                        else if(entry.type == Type::Hex)
+                        {
+                            for(uint32_t i = 0; i < entry.size; i++)
+                                std::destroy_at(entry.data.h + i);
                         }
 
                         T* ptr = static_cast<T*>(raw);
@@ -3327,6 +3727,136 @@ namespace fdf::detail
 
 namespace fdf
 {
+    constexpr bool Hex::Assign(const std::span<const std::byte> bytes) noexcept
+    {
+        return TryAssign(bytes);
+    }
+
+    constexpr bool Hex::Assign(std::string_view digits) noexcept
+    {
+        // validate first so a rejected string leaves the old bytes alone
+        if(!StripAndValidate(digits))
+            return false;
+
+        // sound only while Decode_UNSAFE bails before reallocating, a later failure would
+        // restore size over a fresh block of uninitialized bytes
+        const uint32_t originalSize = size;
+        size = 0;
+        if(Decode_UNSAFE(digits, 0))
+            return true;
+
+        size = originalSize;
+        return false;
+    }
+
+    constexpr bool Hex::TryAssign(const std::span<const std::byte> bytes) noexcept
+    {
+        if(bytes.size() > MaxSize())
+            return false;
+
+        const uint32_t count = static_cast<uint32_t>(bytes.size());
+        if(!Reallocate(count))
+            return false;
+        for(uint32_t i = 0; i < count; i++)
+            ptr[i] = bytes[i];
+        size = count;
+        return true;
+    }
+
+    // caller validates the digits and strips the 0x prefix
+    constexpr bool Hex::Decode_UNSAFE(const std::string_view digits, const uint32_t byteOffset) noexcept
+    {
+        if(digits.size() > 2 * static_cast<size_t>(detail::UINT32_MAX_VALUE))
+            return false;
+
+        const bool bOdd = digits.size() % 2 != 0;
+        const uint32_t byteCount = static_cast<uint32_t>((digits.size() + 1) / 2);
+        if(byteCount > MaxSize() - byteOffset || !Reallocate(byteOffset + byteCount))
+            return false;
+
+        auto nibble = [](const char c) noexcept -> int
+        {
+            if(c >= '0' && c <= '9')
+                return c - '0';
+            return (c >= 'a'? c - 'a' : c - 'A') + 10;
+        };
+
+        size_t digitIndex = 0;
+        for(uint32_t i = 0; i < byteCount; i++)
+        {
+            const int high = i == 0 && bOdd? 0 : nibble(digits[digitIndex++]);
+            const int low = nibble(digits[digitIndex++]);
+            ptr[byteOffset + i] = static_cast<std::byte>(high << 4 | low);
+        }
+        size = std::max(size, byteOffset + byteCount);
+        return true;
+    }
+
+    constexpr bool Hex::StripAndValidate(std::string_view& digits) noexcept
+    {
+        if(digits.size() >= 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X'))
+            digits.remove_prefix(2);
+
+        for(const char c : digits)
+        {
+            const bool bDigit = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if(!bDigit)
+                return false;
+        }
+        return true;
+    }
+
+    constexpr bool Hex::Decode(std::string_view digits, const size_t byteOffset) noexcept
+    {
+        if(!StripAndValidate(digits) || byteOffset > size)
+            return false;
+        return Decode_UNSAFE(digits, static_cast<uint32_t>(byteOffset));
+    }
+
+    constexpr bool Hex::Decode(const std::string_view digits) noexcept
+    {
+        return Decode(digits, size);
+    }
+
+    constexpr bool Hex::Reallocate(const uint32_t byteCount) noexcept
+    {
+        if(byteCount <= capacity)
+            return true;
+
+        // double like GlobalAllocator::Reserve
+        uint32_t requestedCapacity = byteCount;
+        if(capacity != 0)
+        {
+            const uint64_t doubled = std::min<uint64_t>(static_cast<uint64_t>(capacity) * 2, detail::UINT32_MAX_VALUE);
+            requestedCapacity = std::max(static_cast<uint32_t>(doubled), byteCount);
+        }
+
+        const auto allocation = detail::GlobalAllocator::Allocate<std::byte>(requestedCapacity, 0);
+        if(!allocation.ptr)
+            return false;
+
+        std::byte* oldPtr = ptr;
+        const uint32_t oldSize = size;
+        const uint32_t oldCapacity = capacity;
+        ptr = allocation.ptr;
+        capacity = allocation.capacity;
+        for(uint32_t i = 0; i < oldSize; i++)
+            ptr[i] = oldPtr[i];
+        detail::GlobalAllocator::Release<std::byte>(oldPtr, 0, oldCapacity);
+        return true;
+    }
+
+    constexpr void Hex::Free() noexcept
+    {
+        if(!ptr)
+            return;
+        detail::GlobalAllocator::Release<std::byte>(ptr, 0, capacity);
+        ptr = nullptr;
+        size = 0;
+        capacity = 0;
+    }
+
+
     constexpr void String::Grow(uint32_t minCapacity) noexcept
     {
         assert(minCapacity <= max_size() && "String capacity overflow");
@@ -3424,9 +3954,11 @@ namespace fdf
             detail::GlobalAllocator::Release<double>(*this);
             break;
         case Type::String:
-        case Type::Hex:
         case Type::Timestamp:
             detail::GlobalAllocator::Release<String>(*this);
+            break;
+        case Type::Hex:
+            detail::GlobalAllocator::Release<Hex>(*this);
             break;
         case Type::Version:
             detail::GlobalAllocator::Release<Version>(*this);
@@ -4093,6 +4625,12 @@ namespace fdf
     }
 
     template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<Hex>() noexcept
+    {
+        return type == Type::Hex? std::span<Hex>(data.h, size) : std::span<Hex>();
+    }
+
+    template<>
     [[nodiscard]] constexpr auto Entry::GetValue<double>() noexcept
     {
         return type == Type::Float? std::span<double>(data.f, size) : std::span<double>();
@@ -4148,6 +4686,12 @@ namespace fdf
     }
 
     template<>
+    [[nodiscard]] constexpr auto Entry::GetValue<Hex>() const noexcept
+    {
+        return type == Type::Hex? std::span<const Hex>(data.h, size) : std::span<const Hex>();
+    }
+
+    template<>
     [[nodiscard]] constexpr auto Entry::GetValue<double>() const noexcept
     {
         return type == Type::Float? std::span<const double>(data.f, size) : std::span<const double>();
@@ -4158,7 +4702,7 @@ namespace fdf
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<String>() const noexcept
     {
-        const bool bStringStorage = type == Type::String || type == Type::Hex || type == Type::Timestamp;
+        const bool bStringStorage = type == Type::String || type == Type::Timestamp;
         return bStringStorage && !IsDataNull()? std::span<const String>(data.s, size) : std::span<const String>();
     }
     template<>
@@ -4201,8 +4745,6 @@ namespace fdf
         ResetDataNull();
     }
 
-    // resizes bool, numeric, version and string packs
-    // containers, null, hex and timestamps reject resize
     constexpr void Entry::Resize(const uint32_t _size) noexcept
     {
         switch(type)
@@ -4212,6 +4754,7 @@ namespace fdf
         case Type::Float:   detail::GlobalAllocator::Resize<double>(*this, _size);   break;
         case Type::String:  detail::GlobalAllocator::Resize<String>(*this, _size);   break;
         case Type::Version: detail::GlobalAllocator::Resize<Version>(*this, _size);  break;
+        case Type::Hex:     detail::GlobalAllocator::Resize<Hex>(*this, _size);      break;
         default:            return;
         }
     }
@@ -4344,6 +4887,49 @@ namespace fdf
             data.v[i] = normalized(value[i]);
     }
 
+    constexpr void Entry::SetValue(const Hex& value) noexcept
+    {
+        SetValue(std::span<const Hex>(&value, 1));
+    }
+
+    constexpr void Entry::SetValue(const std::span<const Hex> value) noexcept
+    {
+        if(type == Type::Hex && value.data())
+        {
+            for(uint32_t sourceOffset = 0; sourceOffset < size; sourceOffset++)
+            {
+                if(value.data() != data.h + sourceOffset)
+                    continue;
+
+                assert(value.size() <= size - sourceOffset);
+                const uint32_t count = static_cast<uint32_t>(value.size());
+                for(uint32_t i = 0; i < count; i++)
+                    data.h[i] = std::move(data.h[sourceOffset + i]);
+                detail::GlobalAllocator::Resize<Hex>(*this, count);
+                return;
+            }
+        }
+
+        detail::GlobalAllocator::Repurpose<Type::Hex>(*this, static_cast<uint32_t>(value.size()));
+        for(size_t i = 0; i < size; i++)
+            data.h[i] = value[i];
+    }
+
+    // steal first: value may live inside this entry's own payload, which Repurpose destroys
+    constexpr void Entry::SetValue(Hex&& value) noexcept
+    {
+        Hex owned = std::move(value);
+        detail::GlobalAllocator::Repurpose<Type::Hex>(*this, 1);
+        data.h[0] = std::move(owned);
+    }
+
+    constexpr void Entry::SetValue(String&& value) noexcept
+    {
+        String owned = std::move(value);
+        detail::GlobalAllocator::Repurpose<Type::String>(*this, 1);
+        data.s[0] = std::move(owned);
+    }
+
     template <std::floating_point T>
     constexpr void Entry::SetValue(std::span<T> value) noexcept
     {
@@ -4399,23 +4985,21 @@ namespace fdf
 
             case Type::Hex:
             {
-                // Each component is stored as "0x" + digits, case the digits per style
-                const std::span<const String> text = GetValue<String>();
-                if(text.empty())
+                const std::span<const Hex> span = GetValue<Hex>();
+                if(span.empty())
                     return {};
+                constexpr std::string_view HEX_DIGITS = STYLE.bUppercaseHex? "0123456789ABCDEF" : "0123456789abcdef";
                 temp.clear();
-                for(size_t c = 0; c < text.size(); c++)
+                for(size_t c = 0; c < span.size(); c++)
                 {
                     if(c) temp.push_back('|');
-                    const size_t base = temp.size();
-                    temp.append(std::string_view(text[c]));
-                    for(size_t i = base + 2; i < temp.size(); i++)
+                    temp.append("0x");
+                    const std::span<const std::byte> bytes = span[c].Bytes();
+                    for(size_t i = 0; i < bytes.size(); i++)
                     {
-                        const char ch = temp[i];
-                        if constexpr(STYLE.bUppercaseHex)
-                            { if(ch >= 'a' && ch <= 'f') temp[i] = static_cast<char>(ch - 32); }
-                        else
-                            { if(ch >= 'A' && ch <= 'F') temp[i] = static_cast<char>(ch + 32); }
+                        const uint8_t b = std::to_integer<uint8_t>(bytes[i]);
+                        temp.push_back(HEX_DIGITS[b >> 4]);
+                        temp.push_back(HEX_DIGITS[b & 0xF]);
                     }
                 }
                 return temp;
@@ -5267,25 +5851,41 @@ namespace fdf::detail
             return postProcess();
         }
 
-        // hex and timestamps keep raw text in a String[count] slab
-        // timestamp validation runs before allocation so recovery has no partial buffer
-        if(bAllHex || bAllTimestamp)
+        if(bAllHex)
         {
-            if(bAllTimestamp)
+            detail::GlobalAllocator::Allocate<Hex>(entry, componentCount);
+            entry.type = Type::Hex;
+
+            auto componentReader = makeComponentReader();
+            for(uint32_t i = 0; i < componentCount; i++)
             {
-                auto componentReader = makeComponentReader();
-                for(uint32_t i = 0; i < componentCount; i++)
+                // tokenizer already validated the digits, only an oversized component fails here
+                if(!entry.data.h[i].Decode_UNSAFE(componentReader.Next().substr(2), 0))
                 {
-                    if(!IsValidTimestamp(componentReader.Next()))
-                    {
-                        Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidTimestamp, tokenizer, valueToken);
-                        return false;
-                    }
+                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InputTooLarge, tokenizer, valueToken);
+                    entry.ReleaseData();
+                    return false;
+                }
+            }
+
+            return postProcess();
+        }
+
+        // validate before the slab exists so recovery has no partial buffer
+        if(bAllTimestamp)
+        {
+            auto validationReader = makeComponentReader();
+            for(uint32_t i = 0; i < componentCount; i++)
+            {
+                if(!IsValidTimestamp(validationReader.Next()))
+                {
+                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidTimestamp, tokenizer, valueToken);
+                    return false;
                 }
             }
 
             entry.AllocateStringArray(componentCount);
-            entry.type = bAllHex? Type::Hex : Type::Timestamp;
+            entry.type = Type::Timestamp;
 
             auto componentReader = makeComponentReader();
             for(uint32_t i = 0; i < componentCount; i++)

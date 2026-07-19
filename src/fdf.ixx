@@ -1,10 +1,12 @@
 
 module;
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cassert>
 #include <cctype>
 #include <charconv>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <format>
