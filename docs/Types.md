@@ -14,6 +14,12 @@
 | Duration | `1h30m`, `1.5h`, `-30m` | signed 64-bit nanosecond time span |
 | Null / Nil | `null`, `nil` | absence of a value, `nil` is an alias of `null` |
 
+Int, Float and Hex literals accept `_` only directly between two digits. Hexadecimal digits include
+`A` through `F`. For Float, the rule applies independently to the integer part, fraction and exponent
+digits, so a separator cannot touch `.`, `e`, `E` or an exponent sign. It also cannot touch a leading
+sign or the `0x`/`0X` prefix. Version, Timestamp and Duration literals do not accept separators.
+Separators are not preserved: parsing removes them and the writer derives grouping from `Style`.
+
 Timestamp syntax is restricted to these forms:
 
 | Shape | Syntax |

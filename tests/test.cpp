@@ -870,12 +870,15 @@ namespace fdf::detail
                     { .bHasRevision = true,  .major = 4, .minor = 5, .patch = 6, .revision = 0 }
                 };
                 e->SetValue(std::span<const Version>(versions));
-                auto v = e->GetValue<Version>();
-                CHECK(e->GetType() == Type::Version && v.size() == 2);
+                const std::span<Version> v = e->GetValue<Version>();
+                CHECK(e->GetType() == Type::Version);
+                REQUIRE(v.size() == 2);
                 CHECK(!v[0].bHasRevision && v[0].major == 1 && v[0].minor == 2 && v[0].patch == 3 && v[0].revision == 0);
                 CHECK(v[1].bHasRevision && v[1].major == 4 && v[1].minor == 5 && v[1].patch == 6 && v[1].revision == 0);
                 v[0].patch = 9;
-                CHECK(e->GetValue<Version>()[0].patch == 9);
+                const std::span<const Version> reread = std::as_const(*e).GetValue<Version>();
+                REQUIRE(reread.size() == 2);
+                CHECK(reread[0].patch == 9);
             }
 
             if(Entry* e = root->Emplace("t"); CHECK(e))
@@ -883,10 +886,13 @@ namespace fdf::detail
                 const Timestamp ts = Timestamp::DateTime(2024, 12, 24, 15, 30, 0);
                 e->SetValue(ts);
                 CHECK(e->GetType() == Type::Timestamp);
-                std::span<Timestamp> got = e->GetValue<Timestamp>();
-                CHECK(got.size() == 1 && got[0].year == 2024 && got[0].month == 12 && got[0].day == 24);
+                const std::span<Timestamp> got = e->GetValue<Timestamp>();
+                REQUIRE(got.size() == 1);
+                CHECK(got[0].year == 2024 && got[0].month == 12 && got[0].day == 24);
                 got[0].minute = 45;
-                CHECK(std::as_const(*e).GetValue<Timestamp>()[0].minute == 45);
+                const std::span<const Timestamp> reread = std::as_const(*e).GetValue<Timestamp>();
+                REQUIRE(reread.size() == 1);
+                CHECK(reread[0].minute == 45);
             }
 
             // Re-set overwrites type and value cleanly
@@ -1007,15 +1013,20 @@ namespace fdf::detail
                 };
                 e->SetValue(std::span<const Version>(vs));
                 e->Resize(3);
-                auto grown = e->GetValue<Version>();
-                CHECK(grown.size() == 3 && grown[0].major == 1 && grown[1].major == 4
+                const std::span<const Version> grown = std::as_const(*e).GetValue<Version>();
+                REQUIRE(grown.size() == 3);
+                CHECK(grown[0].major == 1 && grown[1].major == 4
                     && grown[2].major == 0 && !grown[2].bHasRevision);
                 e->Resize(1);
-                CHECK(e->GetValue<Version>().size() == 1 && e->GetValue<Version>()[0].major == 1);
+                const std::span<const Version> shrunk = std::as_const(*e).GetValue<Version>();
+                REQUIRE(shrunk.size() == 1);
+                CHECK(shrunk[0].major == 1);
 
                 // revision without bHasRevision is normalized to 0 on ingest
                 e->SetValue(Version{ .bHasRevision = false, .major = 9, .minor = 0, .patch = 0, .revision = 42 });
-                CHECK(e->GetValue<Version>()[0].revision == 0);
+                const std::span<const Version> normalized = std::as_const(*e).GetValue<Version>();
+                REQUIRE(normalized.size() == 1);
+                CHECK(normalized[0].revision == 0);
             }
 
             // String elements own heap chunks: shrink frees the dropped ones, grow adds empties
@@ -1100,7 +1111,7 @@ namespace fdf::detail
                 Entry* section = base->GetChild("section");
                 Entry* fresh = base->GetChild("section.fresh");
                 CHECK(section && fresh && fresh->GetParent() == section);
-                CHECK(base->GetChild("section.old") == nullptr);
+                CHECK(FirstIntEquals(base->GetChild("section.old"), 2));
             }
             UniqueEntryPtr empty;
             CHECK(base && !base->Combine(empty));
@@ -1444,29 +1455,6 @@ namespace fdf::detail
                     CHECK(root->GetChild("a") == nullptr);
             }
 
-            // duplicate keys follow AddChild's last-wins policy
-            {
-                if(UniqueEntryPtr root = ParseBuffer("a=1\na=2\n"); CHECK(static_cast<bool>(root)))
-                {
-                    CHECK(root->GetChildCount() == 1);
-                    Entry* a = root->GetChild("a");
-                    if(CHECK(a && a->GetType() == Type::Int))
-                        CHECK(a->GetValue<int64_t>()[0] == 2);
-                }
-                if(UniqueEntryPtr root = ParseBuffer("m { a=1, a=2 }\n"); CHECK(static_cast<bool>(root)))
-                {
-                    Entry* m = root->GetChild("m");
-                    if(CHECK(m))
-                        CHECK(m->GetChildCount() == 1);
-                }
-                if(UniqueEntryPtr root = ParseBuffer("a=1\na { b=2 }\n"); CHECK(static_cast<bool>(root)))
-                {
-                    Entry* a = root->GetChild("a");
-                    if(CHECK(a && a->GetType() == Type::Map))
-                        CHECK(a->GetChildCount() == 1 && a->GetChild("b") != nullptr);
-                }
-            }
-
             // non-finite floats
             {
                 test::g_diagnostics = 0;
@@ -1495,7 +1483,7 @@ namespace fdf::detail
                     const Entry* scope = src.starts_with("m")? root->GetChild("m") : root.get();
                     const Entry* a = scope? scope->GetChild("a") : nullptr;
                     if(CHECK_MSG(a && a->GetType() == Type::Int, src))
-                        CHECK_MSG(a->GetValue<int64_t>()[0] == 1, src);
+                        CHECK_MSG(FirstIntEquals(a, 1), src);
                 }
             }
 
@@ -1509,7 +1497,7 @@ namespace fdf::detail
                     UniqueEntryPtr orphan = root->OrphanChild(*a);
                     if(CHECK(static_cast<bool>(orphan)))
                     {
-                        CHECK(b->AddChild(orphan) == nullptr);
+                        CHECK(b->AddChild(orphan, DuplicateKeyPolicy::Reject) == nullptr);
                         CHECK(static_cast<bool>(orphan));  // ownership remains with caller
                         CHECK(orphan->AddChild(orphan) == nullptr);
                     }
@@ -1580,6 +1568,175 @@ namespace fdf::detail
                 {
                     CHECK(root->GetChild("ok") != nullptr);
                     CHECK(test::g_diagnostics == 0);
+                }
+            }
+        }
+
+
+        static void DuplicateKeyPolicyTest()
+        {
+            test::g_diagnostics = 0;
+            test::g_lastDiagnostic = {};
+            if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("a=1\na=2\n"); CHECK(static_cast<bool>(root)))
+            {
+                CHECK(root->GetChildCount() == 1);
+                CHECK(FirstIntEquals(root->GetChild("a"), 1));
+            }
+            CHECK(test::g_diagnostics == 1);
+            CHECK(test::g_lastDiagnostic.type == DiagnosticType::DuplicateKey);
+            CHECK(test::g_lastDiagnostic.severity == DiagnosticSeverity::Error);
+            CHECK(test::g_lastDiagnostic.line == 2);
+            CHECK(test::g_lastDiagnostic.column == 1);
+            CHECK(test::g_lastDiagnostic.offset == 4);
+
+            test::g_diagnostics = 0;
+            test::g_lastDiagnostic = {};
+            if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("m { a=1, a=2 }\n"); CHECK(static_cast<bool>(root)))
+            {
+                Entry* m = root->GetChild("m");
+                if(CHECK(m && m->GetType() == Type::Map))
+                {
+                    CHECK(m->GetChildCount() == 1);
+                    CHECK(FirstIntEquals(m->GetChild("a"), 1));
+                }
+            }
+            CHECK(test::g_diagnostics == 1);
+            CHECK(test::g_lastDiagnostic.type == DiagnosticType::DuplicateKey);
+            CHECK(test::g_lastDiagnostic.severity == DiagnosticSeverity::Error);
+
+            test::g_diagnostics = 0;
+            if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("a=1\na=2\nb=3\n"); CHECK(static_cast<bool>(root)))
+            {
+                CHECK(root->GetChildCount() == 2);
+                CHECK(FirstIntEquals(root->GetChild("a"), 1));
+                CHECK(FirstIntEquals(root->GetChild("b"), 3));
+            }
+            CHECK(test::g_diagnostics == 1);
+
+            auto orphanValue = [](std::string_view source, std::string_view identifier)
+            {
+                UniqueEntryPtr owner = ParseBuffer(source);
+                return owner? owner->OrphanChild(identifier) : UniqueEntryPtr{};
+            };
+
+            {
+                UniqueEntryPtr root = ParseBuffer("a=1\n");
+                UniqueEntryPtr incoming = orphanValue("a=2\n", "a");
+                Entry* existing = root? root->GetChild("a") : nullptr;
+                Entry* incomingRaw = incoming.get();
+                if(CHECK(root && existing && incoming))
+                {
+                    Entry* result = root->AddChild(incoming, DuplicateKeyPolicy::Reject);
+                    CHECK(result == nullptr);
+                    CHECK(incoming.get() == incomingRaw);
+                    CHECK(root->GetChild("a") == existing);
+                    CHECK(FirstIntEquals(existing, 1));
+                }
+            }
+
+            {
+                UniqueEntryPtr root = ParseBuffer("a=1\n");
+                UniqueEntryPtr incoming = orphanValue("a=2\n", "a");
+                Entry* existing = root? root->GetChild("a") : nullptr;
+                if(CHECK(root && existing && incoming))
+                {
+                    Entry* result = root->AddChild(incoming, DuplicateKeyPolicy::KeepFirst);
+                    CHECK(result == existing);
+                    CHECK(!incoming);
+                    CHECK(FirstIntEquals(existing, 1));
+                }
+            }
+
+            {
+                UniqueEntryPtr root = ParseBuffer("a=1\n");
+                UniqueEntryPtr incoming = orphanValue("a { nested=2 }\n", "a");
+                Entry* existing = root? root->GetChild("a") : nullptr;
+                Entry* nested = incoming? incoming->GetChild("nested") : nullptr;
+                if(CHECK(root && existing && incoming && nested))
+                {
+                    Entry* result = root->AddChild(incoming, DuplicateKeyPolicy::KeepLast);
+                    CHECK(result == existing);
+                    CHECK(!incoming);
+                    CHECK(existing->GetType() == Type::Map);
+                    CHECK(existing->GetChild("nested") == nested);
+                    CHECK(nested->GetParent() == existing);
+                }
+            }
+
+            {
+                UniqueEntryPtr root = ParseBuffer("a=1\n");
+                UniqueEntryPtr incoming = orphanValue("a=2\n", "a");
+                Entry* existing = root? root->GetChild("a") : nullptr;
+                if(CHECK(root && existing && incoming))
+                {
+                    Entry* result = root->AddChild(incoming);
+                    CHECK(result == existing);
+                    CHECK(!incoming);
+                    CHECK(FirstIntEquals(existing, 2));
+                }
+            }
+
+            {
+                UniqueEntryPtr root = ParseBuffer("m { a=1, nested { left=2 } }\n");
+                UniqueEntryPtr incoming = orphanValue("m { a=3, b=4, nested { right=5 } }\n", "m");
+                Entry* existing = root? root->GetChild("m") : nullptr;
+                if(CHECK(root && existing && incoming))
+                {
+                    Entry* result = root->AddChild(incoming, DuplicateKeyPolicy::Merge);
+                    CHECK(result == existing);
+                    CHECK(!incoming);
+                    CHECK(FirstIntEquals(existing->GetChild("a"), 3));
+                    CHECK(FirstIntEquals(existing->GetChild("b"), 4));
+                    CHECK(FirstIntEquals(existing->GetChild("nested.left"), 2));
+                    CHECK(FirstIntEquals(existing->GetChild("nested.right"), 5));
+                }
+            }
+
+            {
+                UniqueEntryPtr root = ParseBuffer("a=1\n");
+                UniqueEntryPtr incoming = orphanValue("a=2\n", "a");
+                Entry* existing = root? root->GetChild("a") : nullptr;
+                if(CHECK(root && existing && incoming))
+                {
+                    Entry* result = root->AddChild(incoming, DuplicateKeyPolicy::Merge);
+                    CHECK(result == existing);
+                    CHECK(!incoming);
+                    CHECK(FirstIntEquals(existing, 2));
+                }
+            }
+
+            {
+                UniqueEntryPtr base = ParseBuffer("a=1\n");
+                UniqueEntryPtr incoming = ParseBuffer("a=2\nb=3\n");
+                Entry* existing = base? base->GetChild("a") : nullptr;
+                if(CHECK(base && incoming && existing))
+                {
+                    CHECK(base->Combine(incoming, CommentCombineStrategy::UseExisting, DuplicateKeyPolicy::Reject));
+                    CHECK(!incoming);
+                    CHECK(base->GetChild("a") == existing);
+                    CHECK(FirstIntEquals(existing, 1));
+                    CHECK(FirstIntEquals(base->GetChild("b"), 3));
+                }
+            }
+
+            {
+                UniqueEntryPtr array = NewEntry();
+                if(array)
+                    array->SetValue(ArrayType{});
+                Entry* first = array? array->Emplace("") : nullptr;
+                if(first)
+                    first->SetValue(1);
+                UniqueEntryPtr incoming = orphanValue("value=2\n", "value");
+                Entry* incomingRaw = incoming.get();
+                if(CHECK(array && first && incoming))
+                {
+                    Entry* result = array->AddChild(incoming, DuplicateKeyPolicy::Reject);
+                    CHECK(result == incomingRaw);
+                    CHECK(!incoming);
+                    CHECK(array->GetChildCount() == 2);
+                    CHECK(array->GetDirectChild(1u) == incomingRaw);
+                    CHECK(incomingRaw->GetParent() == array.get());
+                    CHECK(FirstIntEquals(incomingRaw, 2));
                 }
             }
         }
@@ -1865,10 +2022,13 @@ namespace fdf::detail
                 Entry* e = root->GetChild("v");
                 if(CHECK(e && e->GetType() == Type::Timestamp))
                 {
-                    std::span<Timestamp> parts = e->GetValue<Timestamp>();
-                    CHECK(parts.size() == 2 && parts[0].day == 24 && parts[1].day == 25);
+                    const std::span<Timestamp> parts = e->GetValue<Timestamp>();
+                    REQUIRE(parts.size() == 2);
+                    CHECK(parts[0].day == 24 && parts[1].day == 25);
                     parts[1].minute = 30;
-                    CHECK(std::as_const(*e).GetValue<Timestamp>()[1].minute == 30);
+                    const std::span<const Timestamp> reread = std::as_const(*e).GetValue<Timestamp>();
+                    REQUIRE(reread.size() == 2);
+                    CHECK(reread[1].minute == 30);
                 }
             }
 
@@ -2043,7 +2203,7 @@ namespace fdf::detail
                     CHECK_MSG(root->GetChild("bad") == nullptr, src);   // malformed entry skipped
                     Entry* ok = root->GetChild("ok");
                     if(CHECK_MSG(ok && ok->GetType() == Type::Int, src))
-                        CHECK_MSG(ok->GetValue<int64_t>()[0] == 7, src);
+                        CHECK_MSG(FirstIntEquals(ok, 7), src);
                 }
             }
 
@@ -2233,8 +2393,9 @@ namespace fdf::detail
                 Entry* e = root->GetChild("h");
                 if(CHECK(e && e->GetType() == Type::Hex))
                 {
-                    std::span<Hex> s = e->GetValue<Hex>();
-                    CHECK(s.size() == 1 && s[0].Size() == 3 && !s[0].IsEmpty() && s[0].DigitCount() == 6);
+                    const std::span<Hex> s = e->GetValue<Hex>();
+                    REQUIRE(s.size() == 1);
+                    CHECK(s[0].Size() == 3 && !s[0].IsEmpty() && s[0].DigitCount() == 6);
 
                     const std::span<const std::byte> bytes = std::as_const(s[0]).Bytes();
                     CHECK(bytes.size() == 3 && bytes[0] == std::byte{0xFF}
@@ -2259,8 +2420,9 @@ namespace fdf::detail
                 Entry* e = root->GetChild("h");
                 if(CHECK(e && e->GetType() == Type::Hex))
                 {
-                    std::span<Hex> s = e->GetValue<Hex>();
-                    CHECK(s.size() == 1 && s[0].Size() == 2 && s[0].DigitCount() == 4);
+                    const std::span<Hex> s = e->GetValue<Hex>();
+                    REQUIRE(s.size() == 1);
+                    CHECK(s[0].Size() == 2 && s[0].DigitCount() == 4);
                     CHECK(HexEquals<uint16_t>(s[0], 0x0ABC));
 
                     String out = WriteBuffer<Style{ .bCommas = false }>(*root);
@@ -2283,7 +2445,8 @@ namespace fdf::detail
                 Entry* e = root->GetChild("h");
                 if(CHECK(e && e->GetType() == Type::Hex))
                 {
-                    std::span<Hex> s = e->GetValue<Hex>();
+                    const std::span<Hex> s = e->GetValue<Hex>();
+                    REQUIRE(s.size() == 1);
                     CHECK(HexEquals<uint32_t>(s[0], 0x01020304u) && HexEquals<uint16_t>(s[0], 0x0304, 2));
                     CHECK(s[0].Write<uint32_t>(0xAABBCCDDu, 0));
                     const std::span<const std::byte> bytes = std::as_const(s[0]).Bytes();
@@ -2301,7 +2464,8 @@ namespace fdf::detail
                 Entry* e = root->GetChild("h");
                 if(CHECK(e && e->GetType() == Type::Hex))
                 {
-                    std::span<Hex> s = e->GetValue<Hex>();
+                    const std::span<Hex> s = e->GetValue<Hex>();
+                    REQUIRE(s.size() == 1);
                     bool a = false, b = true, c = false;
                     CHECK(s[0].Read(a) && a);              // 0x01
                     CHECK(s[0].Read(b, 1) && !b);          // 0x00
@@ -2320,7 +2484,8 @@ namespace fdf::detail
                 Entry* e = root? root->GetChild("h") : nullptr;
                 if(CHECK(e && e->GetType() == Type::Hex))
                 {
-                    std::span<Hex> s = e->GetValue<Hex>();
+                    const std::span<Hex> s = e->GetValue<Hex>();
+                    REQUIRE(s.size() == 1);
                     Rgb c{};
                     CHECK(s[0].Read(c) && c.r == 0xFF && c.g == 0x57 && c.b == 0x33);
                     CHECK(s[0].Write(Rgb{ 0x11, 0x22, 0x33 }, 0));
@@ -2451,8 +2616,9 @@ namespace fdf::detail
 
                     const Hex pack[2] = { Hex(std::span<const std::byte>(raw, 1)), Hex(std::span<const std::byte>(raw, 3)) };
                     e->SetValue(std::span<const Hex>(pack, 2));
-                    std::span<Hex> s = e->GetValue<Hex>();
-                    CHECK(s.size() == 2 && s[0].Size() == 1 && s[1].Size() == 3 && s[0] == pack[0] && s[1] == pack[1]);
+                    const std::span<Hex> s = e->GetValue<Hex>();
+                    REQUIRE(s.size() == 2);
+                    CHECK(s[0].Size() == 1 && s[1].Size() == 3 && s[0] == pack[0] && s[1] == pack[1]);
 
                     s[0] = pack[1];
                     CHECK(s[0] == pack[1] && HexEquals<uint32_t>(s[0], 0x00FF5733u));
@@ -2497,9 +2663,17 @@ namespace fdf::detail
                 CHECK(!h.Decode("DD", 6) && h.Size() == 5);
                 CHECK(!h.Decode("", 6) && h.Size() == 5);
 
+                CHECK(h.Assign("0xFF_57_33") && h.Size() == 3 && HexEquals<uint32_t>(h, 0x00FF5733u));
+                CHECK(h.Assign("A_BC") && h.Size() == 2 && HexEquals<uint16_t>(h, 0x0ABC));
+                CHECK(h.Assign("FF_5733") && h.Decode("A_BC")
+                    && h.Size() == 5 && HexEquals<uint64_t>(h, 0xFF57330ABCull));
+                CHECK(h.Assign("FF5733") && h.Decode("9_9", 1)
+                    && h.Size() == 3 && HexEquals<uint32_t>(h, 0x00FF9933u));
+
                 // a rejected string leaves the value untouched on every entry point
                 const Hex original = h;
-                for(const std::string_view bad : { "0xZZ", "12G4", " 12", "0x1 2", "-1" })
+                for(const std::string_view bad : { "0xZZ", "12G4", " 12", "0x1 2", "-1",
+                    "_FF", "FF_", "F__F", "0x_FF", "_", "0x_" })
                 {
                     CHECK_MSG(!h.Assign(bad), bad);
                     CHECK_MSG(h == original && h.Size() == original.Size(), bad);
@@ -2586,8 +2760,9 @@ namespace fdf::detail
                     Entry* e = root->GetChild("big");
                     if(CHECK(e && e->GetType() == Type::Hex))
                     {
-                        std::span<Hex> s = e->GetValue<Hex>();
-                        CHECK(s.size() == 1 && s[0].Size() == 65536
+                        const std::span<Hex> s = e->GetValue<Hex>();
+                        REQUIRE(s.size() == 1);
+                        CHECK(s[0].Size() == 65536
                             && s[0].Bytes()[0] == std::byte{0x0F} && s[0].Bytes()[65535] == std::byte{0xFF});
                     }
                 }
@@ -2906,7 +3081,9 @@ namespace fdf::detail
                 Entry* e = root? root->GetChild("t") : nullptr;
                 if(CHECK(e && e->GetType() == Type::Timestamp))
                 {
-                    const Timestamp ts = e->GetValue<Timestamp>()[0];
+                    const std::span<const Timestamp> values = std::as_const(*e).GetValue<Timestamp>();
+                    REQUIRE(values.size() == 1);
+                    const Timestamp ts = values[0];
                     CHECK(ts.IsValid() && ts.bHasDate && ts.bHasTime);
                     CHECK(ts.year == 2024 && ts.month == 12 && ts.day == 24);
                     CHECK(ts.hour == 15 && ts.minute == 30 && ts.second == 0);
@@ -2919,8 +3096,10 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer("t = 2001-09-09T01:46:40Z\n");
                 Entry* e = root? root->GetChild("t") : nullptr;
-                REQUIRE(e && e->GetValue<Timestamp>().size() == 1);
-                const Timestamp ts = e->GetValue<Timestamp>()[0];
+                REQUIRE(e);
+                const std::span<const Timestamp> values = std::as_const(*e).GetValue<Timestamp>();
+                REQUIRE(values.size() == 1);
+                const Timestamp ts = values[0];
                 CHECK(ts.ToUnixSeconds() == 1'000'000'000);
                 CHECK(ts.ToUnixMillis() == 1'000'000'000'000);
                 CHECK(ts.ToUnixNanos()  == 1'000'000'000'000'000'000);
@@ -2933,9 +3112,11 @@ namespace fdf::detail
                 Entry* offEntry = offRoot? offRoot->GetChild("t") : nullptr;
                 Entry* utcEntry = utcRoot? utcRoot->GetChild("t") : nullptr;
                 REQUIRE(offEntry && utcEntry);
-                REQUIRE(offEntry->GetValue<Timestamp>().size() == 1 && utcEntry->GetValue<Timestamp>().size() == 1);
-                const Timestamp off = offEntry->GetValue<Timestamp>()[0];
-                const Timestamp utc = utcEntry->GetValue<Timestamp>()[0];
+                const std::span<const Timestamp> offValues = std::as_const(*offEntry).GetValue<Timestamp>();
+                const std::span<const Timestamp> utcValues = std::as_const(*utcEntry).GetValue<Timestamp>();
+                REQUIRE(offValues.size() == 1 && utcValues.size() == 1);
+                const Timestamp off = offValues[0];
+                const Timestamp utc = utcValues[0];
                 CHECK(off.ToUnixSeconds() == utc.ToUnixSeconds());
                 CHECK(off.tzOffsetMin == 300);
             }
@@ -2949,11 +3130,13 @@ namespace fdf::detail
                     Entry* eb = root->GetChild("b");
                     Entry* ec = root->GetChild("c");
                     REQUIRE(ea && eb && ec);
-                    REQUIRE(ea->GetValue<Timestamp>().size() == 1 && eb->GetValue<Timestamp>().size() == 1
-                            && ec->GetValue<Timestamp>().size() == 1);
-                    const Timestamp unknown = ea->GetValue<Timestamp>()[0];
-                    const Timestamp zero    = eb->GetValue<Timestamp>()[0];
-                    const Timestamp utc     = ec->GetValue<Timestamp>()[0];
+                    const std::span<const Timestamp> aValues = std::as_const(*ea).GetValue<Timestamp>();
+                    const std::span<const Timestamp> bValues = std::as_const(*eb).GetValue<Timestamp>();
+                    const std::span<const Timestamp> cValues = std::as_const(*ec).GetValue<Timestamp>();
+                    REQUIRE(aValues.size() == 1 && bValues.size() == 1 && cValues.size() == 1);
+                    const Timestamp unknown = aValues[0];
+                    const Timestamp zero    = bValues[0];
+                    const Timestamp utc     = cValues[0];
                     CHECK(unknown.tzKind == Timestamp::TzKind::UnknownOffset);
                     CHECK(zero.tzKind == Timestamp::TzKind::Offset);
                     CHECK(utc.tzKind == Timestamp::TzKind::Utc);
@@ -2973,8 +3156,10 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer("t = 15:30:00.5\n");
                 Entry* e = root? root->GetChild("t") : nullptr;
-                REQUIRE(e && e->GetValue<Timestamp>().size() == 1);
-                const Timestamp ts = e->GetValue<Timestamp>()[0];
+                REQUIRE(e);
+                const std::span<const Timestamp> values = std::as_const(*e).GetValue<Timestamp>();
+                REQUIRE(values.size() == 1);
+                const Timestamp ts = values[0];
                 CHECK(ts.IsValid() && ts.bHasTime && !ts.bHasDate);
                 CHECK(ts.hour == 15 && ts.minute == 30 && ts.nanosecond == 500'000'000);
                 CHECK(ts.tzKind == Timestamp::TzKind::None);
@@ -3000,8 +3185,10 @@ namespace fdf::detail
             {
                 UniqueEntryPtr root = ParseBuffer("t=2024-12-31T23:59:60.5Z\n");
                 Entry* e = root? root->GetChild("t") : nullptr;
-                REQUIRE(e && e->GetValue<Timestamp>().size() == 1);
-                const Timestamp leap = e->GetValue<Timestamp>()[0];
+                REQUIRE(e);
+                const std::span<const Timestamp> values = std::as_const(*e).GetValue<Timestamp>();
+                REQUIRE(values.size() == 1);
+                const Timestamp leap = values[0];
                 const Timestamp next = Timestamp::FromText("2025-01-01T00:00:00Z");
                 CHECK(leap.second == 60);
                 CHECK(leap.ToUnixSeconds() == next.ToUnixSeconds());
@@ -3020,8 +3207,9 @@ namespace fdf::detail
                     };
                     e->SetValue(std::span<const Timestamp>(values));
                     CHECK(e->GetType() == Type::Timestamp);
-                    std::span<Timestamp> stored = e->GetValue<Timestamp>();
-                    CHECK(stored.size() == 2 && stored[0].day == 24 && stored[1].hour == 15);
+                    const std::span<Timestamp> stored = e->GetValue<Timestamp>();
+                    REQUIRE(stored.size() == 2);
+                    CHECK(stored[0].day == 24 && stored[1].hour == 15);
                     stored[0].year = 2025;
                     stored[1].second = 45;
                     CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t=2025-12-24|15:30:45\n");
@@ -3042,7 +3230,9 @@ namespace fdf::detail
 
                     e->Resize(1);
                     CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t=2024-12-24\n");
-                    e->GetValue<Timestamp>()[0] = Timestamp{};
+                    const std::span<Timestamp> shrunk = e->GetValue<Timestamp>();
+                    REQUIRE(shrunk.size() == 1);
+                    shrunk[0] = Timestamp{};
                     const String written = WriteBuffer<Style{ .bCommas = false }>(*root);
                     CHECK(written == "t=null\n");
 
@@ -3122,8 +3312,8 @@ namespace fdf::detail
                 Entry* entry = root? root->GetChild("d") : nullptr;
                 if(CHECK(entry && entry->GetType() == Type::Duration))
                 {
-                    std::span<Duration> values = entry->GetValue<Duration>();
-                    CHECK(values.size() == 3);
+                    const std::span<Duration> values = entry->GetValue<Duration>();
+                    REQUIRE(values.size() == 3);
                     CHECK(values[0] == Duration::Hours(1));
                     CHECK(values[1] == Duration::Hours(2));
                     CHECK(values[2] == Duration::Minutes(30));
@@ -3203,7 +3393,9 @@ namespace fdf::detail
                 if(Entry* e = root->Emplace("t"); CHECK(e))
                 {
                     e->SetValue(Timestamp::Date(2024, 12, 24));
-                    e->GetValue<Timestamp>()[0].day = 99;
+                    const std::span<Timestamp> stored = e->GetValue<Timestamp>();
+                    REQUIRE(stored.size() == 1);
+                    stored[0].day = 99;
                     CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t=null\n");
                 }
             }
@@ -3355,6 +3547,123 @@ namespace fdf::detail
                 if(!TreeEqual(*a.GetDirectChild(i), *b.GetDirectChild(i)))
                     return false;
             return true;
+        }
+
+        static void DigitSeparatorTest()
+        {
+            struct ValidCase
+            {
+                std::string_view separated;
+                std::string_view plain;
+            };
+            constexpr ValidCase validCases[] =
+            {
+                { "1_000_000", "1000000" },
+                { "1_0.5_5", "10.55" },
+                { "0xFF_57_33", "0xFF5733" },
+                { "-1_000", "-1000" },
+                { "1_000e1_0", "1000e10" },
+                { "1.5e-1_0", "1.5e-10" },
+                { "0xA_BC", "0xABC" },
+            };
+            for(const ValidCase& c : validCases)
+            {
+                UniqueEntryPtr separated = ParseBuffer(std::format("value={}\n", c.separated));
+                UniqueEntryPtr plain = ParseBuffer(std::format("value={}\n", c.plain));
+                const Entry* separatedValue = separated? separated->GetChild("value") : nullptr;
+                const Entry* plainValue = plain? plain->GetChild("value") : nullptr;
+                CHECK_MSG(separatedValue && plainValue && ValueEqual(*separatedValue, *plainValue), c.separated);
+            }
+
+            constexpr std::string_view invalidCases[] =
+            {
+                "_100", "100_", "1__0", "1_.5", "1._5", "1_e5", "1e_5", "0x_FF", "0xFF_", "-_1", "0x_",
+                "1_0.0.0", "1_0h",
+            };
+            for(const std::string_view invalid : invalidCases)
+            {
+                test::g_diagnostics = 0;
+                test::g_lastDiagnostic = {};
+                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(std::format("bad={}\nok=7\n", invalid));
+                CHECK_MSG(root && !root->GetChild("bad") && FirstIntEquals(root->GetChild("ok"), 7), invalid);
+                CHECK_MSG(test::g_diagnostics == 1 && test::g_lastDiagnostic.type == DiagnosticType::InvalidNumber, invalid);
+            }
+
+            if(UniqueEntryPtr root = ParseBuffer("ints=1_000|2_000\nhex=0xF_F|0x8_0\n"); CHECK(static_cast<bool>(root)))
+            {
+                const Entry* ints = root->GetChild("ints");
+                const Entry* hex = root->GetChild("hex");
+                if(CHECK(ints && ints->GetType() == Type::Int))
+                {
+                    const std::span<const int64_t> values = ints->GetValue<int64_t>();
+                    CHECK(values.size() == 2 && values[0] == 1000 && values[1] == 2000);
+                }
+                if(CHECK(hex && hex->GetType() == Type::Hex))
+                {
+                    const std::span<const Hex> values = hex->GetValue<Hex>();
+                    CHECK(values.size() == 2 && HexEquals<uint8_t>(values[0], 0xFF) && HexEquals<uint8_t>(values[1], 0x80));
+                }
+            }
+
+            if(UniqueEntryPtr root = ParseBuffer("my_key=1_000\n"); CHECK(static_cast<bool>(root)))
+                CHECK(FirstIntEquals(root->GetChild("my_key"), 1000));
+
+            if(UniqueEntryPtr root = ParseBuffer("h=0xA_BC\n"); CHECK(static_cast<bool>(root)))
+                CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "h=0x0ABC\n");
+
+            constexpr std::string_view source =
+                "i=1_000_000\n"
+                "n=-1_000_000\n"
+                "f=1_234.5678\n"
+                "e=1.0e100\n"
+                "h=0xFF_57_33\n"
+                "v=123.456.789\n"
+                "t=2024-12-24\n"
+                "d=123ns\n";
+            UniqueEntryPtr root = ParseBuffer(source);
+            REQUIRE(static_cast<bool>(root));
+
+            const String ungrouped = WriteBuffer<Style{ .bCommas = false }>(*root);
+            CHECK_MSG(ungrouped ==
+                "i=1000000\n"
+                "n=-1000000\n"
+                "f=1234.5678\n"
+                "e=1.0e100\n"
+                "h=0xFF5733\n"
+                "v=123.456.789\n"
+                "t=2024-12-24\n"
+                "d=123ns\n", ungrouped);
+
+            const String intGrouped = WriteBuffer<Style{ .bCommas = false, .intDigitGrouping = 3 }>(*root);
+            CHECK_MSG(intGrouped ==
+                "i=1_000_000\n"
+                "n=-1_000_000\n"
+                "f=1_234.5678\n"
+                "e=1.0e100\n"
+                "h=0xFF5733\n"
+                "v=123.456.789\n"
+                "t=2024-12-24\n"
+                "d=123ns\n", intGrouped);
+            UniqueEntryPtr intReparsed = ParseBuffer(intGrouped);
+            CHECK(intReparsed && TreeEqual(*root, *intReparsed));
+
+            const String fineGrouped = WriteBuffer<Style{ .bCommas = false, .intDigitGrouping = 2 }>(*root);
+            CHECK_MSG(fineGrouped.contains("f=12_34.5678\n") && fineGrouped.contains("e=1.0e100\n"), fineGrouped);
+            UniqueEntryPtr fineReparsed = ParseBuffer(fineGrouped);
+            CHECK(fineReparsed && TreeEqual(*root, *fineReparsed));
+
+            const String hexGrouped = WriteBuffer<Style{ .bCommas = false, .hexDigitGrouping = 4 }>(*root);
+            CHECK_MSG(hexGrouped ==
+                "i=1000000\n"
+                "n=-1000000\n"
+                "f=1234.5678\n"
+                "e=1.0e100\n"
+                "h=0xFF_5733\n"
+                "v=123.456.789\n"
+                "t=2024-12-24\n"
+                "d=123ns\n", hexGrouped);
+            UniqueEntryPtr hexReparsed = ParseBuffer(hexGrouped);
+            CHECK(hexReparsed && TreeEqual(*root, *hexReparsed));
         }
 
         // parse, write and reparse without changing the tree
@@ -4270,6 +4579,12 @@ consteval bool FloatProbe()
     const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
     return e && e->GetType() == fdf::Type::Float && e->GetValue<double>()[0] > 3.4 && e->GetValue<double>()[0] < 3.6;
 }
+consteval bool DigitSeparatorProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = 1_000_000\n");
+    const fdf::Entry* e = root? root->GetDirectChild("value") : nullptr;
+    return e && e->GetType() == fdf::Type::Int && e->GetValue<int64_t>()[0] == 1000000;
+}
 consteval bool StringProbe()
 {
     fdf::UniqueEntryPtr root = fdf::ParseBuffer("value = \"hi\"\n");
@@ -4323,6 +4638,7 @@ static_assert(MinIntProbe(),    "consteval minimum int64 parse");
 static_assert(UIntProbe(),      "consteval uint (max u64) parse");
 static_assert(UIntPackProbe(),  "consteval unsigned view over an int pack with a huge component");
 static_assert(FloatProbe(),     "consteval float parse");
+static_assert(DigitSeparatorProbe(), "consteval separated int parse");
 static_assert(StringProbe(),    "consteval string parse");
 static_assert(BoolProbe(),      "consteval bool parse");
 static_assert(NullProbe(),      "consteval null parse");
@@ -4391,9 +4707,10 @@ consteval bool CombineProbe()
     if(!base || !incoming || !base->Combine(incoming) || incoming)
         return false;
     const fdf::Entry* section = base->GetChild("section");
+    const fdf::Entry* old = base->GetChild("section.old");
     const fdf::Entry* fresh = base->GetChild("section.fresh");
     if(!base->GetChild("keep") || !base->GetChild("add") || !section || !fresh
-        || fresh->GetParent() != section || base->GetChild("section.old"))
+        || fresh->GetParent() != section || !FirstIntEquals(old, 2))
         return false;
 
     fdf::UniqueEntryPtr left = fdf::NewEntry();
@@ -4762,8 +5079,10 @@ int main(int argc, char** argv)
     RunCase("MutateTest",          Test::MutateTest);
     RunCase("RegressionTest",      Test::RegressionTest);
     RunCase("RecoveryTest",        Test::RecoveryTest);
+    RunCase("DuplicateKeyPolicyTest", Test::DuplicateKeyPolicyTest);
     RunCase("NegativeTest",        Test::NegativeTest);
     RunCase("PackTest",            Test::PackTest);
+    RunCase("DigitSeparatorTest",  Test::DigitSeparatorTest);
     RunCase("StringRoundTripTest", Test::StringRoundTripTest);
     RunCase("StringStorageTest",   Test::StringStorageTest);
     RunCase("HexStorageTest",      Test::HexStorageTest);

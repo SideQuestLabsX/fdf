@@ -1,11 +1,6 @@
 cmake_minimum_required(VERSION 3.28.3...3.31)
 
 
-if(PROJECT_IS_TOP_LEVEL)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
-endif()
-
-
 option(FDF_USE_CPP_MODULES                 "Enable C++ modules" OFF)
 option(FDF_NO_COMMENTS                     "Disable comment processing" OFF)
 option(FDF_EXTENDED_NO_COMMENT_IDENTIFIERS "Use extended identifier size limit when comments are disabled (otherwise keep standard limit)" OFF)

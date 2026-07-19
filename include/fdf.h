@@ -117,6 +117,8 @@ FDF_EXPORT namespace fdf
         // General
         bool bGroupSimilarTypes = false;  // off = preserve source order (stable diffs); on = group by type
         bool bUppercaseHex = true;
+        uint8_t intDigitGrouping = 0; // group Int and Float integer-part digits every N
+        uint8_t hexDigitGrouping = 0; // group Hex digits every N
         bool bUppercaseTimestamp = true;
         bool bUseNilInsteadOfNull = false;
         bool bAlwaysUseDoubleQuoteForStrings = false;
@@ -132,6 +134,15 @@ FDF_EXPORT namespace fdf
         UseNewIfExistingIsEmpty,
         Merge,
         Clear
+    };
+
+    // how AddChild resolves an existing direct map key
+    enum class DuplicateKeyPolicy : uint8_t
+    {
+        Reject,
+        KeepFirst,
+        KeepLast,
+        Merge
     };
 
     enum class DiagnosticSeverity : uint8_t
@@ -159,6 +170,7 @@ FDF_EXPORT namespace fdf
         InvalidUtf8,         // non-fatal, bytes still pass through
         InputTooLarge,       // buffer would overflow the 32-bit offsets, refused before parsing
         InvalidDuration,
+        DuplicateKey,
     };
 
     // Passed to a DIAGNOSTIC_CALLBACK for every issue found while parsing
@@ -2042,6 +2054,7 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr uint32_t FindChildIndex(std::string_view _identifier) const noexcept;
         [[nodiscard]] constexpr Entry* Emplace(std::string_view _identifier) noexcept;
         [[nodiscard]] constexpr Entry* AddChild(UniqueEntryPtr& e) noexcept;
+        [[nodiscard]] constexpr Entry* AddChild(UniqueEntryPtr& e, DuplicateKeyPolicy policy) noexcept;
         [[nodiscard]] constexpr bool   RemoveChild(Entry& e) noexcept;
         [[nodiscard]] constexpr bool   RemoveChild(std::string_view _identifier) noexcept;
         [[nodiscard]] constexpr bool   RemoveChild(uint32_t index) noexcept;
@@ -2135,10 +2148,10 @@ FDF_EXPORT namespace fdf
 
     public:
         template<auto DIAGNOSTIC_CALLBACK = nullptr>
-        [[nodiscard]] bool ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty) noexcept;
+        [[nodiscard]] bool ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty, DuplicateKeyPolicy policy = DuplicateKeyPolicy::Merge) noexcept;
         template<auto DIAGNOSTIC_CALLBACK = nullptr>
-        [[nodiscard]] constexpr bool ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty) noexcept;
-        [[nodiscard]] constexpr bool Combine(UniqueEntryPtr& other, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty) noexcept;
+        [[nodiscard]] constexpr bool ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty, DuplicateKeyPolicy policy = DuplicateKeyPolicy::Merge) noexcept;
+        [[nodiscard]] constexpr bool Combine(UniqueEntryPtr& other, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty, DuplicateKeyPolicy policy = DuplicateKeyPolicy::Merge) noexcept;
     };
 
     static_assert(sizeof(String) == 8, "String is a single block pointer, size/capacity live in the block header");
@@ -2786,6 +2799,7 @@ namespace fdf::detail
     }
 
     // Parse one number from [s, end). Accepts: [-] digits [. digits] [(e|E)[+|-]digits]
+    // Digits may contain '_' only between two digits
     // Sets *bOk false on malformed input; overflow yields +/-inf with *bOk true
     FDF_EXPORT_INTERNAL [[nodiscard]] constexpr double ParseDouble(const char* s, const char* end, bool* bOk) noexcept
     {
@@ -2839,17 +2853,42 @@ namespace fdf::detail
             }
         };
 
-        for(; p < end && (*p >= '0' && *p <= '9'); p++)
-            pushDigit(*p - '0');
+        auto consumeDigits = [&](const bool bFraction) -> bool
+        {
+            bool bPreviousDigit = false;
+            while(p < end && ((*p >= '0' && *p <= '9') || *p == '_'))
+            {
+                if(*p == '_')
+                {
+                    if(!bPreviousDigit || p + 1 >= end || !(p[1] >= '0' && p[1] <= '9'))
+                        return false;
+                    bPreviousDigit = false;
+                    p++;
+                    continue;
+                }
+
+                pushDigit(*p - '0');
+                if(bFraction && sigDigits <= 40)
+                    exp10--;
+                bPreviousDigit = true;
+                p++;
+            }
+            return true;
+        };
+
+        if(!consumeDigits(false))
+        {
+            *bOk = false;
+            return 0.0;
+        }
 
         if(p < end && *p == '.')
         {
             p++;
-            for(; p < end && (*p >= '0' && *p <= '9'); p++)
+            if(!consumeDigits(true))
             {
-                pushDigit(*p - '0');
-                if(sigDigits <= 40)
-                    exp10--;
+                *bOk = false;
+                return 0.0;
             }
         }
 
@@ -2862,14 +2901,33 @@ namespace fdf::detail
                 bExpNeg = (*p == '-');
                 p++;
             }
-            if(p >= end || !(*p >= '0' && *p <= '9'))
+            int ev = 0;
+            bool bExpDigit = false;
+            bool bPreviousDigit = false;
+            while(p < end && ((*p >= '0' && *p <= '9') || *p == '_'))
+            {
+                if(*p == '_')
+                {
+                    if(!bPreviousDigit || p + 1 >= end || !(p[1] >= '0' && p[1] <= '9'))
+                    {
+                        *bOk = false;
+                        return 0.0;
+                    }
+                    bPreviousDigit = false;
+                    p++;
+                    continue;
+                }
+
+                ev = ev < 100000? ev * 10 + (*p - '0') : ev;
+                bExpDigit = true;
+                bPreviousDigit = true;
+                p++;
+            }
+            if(!bExpDigit)
             {
                 *bOk = false;
                 return 0.0;
             }
-            int ev = 0;
-            for(; p < end && (*p >= '0' && *p <= '9'); p++)
-                ev = ev < 100000? ev * 10 + (*p - '0') : ev;
             exp10 += bExpNeg? -ev : ev;
         }
 
@@ -2989,6 +3047,38 @@ namespace fdf::detail
         return c >= '0' && c <= '9';
     }
 
+    [[nodiscard]] constexpr bool constexpr_ishexdigit(char c) noexcept
+    {
+        return constexpr_isdigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+    }
+
+    constexpr void GroupIntegerPart(String& s, const size_t start, const uint8_t grouping) noexcept
+    {
+        if(grouping == 0)
+            return;
+
+        size_t digitStart = start;
+        if(digitStart < s.size() && s[digitStart] == '-')
+            digitStart++;
+
+        size_t digitEnd = digitStart;
+        while(digitEnd < s.size() && constexpr_isdigit(s[digitEnd]))
+            digitEnd++;
+
+        const size_t digitCount = digitEnd - digitStart;
+        if(digitCount <= grouping)
+            return;
+
+        size_t separator = digitEnd - grouping;
+        while(separator > digitStart)
+        {
+            s.insert(separator, 1, '_');
+            if(separator - digitStart <= grouping)
+                break;
+            separator -= grouping;
+        }
+    }
+
     // Resolve a single Atom's text into a concrete value type. Only structurally impossible input
     // returns false, content is validated by the per-type parse
     FDF_EXPORT_INTERNAL [[nodiscard]] constexpr bool ClassifyAtom(std::string_view view, Type& outType) noexcept
@@ -3011,8 +3101,12 @@ namespace fdf::detail
             for(size_t i = 2; i < view.size(); i++)
             {
                 const char c = view[i];
-                if(!constexpr_isdigit(c) && !(c >= 'a' && c <= 'f') && !(c >= 'A' && c <= 'F'))
-                    return false;
+                if(constexpr_ishexdigit(c))
+                    continue;
+                if(c == '_' && i > 2 && i + 1 < view.size()
+                    && constexpr_ishexdigit(view[i - 1]) && constexpr_ishexdigit(view[i + 1]))
+                    continue;
+                return false;
             }
             outType = Type::Hex;
             return true;
@@ -3032,6 +3126,13 @@ namespace fdf::detail
         if(view.find(':') != std::string_view::npos || bDateDash)
         {
             outType = Type::Timestamp;  // validated by the parse below
+            return true;
+        }
+
+        // separated numeric atoms are resolved before version and duration classification
+        if(view.find('_') != std::string_view::npos)
+        {
+            outType = view.find_first_of(".eE") != std::string_view::npos? Type::Float : Type::Int;
             return true;
         }
 
@@ -4152,11 +4253,17 @@ namespace fdf
     // caller validates the digits and strips the 0x prefix
     constexpr bool Hex::Decode_UNSAFE(const std::string_view digits, const uint32_t byteOffset) noexcept
     {
-        if(digits.size() > 2 * static_cast<size_t>(detail::UINT32_MAX_VALUE))
+        size_t digitCount = 0;
+        for(const char c : digits)
+        {
+            if(c != '_')
+                digitCount++;
+        }
+        if(digitCount > 2 * static_cast<size_t>(detail::UINT32_MAX_VALUE))
             return false;
 
-        const bool bOdd = digits.size() % 2 != 0;
-        const uint32_t byteCount = static_cast<uint32_t>((digits.size() + 1) / 2);
+        const bool bOdd = digitCount % 2 != 0;
+        const uint32_t byteCount = static_cast<uint32_t>((digitCount + 1) / 2);
         if(byteCount > MaxSize() - byteOffset || !Reallocate(byteOffset + byteCount))
             return false;
 
@@ -4168,10 +4275,16 @@ namespace fdf
         };
 
         size_t digitIndex = 0;
+        auto nextNibble = [&]() -> int
+        {
+            while(digits[digitIndex] == '_')
+                digitIndex++;
+            return nibble(digits[digitIndex++]);
+        };
         for(uint32_t i = 0; i < byteCount; i++)
         {
-            const int high = i == 0 && bOdd? 0 : nibble(digits[digitIndex++]);
-            const int low = nibble(digits[digitIndex++]);
+            const int high = i == 0 && bOdd? 0 : nextNibble();
+            const int low = nextNibble();
             ptr[byteOffset + i] = static_cast<std::byte>(high << 4 | low);
         }
         size = std::max(size, byteOffset + byteCount);
@@ -4183,11 +4296,14 @@ namespace fdf
         if(digits.size() >= 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X'))
             digits.remove_prefix(2);
 
-        for(const char c : digits)
+        for(size_t i = 0; i < digits.size(); i++)
         {
-            const bool bDigit = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-            if(!bDigit)
-                return false;
+            if(detail::constexpr_ishexdigit(digits[i]))
+                continue;
+            if(digits[i] == '_' && i > 0 && i + 1 < digits.size()
+                && detail::constexpr_ishexdigit(digits[i - 1]) && detail::constexpr_ishexdigit(digits[i + 1]))
+                continue;
+            return false;
         }
         return true;
     }
@@ -4429,6 +4545,11 @@ namespace fdf
 
     constexpr Entry* Entry::AddChild(UniqueEntryPtr& e) noexcept
     {
+        return AddChild(e, DuplicateKeyPolicy::KeepLast);
+    }
+
+    constexpr Entry* Entry::AddChild(UniqueEntryPtr& e, DuplicateKeyPolicy policy) noexcept
+    {
         if(!e || !IsContainer() || e->parent)
             return nullptr;
 
@@ -4439,13 +4560,37 @@ namespace fdf
                 return nullptr;
         }
 
-        e->parent = this;
-
-        // TODO: make duplicate-key replacement configurable
         if(type == Type::Map)
         {
             if(Entry* found = GetDirectChild(e->GetIdentifier()))
             {
+                switch(policy)
+                {
+                case DuplicateKeyPolicy::Reject:
+                    return nullptr;
+                case DuplicateKeyPolicy::KeepFirst:
+                    e.reset();
+                    return found;
+                case DuplicateKeyPolicy::Merge:
+                    if(found->IsContainer() && e->IsContainer() && found->type == e->type)
+                    {
+                        while(e->GetChildCount() > 0)
+                        {
+                            UniqueEntryPtr child = e->OrphanChild(0U);
+                            assert(child && "a non-empty container must orphan its first child");
+                            [[maybe_unused]] const Entry* added = found->AddChild(child, policy);
+                            assert(added && "an orphaned child must be addable during a recursive merge");
+                        }
+                        e.reset();
+                        return found;
+                    }
+                    break;   // nothing to merge, replace like KeepLast
+                case DuplicateKeyPolicy::KeepLast:
+                    break;
+                default:
+                    std::unreachable();
+                }
+
                 std::swap(found->type, e->type);
                 std::swap(found->size, e->size);
                 std::swap(found->capacity, e->capacity);
@@ -4462,6 +4607,9 @@ namespace fdf
                 return found;
             }
         }
+
+        // parent only on the append path, a parented duplicate would leave ~Entry chasing an orphan
+        e->parent = this;
 
         assert(size <= capacity && "size must never exceed capacity");
         if(size == capacity)
@@ -5441,11 +5589,23 @@ namespace fdf
                     if(c) temp.push_back('|');
                     temp.append("0x");
                     const std::span<const std::byte> bytes = span[c].Bytes();
+                    const size_t digitCount = bytes.size() * 2;
+                    size_t digitIndex = 0;
+                    auto appendHexDigit = [&](const char digit)
+                    {
+                        if constexpr(STYLE.hexDigitGrouping != 0)
+                        {
+                            if(digitIndex != 0 && (digitCount - digitIndex) % STYLE.hexDigitGrouping == 0)
+                                temp.push_back('_');
+                        }
+                        temp.push_back(digit);
+                        digitIndex++;
+                    };
                     for(size_t i = 0; i < bytes.size(); i++)
                     {
                         const uint8_t b = std::to_integer<uint8_t>(bytes[i]);
-                        temp.push_back(HEX_DIGITS[b >> 4]);
-                        temp.push_back(HEX_DIGITS[b & 0xF]);
+                        appendHexDigit(HEX_DIGITS[b >> 4]);
+                        appendHexDigit(HEX_DIGITS[b & 0xF]);
                     }
                 }
                 return temp;
@@ -5497,7 +5657,9 @@ namespace fdf
                 for(size_t i = 0; i < span.size(); i++)
                 {
                     if(i) temp.push_back('|');
+                    const size_t start = temp.size();
                     detail::AppendInt(temp, span[i]);
+                    detail::GroupIntegerPart(temp, start, STYLE.intDigitGrouping);
                 }
                 return temp;
             }
@@ -5517,7 +5679,9 @@ namespace fdf
                 for(size_t i = 0; i < span.size(); i++)
                 {
                     if(i) temp.push_back('|');
+                    const size_t start = temp.size();
                     detail::AppendDouble(temp, span[i]);
+                    detail::GroupIntegerPart(temp, start, STYLE.intDigitGrouping);
                 }
                 return temp;
             }
@@ -5544,7 +5708,7 @@ namespace fdf
 namespace fdf
 {
     template <auto DIAGNOSTIC_CALLBACK>
-    bool Entry::ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy) noexcept
+    bool Entry::ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy, DuplicateKeyPolicy policy) noexcept
     {
         std::error_code ec;
         if(!std::filesystem::is_regular_file(filepath, ec) || ec)
@@ -5567,20 +5731,20 @@ namespace fdf
         String content(static_cast<size_t>(fileSize), '\0');
         if(fileSize > 0 && !file.read(content.data(), static_cast<std::streamsize>(fileSize)))
             return false;
-        return ParseCombineBuffer<DIAGNOSTIC_CALLBACK>(std::string_view(content), fileCommentCombineStrategy);
+        return ParseCombineBuffer<DIAGNOSTIC_CALLBACK>(std::string_view(content), fileCommentCombineStrategy, policy);
     }
 
     template <auto DIAGNOSTIC_CALLBACK>
-    constexpr bool Entry::ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy) noexcept
+    constexpr bool Entry::ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy, DuplicateKeyPolicy policy) noexcept
     {
         if(type != Type::Map)
             return false;
 
         UniqueEntryPtr other = detail::Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(content);
-        return Combine(other, fileCommentCombineStrategy);
+        return Combine(other, fileCommentCombineStrategy, policy);
     }
 
-    constexpr bool Entry::Combine(UniqueEntryPtr& other, [[maybe_unused]] CommentCombineStrategy fileCommentCombineStrategy) noexcept
+    constexpr bool Entry::Combine(UniqueEntryPtr& other, [[maybe_unused]] CommentCombineStrategy fileCommentCombineStrategy, DuplicateKeyPolicy policy) noexcept
     {
         if(!other || !IsContainer() || type != other->type || other.get() == this)
             return false;
@@ -5613,13 +5777,14 @@ namespace fdf
         }
     #endif
 
-        // all validation happened above, moving children cannot fail
+        // policy rejection drops only the incoming child
         while(other->GetChildCount() > 0)
         {
             UniqueEntryPtr child = other->OrphanChild(0U);
             assert(child && "a non-empty container must orphan its first child");
-            [[maybe_unused]] const Entry* added = AddChild(child);
-            assert(added && "an orphaned child must be addable");
+            [[maybe_unused]] const Entry* added = AddChild(child, policy);
+            assert((added || policy == DuplicateKeyPolicy::Reject)
+                && "an orphaned child must be addable unless Reject refused it");
         }
         other.reset();
         return true;
@@ -5903,6 +6068,7 @@ namespace fdf::detail
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseVariable   (Tokenizer& tokenizer, Entry& parent   FDF_COMMENT_SWITCH(, Token comment)) noexcept
     {
         Token currentToken = tokenizer.Current();
+        const Token keyToken = currentToken;
         UniqueEntryPtr _temp(GlobalAllocator::Create<Entry>());
         if(!_temp)
             return false;
@@ -5968,7 +6134,19 @@ namespace fdf::detail
             return false;
         }
 
-        return bParsed && parent.AddChild(_temp) != nullptr;
+        if(!bParsed)
+            return false;
+
+        // _temp is freshly created, unparented and cannot be an ancestor, and parent is a
+        // container, so AddChild's guards are all unreachable here and only a duplicate key fails
+        assert(_temp && !_temp->parent && parent.IsContainer() && "only a duplicate key may fail this insert");
+        if(parent.AddChild(_temp, DuplicateKeyPolicy::Reject))
+            return true;
+
+        // the entry was fully consumed, so report and continue rather than letting the caller
+        // recover and swallow whatever follows
+        Diagnose(DiagnosticSeverity::Error, DiagnosticType::DuplicateKey, tokenizer, keyToken);
+        return true;
     }
     template<auto DIAGNOSTIC_CALLBACK>
     [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseSimpleValue(Tokenizer& tokenizer, Entry& entry    FDF_COMMENT_SWITCH(, Token comment)) noexcept
@@ -6217,8 +6395,9 @@ namespace fdf::detail
                 bool bIsFirstChar = true;
                 bool bComponentHasDigit = false;
 
-                for(char c : seg)
+                for(size_t i = 0; i < seg.size(); i++)
                 {
+                    const char c = seg[i];
                     if(bIsFirstChar && c == '-')
                         bIsNegative = true;
                     else if(constexpr_isdigit(c))
@@ -6235,7 +6414,8 @@ namespace fdf::detail
                         result += digit;
                         bComponentHasDigit = true;
                     }
-                    else
+                    else if(c != '_' || i == 0 || i + 1 >= seg.size()
+                        || !constexpr_isdigit(seg[i - 1]) || !constexpr_isdigit(seg[i + 1]))
                         return fail();  // unknown character
 
                     bIsFirstChar = false;
@@ -6673,7 +6853,6 @@ namespace fdf::detail
 
 
 
-        //TODO LOOK AT DIFF BETWEEN DEPTH AND LAST DEPTH TO FIGURE OUT COMMAS
         auto writeFn = [&](const Entry& e) -> void
         {
             const uint32_t depth = bHasDedicatedRoot? e.CalculateDepth() - 1 : e.CalculateDepth();

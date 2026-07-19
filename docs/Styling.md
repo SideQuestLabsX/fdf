@@ -18,6 +18,8 @@ and keep diffs small. Use a designated initializer to change individual fields, 
 | `bTopLevelCommas` | `false` | comma-terminate top-level entries |
 | `bGroupSimilarTypes` | `false` | off keeps source order, on groups by type |
 | `bUppercaseHex` | `true` | `0xFF` vs `0xff` |
+| `intDigitGrouping` | `0` | group Int and Float integer-part digits every N from the right, `0` is off |
+| `hexDigitGrouping` | `0` | group Hex digits after `0x` every N from the right, `0` is off |
 | `bUppercaseTimestamp` | `true` | `T`/`Z` vs `t`/`z` |
 | `bUseNilInsteadOfNull` | `false` | emit `nil` instead of `null` |
 | `bAlwaysUseDoubleQuoteForStrings` | `false` | force `"` quoting |
@@ -26,3 +28,6 @@ and keep diffs small. Use a designated initializer to change individual fields, 
 
 Hex writes whole bytes, so an odd-length literal like `0xABC` is emitted as `0x0ABC`. Same bytes,
 the leading zero nibble is the only difference.
+
+Digit separators are not preserved. Parsing strips them, so the writer emits nothing unless
+`intDigitGrouping` or `hexDigitGrouping` is set, and then derives the grouping itself.

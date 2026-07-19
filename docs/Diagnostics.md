@@ -36,6 +36,7 @@ Diagnostics work the same at runtime and at compile time.
 | `InvalidPack` | Error | dangling `\|` or components with no common type |
 | `InvalidTimestamp` | Error | RFC 3339 profile structure or range violation |
 | `InvalidDuration` | Error | malformed, out-of-order, non-integral or overflowing duration |
+| `DuplicateKey` | Error | repeated direct map key, the duplicate is dropped and parsing continues |
 | `UnexpectedEndOfFile` | Fatal | input ends inside a container |
 | `UnterminatedString` | Fatal | missing closing quote |
 | `UnterminatedComment` | Fatal | block comment missing `*/` |

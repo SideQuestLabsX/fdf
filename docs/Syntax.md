@@ -5,6 +5,12 @@ value after `=`, a map in `{ }`, or an array in `[ ]`. The top level is a map.
 
 Whitespace outside strings doesn't matter.
 
+Int, Float and Hex literals may use `_` between two digits. In hex literals, `A` through `F`
+also count as digits. A separator cannot be leading, trailing, doubled or next to a sign, `.`,
+`e`, `E` or the `0x` prefix. Version, Timestamp and Duration literals do not accept separators.
+Separators are discarded during parsing and writer styles re-derive them. Identifier rules are
+unchanged, so `_` remains valid in a name such as `my_key`.
+
 ## Entries
 
 ```fdf

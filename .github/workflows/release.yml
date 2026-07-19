@@ -50,9 +50,13 @@ jobs:
             exit 1
           fi
 
-          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
-            echo "::error::Tag v$VERSION already exists"
-            exit 1
+          # an existing tag is only fatal when it points somewhere else, so a failed publish can be rerun
+          if tagged=$(git rev-parse -q --verify "refs/tags/v$VERSION^{commit}"); then
+            if [ "$tagged" != "$(git rev-parse HEAD)" ]; then
+              echo "::error::Tag v$VERSION already exists and points at $tagged, not $(git rev-parse HEAD)"
+              exit 1
+            fi
+            echo "::notice::Tag v$VERSION already exists at this commit, reusing it"
           fi
 
   gate:
@@ -64,6 +68,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
 
       - name: Create tag
         env:
@@ -71,8 +77,17 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${VERSION}" -m "Release v${VERSION}"
-          git push origin "v${VERSION}"
+
+          # rerunning after a failed publish must not trip over the tag the previous run pushed
+          if tagged=$(git rev-parse -q --verify "refs/tags/v${VERSION}^{commit}"); then
+            if [ "$tagged" != "$(git rev-parse HEAD)" ]; then
+              echo "::error::Tag v${VERSION} already exists and points at $tagged"
+              exit 1
+            fi
+          else
+            git tag -a "v${VERSION}" -m "Release v${VERSION}"
+          fi
+          git push origin "refs/tags/v${VERSION}"
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2

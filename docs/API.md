@@ -150,7 +150,8 @@ leaves the value unchanged: an overwrite stages its bytes past the current end a
 place only on success.
 
 `Assign` replaces, `Decode` appends and `Decode` at an offset overwrites, under the same offset rule.
-All accept an optional `0x`/`0X` prefix and leave the value untouched when a digit is invalid. There
+All accept an optional `0x`/`0X` prefix, accept `_` separators under the literal rule in
+[Types.md](Types.md) and leave the value untouched when a digit is invalid. There
 is no `string_view` constructor, since bad digits would have no way to reach the caller. Decode into
 a default-constructed `Hex` and check the result.
 
@@ -215,7 +216,8 @@ root->ForEach<fdf::ForEachFlags::Recursive>([](const fdf::Entry& e)
 
 ```cpp
 Entry* Emplace(std::string_view key);    // add a child, returns it ("" for array items)
-Entry* AddChild(UniqueEntryPtr& e);      // adopt an existing node
+Entry* AddChild(UniqueEntryPtr& e);      // adopt using KeepLast
+Entry* AddChild(UniqueEntryPtr& e, DuplicateKeyPolicy policy);
 
 void SetValue(value);                    // bool, integer, float, string, Version, Timestamp, Duration, Hex...
                                          // pass std::span for a pack, or edit components through
@@ -232,10 +234,22 @@ UniqueEntryPtr OrphanChild(child | key | index);   // detach without destroying
 std::vector<UniqueEntryPtr> OrphanChildren();
 ```
 
-Adding a map key that already exists replaces the entry in place without changing its position.
-Parsing uses the same last-wins behavior: `a=1` followed by `a=2` leaves one child holding `2`.
+`DuplicateKeyPolicy` controls how `AddChild` handles an existing direct map key:
+
+| Policy | Duplicate behavior | Returns |
+|--------|--------------------|---------|
+| `Reject` | leave the existing entry alone, incoming stays owned by the caller | `nullptr` |
+| `KeepFirst` | keep the existing payload and drop the incoming entry | the existing entry |
+| `KeepLast` | replace the existing payload in place without changing its position | the existing entry |
+| `Merge` | recursively merge same-type containers, otherwise replace as with `KeepLast` | the existing entry |
+
+An array child or a new map key is appended and returned. The `AddChild` overload without a policy
+forwards to `KeepLast`, preserving its original behavior. Parsing always uses `Reject`: `a=1`
+followed by `a=2` diagnoses `DuplicateKey`, keeps the first value and continues parsing.
+
 `AddChild` rejects ownership cycles. It returns `nullptr` and leaves ownership with the caller when
-an orphaned ancestor is passed to its descendant.
+an orphaned ancestor is passed to its descendant. To detect a conflict before inserting, check
+`GetDirectChild(key)` first.
 
 `SetValue(fdf::ArrayType{})` / `SetValue(fdf::MapType{})` turn a node into an empty
 container. Then use `Emplace` to add its children.
@@ -283,20 +297,24 @@ if(s.ends_with("config") && s.contains("-"))
 
 ## Combining documents
 
-Merge a second document into an existing tree. `fdf::CommentCombineStrategy` resolves
-comment conflicts.
+Merge a second document into an existing tree. `fdf::CommentCombineStrategy` resolves comment
+conflicts and `fdf::DuplicateKeyPolicy` resolves matching map keys.
 
 ```cpp
 template<auto DIAG = nullptr>
-bool ParseCombineFile(const std::filesystem::path&, CommentCombineStrategy = UseNewIfExistingIsEmpty);
+bool ParseCombineFile(const std::filesystem::path&,
+    CommentCombineStrategy = UseNewIfExistingIsEmpty, DuplicateKeyPolicy = Merge);
 template<auto DIAG = nullptr>
-bool ParseCombineBuffer(std::string_view, CommentCombineStrategy = UseNewIfExistingIsEmpty);
-bool Combine(UniqueEntryPtr& other, CommentCombineStrategy = UseNewIfExistingIsEmpty);
+bool ParseCombineBuffer(std::string_view,
+    CommentCombineStrategy = UseNewIfExistingIsEmpty, DuplicateKeyPolicy = Merge);
+bool Combine(UniqueEntryPtr& other,
+    CommentCombineStrategy = UseNewIfExistingIsEmpty, DuplicateKeyPolicy = Merge);
 ```
 
-When `Combine` succeeds, it consumes `other`. Incoming values replace matching map keys,
-while unrelated keys stay in place. Invalid or incompatible input returns `false` without
-consuming `other`.
+When `Combine` succeeds, it consumes `other`. By default, matching same-type containers merge
+recursively and a scalar or mismatched container replaces the existing payload. An explicit
+duplicate-key policy can reject, keep or replace conflicts instead. Invalid or incompatible input
+returns `false` without consuming `other`.
 
 | Strategy | Behavior |
 |----------|----------|
