@@ -78,9 +78,8 @@ forms: `1.0.0|2.0.0.0`.
 
 `Timestamp` is a concrete 16-byte, 4-byte-aligned value. Its date, time, fraction, timezone and
 shape fields are stored directly in a contiguous `Timestamp[count]` payload. Mutable and const
-entries return `std::span<Timestamp>` and `std::span<const Timestamp>`. The bitfield object
-representation is compiler-specific, so persistence must encode named members rather than copy
-the struct bytes.
+entries return `std::span<Timestamp>` and `std::span<const Timestamp>`. Persistence must encode
+the named fields because the bitfield object representation is compiler-specific.
 
 `Duration` is a concrete 8-byte, 8-byte-aligned signed nanosecond count. Mutable and const entries
 return `std::span<Duration>` and `std::span<const Duration>`. Its factories and integer accessors
@@ -102,9 +101,9 @@ Duration elapsed = deadline - created;
 A `+`/`-` result outside years 0-9999 is invalid (`IsValid() == false`). A timestamp difference
 beyond `Duration`'s ±292-year range saturates, and an invalid operand yields a zero `Duration`.
 `ToUnixNanos()` saturates past roughly year 2262, where `int64_t` nanoseconds run out.
-`FromUnixSeconds`/`FromUnixNanos` reject inputs outside the representable range instead of
-truncating. `Duration` factories and operators use plain `int64_t` math, overflow there is the
-caller's precondition, as in `std::chrono`.
+`FromUnixSeconds`/`FromUnixNanos` accept only inputs within the representable range. `Duration`
+factories and operators use plain `int64_t` math, overflow there is the caller's precondition, as
+in `std::chrono`.
 
 `Timestamp::IsValid()` checks the whole structure. The fields are public and editable through the
 mutable span, so `Date(2024, 13, 99)` and a hand-edited out-of-range field both report invalid.
@@ -155,16 +154,16 @@ place only on success.
 
 `Assign` replaces, `Decode` appends and `Decode` at an offset overwrites, under the same offset rule.
 All accept an optional `0x`/`0X` prefix, accept `_` separators under the literal rule in
-[Types.md](Types.md) and leave the value untouched when a digit is invalid. There
-is no `string_view` constructor, since bad digits would have no way to reach the caller. Decode into
-a default-constructed `Hex` and check the result.
+[Types.md](Types.md) and leave the value untouched when a digit is invalid. Text input goes through
+`Assign` or `Decode` so invalid digits can be reported. Decode into a default-constructed `Hex` and
+check the result.
 
 ```cpp
 Hex h;
 bool bOk = h.Assign("0xFF5733");   // FF 57 33
 bool bMore = h.Decode("ABC");      // FF 57 33 0A BC
 bool bAt = h.Decode("99", 1);      // FF 99 33 0A BC
-bool bBad = h.Decode("99", 9);     // false, nothing at offset 9 to overwrite
+bool bBad = h.Decode("99", 9);     // false, offset 9 is past the value
 ```
 
 Digit width is cosmetic: `0xABC` and `0x0ABC` hold the same two bytes. Hex writes whole bytes, so an
@@ -223,9 +222,9 @@ Entry* Emplace(std::string_view key);    // add a child, returns it ("" for arra
 Entry* AddChild(UniqueEntryPtr& e);      // adopt using KeepLast
 Entry* AddChild(UniqueEntryPtr& e, DuplicateKeyPolicy policy);
 
-void SetValue(value);                    // bool, integer, float, string, Version, Timestamp, Duration, Hex...
+void SetValue(value);                    // bool, integer, float, string, Version, Timestamp, Duration, Hex
                                          // pass std::span for a pack, or edit components through
-                                         // GetValue(); an rvalue String or Hex is moved
+                                         // GetValue(), moving an rvalue String or Hex
 bool SetIdentifier(std::string_view);
 void SetType(Type);
 
@@ -276,21 +275,21 @@ Writing the tree back out is covered in [Styling](Styling.md).
 
 ## fdf::String
 
-The string value type. 8 bytes: a single pointer to a `[u32 size][u32 capacity][chars…][\0]` block.
+The string value type. 8 bytes: one pointer to a `[u32 size][u32 capacity][chars…][\0]` block.
 It mirrors most of `std::string`'s mutable API and delegates most reads to `std::string_view`.
 It can be converted to/from `std::string`.
 
 Deliberate differences from `std::string`:
 
-- `substr` returns a `std::string_view` into the block, not a new `String`. That view, like
-  any `string_view`, `data()`, `c_str()`, iterator or `operator[]` reference, dangles the moment
+- `substr` returns a `std::string_view` into the block. It doesn't allocate a new `String`. The view,
+  like any `string_view`, `data()`, `c_str()`, iterator or `operator[]` reference, dangles the moment
   the string is mutated or destroyed.
 - All operations are `noexcept`. Out-of-range access asserts, so there is no `at()`.
 - Sizes are `size_t` on the interface, storage stays `uint32_t`, so a size past 4GB asserts.
   `npos` is `std::string_view::npos`.
-- No allocator API, `shrink_to_fit`, or SSO. Slab buckets make `shrink_to_fit` a no-op.
-- Free `operator+` covers every `String`/`string_view`/`char` mix, with `String&&` overloads
-  on either side that grow an existing buffer in place instead of allocating fresh.
+- No allocator API, `shrink_to_fit` or SSO. Slab buckets would make `shrink_to_fit` a no-op anyway.
+- Free `operator+` covers every `String`/`string_view`/`char` mix. The `String&&` overloads reuse
+  the rvalue operand and may reuse its allocation when capacity permits.
 
 ```cpp
 fdf::String s = fdf::String("game") + "-" + "config";   // "game-config", rvalue lhs reused
@@ -327,3 +326,24 @@ returns `false` without consuming `other`.
 | `UseNewIfExistingIsEmpty` | use incoming only when current is empty (default) |
 | `Merge` | concatenate both comments |
 | `Clear` | drop the comment |
+
+## Threading
+
+Use fdf from one thread. That covers everything: parsing, writing, editing a tree and destroying it.
+
+The reason is the allocator. Nodes, string blocks and value payloads all come from process-wide
+slabs whose free lists are plain mutable state with no locking, so two threads touching fdf at all
+can corrupt them. This is not a per-document restriction. Parsing two unrelated files on two
+threads races just as badly as sharing one tree, because both go to the same slabs.
+
+Reading is not a safe exception either. `GetChild`, `GetType` and `GetValue` only look at memory
+that is already there, but plenty of read-shaped calls do allocate: `GetFullIdentifier` builds a
+`String`, and `WriteBuffer` builds the whole output. Working out which calls are quietly allocation
+free is not worth the trouble, and it would break the first time one of them grows a temporary.
+
+If you need a document on another thread, hand the whole thing over and stop using it on the
+original one. Do the parse, finish the edits, then transfer.
+
+None of this is a design choice worth keeping. Who owns runtime memory is still open, and whatever
+replaces the global slabs decides what concurrency becomes possible. Don't build anything around
+the current behavior.

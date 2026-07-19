@@ -12,7 +12,7 @@ FetchContent_Declare(
     GIT_TAG        main   # or a release tag like v0.1.0
 )
 
-# optional, build the C++ module instead of header-only
+# optional module build
 # set(FDF_USE_CPP_MODULES ON)
 
 FetchContent_MakeAvailable(fdf)
@@ -30,13 +30,13 @@ ctest --test-dir build --verbose
 
 ## Options
 
-(All off by default)
+All options default to `OFF`.
 
 | Option | What it does |
 |--------|--------------|
-| `FDF_USE_CPP_MODULES` | build the `fdf` module instead of header-only |
+| `FDF_USE_CPP_MODULES` | build the `fdf` C++ module |
 | `FDF_NO_COMMENTS` | drop comment storage for a smaller node |
-| `FDF_EXTENDED_NO_COMMENT_IDENTIFIERS` | with comments off, allow 38-char identifiers instead of 30 |
-| `FDF_DISABLE_SLAB_ALLOCATOR` | use one `operator new` allocation per object; intended for sanitizer diagnostics |
+| `FDF_EXTENDED_NO_COMMENT_IDENTIFIERS` | with comments off, raise the identifier limit from 30 to 38 characters |
+| `FDF_DISABLE_SLAB_ALLOCATOR` | use one `operator new` allocation per object for sanitizer diagnostics |
 | `FDF_ENABLE_ASAN` | enable AddressSanitizer (includes leak detection on Linux) |
 | `FDF_ENABLE_LSAN` | enable standalone LeakSanitizer where supported |

@@ -1,7 +1,8 @@
 # Diagnostics
 
 When the parser finds a malformed entry, it reports and skips that entry, then continues.
-A token the lexer cannot interpret stops parsing because there is no safe place to resume.
+A token the lexer cannot interpret stops parsing because the parser cannot identify a reliable
+next-entry boundary.
 
 To receive the reports, pass a callback as the `DIAG` template argument of `ParseFile` or
 `ParseBuffer`.
@@ -20,7 +21,7 @@ Diagnostics work the same at runtime and at compile time.
 |-------|---------|
 | `severity` | `Warning` keeps all data, `Error` skips the entry, `Fatal` aborts the parse |
 | `type` | which problem was found, see below |
-| `message` | the offending text, or a short description |
+| `message` | the offending text or a short description |
 | `line`, `column` | position of the offending token, 1-based |
 | `offset` | byte offset into the parsed buffer, 0-based |
 

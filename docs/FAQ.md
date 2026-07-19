@@ -1,17 +1,17 @@
 # FAQ
 
-Common questions about fdf. If something here is out of date or missing, the other docs go deeper:
+This page keeps the answers short. The other docs go deeper:
 [Syntax](Syntax.md), [Types](Types.md), [API](API.md), [Styling](Styling.md),
 [Diagnostics](Diagnostics.md), [Building](Building.md).
 
-## What is fdf, and why not just use JSON or YAML or TOML?
+## What is fdf and when should I use it?
 
-fdf is a text data format for the stuff you'd normally reach for JSON, YAML, TOML or INI for:
-config, asset metadata, that kind of thing. The difference is it's built to be read and edited by
-hand first. Comments stick around instead of getting thrown away. Types such as versions and timestamps
-are first class citizens. The entire library (minus file IO) can run at compile time.
+fdf is for the stuff you'd normally put in JSON, YAML, TOML or INI: config, asset metadata and
+similar hand-edited files. It's meant to be read and edited by hand. Comments stick around through
+a parse and write. Versions and timestamps are proper types. Most of the library works at compile
+time too, apart from file I/O.
 
-fdf is a human-facing config format, not a wire format or database. A binary format is planned.
+It's aimed at human-facing config. A binary format for embedding and network transfer is planned.
 
 ## What does a file actually look like?
 
@@ -30,12 +30,12 @@ graphics
 }
 ```
 
-Top level is a map. An entry is a name, then either a scalar after `=`, a map in `{ }`, or an array
+Top level is a map. An entry is a name, then either a scalar after `=`, a map in `{ }` or an array
 in `[ ]`. Whitespace outside strings does not matter. Lay out the file however it reads best.
 
 ## What types are there?
 
-fdf figures out the type from the value, there is no type annotation.
+fdf figures out the type from the value. You don't write a type annotation.
 
 | Type | Example |
 |------|---------|
@@ -45,7 +45,7 @@ fdf figures out the type from the value, there is no type annotation.
 | String | `"text"` or `'text'` |
 | Hex | `0xFF5733` |
 | Version | `1.2.3` or `1.2.3.0` |
-| Timestamp | `2024-12-24T15:30:00`, or just a date or time (RFC 3339 profile) |
+| Timestamp | `2024-12-24T15:30:00` or just a date or time (RFC 3339 profile) |
 | Duration | `90s`, `1h30m`, `-500ms` |
 | Null / Nil | `null`, `nil` (same thing) |
 
@@ -60,10 +60,9 @@ resolution = 1920|1080      // one value, two components
 color      = 0xFF|0x80|0x40
 ```
 
-`resolution` is one value with two components, not an array of two entries. Packs suit values like
-coordinates or color channels. All components must share a type. Integers can widen to floats, but
-`1|true` is invalid. When the parts need comments, nesting or individual addressing, use an array
-instead.
+`resolution` is a single two-component value. Packs suit values like coordinates or color channels.
+All components must share a type. Integers can widen to floats. A mixed pack such as `1|true` is
+invalid. Use an array when the parts need comments, nesting or individual addressing.
 
 ## Does it keep my comments?
 
@@ -75,10 +74,9 @@ Comments are `//` for a line and `/* */` for a block. A block comment starting w
 
 ## Will it preserve my exact formatting?
 
-Your data and comments, yes. Your exact spacing and brace placement, no, and that's on purpose. When
-you write a document back out it gets re-emitted in a consistent style that you control (see
-[Styling](Styling.md)). Write it, parse it, write it again with the same style and you get identical
-text, so diffs stay clean and reviewable.
+Data and comments survive a write. Spacing and brace placement get rewritten using the style you
+pick (see [Styling](Styling.md)). Write, parse and write again with the same style and the second
+output is identical. Keeps diffs clean.
 
 ## How do I read a file from C++?
 
@@ -157,28 +155,26 @@ fdf files are UTF-8. The parser preserves their bytes without normalization or r
 a leading byte-order mark. Invalid UTF-8 still parses unchanged, but the diagnostic callback receives
 a non-fatal warning. Check input with `fdf::IsValidUtf8(text)` or `String::IsValidUtf8()`.
 
-One thing to know: `\u`/`\U` escapes are kept as literal text right now, they aren't decoded into
-characters. Write the actual UTF-8 character if you want it in the value.
+`\u`/`\U` escapes remain literal text. Write the actual UTF-8 character to store it in the value.
 
 ## Is it thread-safe?
 
-Not yet, so treat it as single-threaded for now. The allocator underneath uses shared global state,
-which means even parsing two separate files on two threads can race.
+Keep fdf on one thread for now. The allocator uses shared global state, so even separate files can
+race.
 
 ## Is there a binary format?
 
-Not yet. fdf is text-only. A compact binary form for embedding and network transfer is planned but
-not implemented.
+Right now fdf is text only. A compact binary form for embedding and network transfer is planned.
 
 ## Can I use it from C, Python or another language?
 
-Not yet. The library is C++ only and requires a C++26-capable compiler. A stable C ABI is planned as
-the base for other language bindings, after the API and value layouts settle.
+Right now it's C++ only and needs a C++26-capable compiler. A stable C ABI is planned as the base for
+other language bindings once the API and value layouts settle.
 
 ## Is the format stable?
 
-fdf is still pre-1.0 and parts of the format and API are still evolving. No stability promises are made,
-but if you want to start using it, pin to a release version. A spec is also planned.
+fdf is still pre-1.0 and parts of the format and API are moving. If you use it now, pin a release.
+A spec is planned too.
 
 ## How do I add it to my project?
 
@@ -189,9 +185,10 @@ fdf is a single header. Put [fdf.h](../include/fdf.h) on your project's include 
 ## Why the 30-character limit on names?
 
 Identifiers are stored inline with each node, which keeps nodes small and lookups cache-friendly.
-The layout has room for 30 characters. If that is not enough, shorten the name or add another nesting
-level. Disabling comments raises the limit to 38, but do not disable them solely for longer names.
+The layout has room for 30 characters. If that's too short, shorten the name or add another nesting
+level. Turning comments off raises the limit to 38. That's only useful when you already don't need
+stored comments.
 
 ## Does FDF support schemas or automatic struct serialization?
 
-Not yet. Both features are planned around C++26 reflection, but the design is still open.
+They're both planned around C++26 reflection, but the design is still open.

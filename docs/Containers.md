@@ -24,7 +24,7 @@ items
 [
     { id = 1, name = "Potion" }
     { id = 2, name = "Elixir" }
-    { id = 3 }              // a left-out field doesn't exist, it is not null
+    { id = 3 }              // a missing field is absent, it isn't null
 ]
 
 grid

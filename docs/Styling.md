@@ -21,13 +21,13 @@ and keep diffs small. Use a designated initializer to change individual fields, 
 | `intDigitGrouping` | `0` | group Int and Float integer-part digits every N from the right, `0` is off |
 | `hexDigitGrouping` | `0` | group Hex digits after `0x` every N from the right, `0` is off |
 | `bUppercaseTimestamp` | `true` | `T`/`Z` vs `t`/`z` |
-| `bUseNilInsteadOfNull` | `false` | emit `nil` instead of `null` |
+| `bUseNilInsteadOfNull` | `false` | emit `nil` for null values |
 | `bAlwaysUseDoubleQuoteForStrings` | `false` | force `"` quoting |
 
 `STYLE` is a template argument, so a style can't be picked at runtime.
 
-Hex writes whole bytes, so an odd-length literal like `0xABC` is emitted as `0x0ABC`. Same bytes,
-the leading zero nibble is the only difference.
+Hex writes whole bytes, so an odd-length literal like `0xABC` is emitted as `0x0ABC`. Both literals
+represent the same bytes.
 
-Digit separators are not preserved. Parsing strips them, so the writer emits nothing unless
-`intDigitGrouping` or `hexDigitGrouping` is set, and then derives the grouping itself.
+Parsing discards digit separators. The writer adds them when `intDigitGrouping` or
+`hexDigitGrouping` is set and derives the grouping itself.
