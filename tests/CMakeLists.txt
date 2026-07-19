@@ -3,7 +3,7 @@ include(FetchContent)
 
 FetchContent_Declare(common_resources
   GIT_REPOSITORY https://github.com/SideQuestLabsX/common.git
-  GIT_TAG        main) # you can also use tag or commit
+  GIT_TAG        48b58cf109cde83127086450efa578354caec054)
 FetchContent_MakeAvailable(common_resources)
 
 list(APPEND CMAKE_MODULE_PATH "${common_resources_SOURCE_DIR}/cmake")
