@@ -5993,7 +5993,10 @@ namespace fdf
             #if !FDF_NO_COMMENTS
                 if(currentToken.type == TokenType::Comment)
                 {
-                    if(root->size == 0 && root->comment.empty() && currentToken.count > 0 && content[currentToken.startPosition] == '#')
+                    // only a block comment can be the file comment. A '//' line starting with '#'
+                    // is an ordinary entry comment, and claiming it here stole it from the entry
+                    if(root->size == 0 && root->comment.empty() && currentToken.extra8 == 1
+                       && currentToken.count > 0 && content[currentToken.startPosition] == '#')
                     {
                         std::string_view sv = tokenizer.ToView(currentToken);
                         size_t firstChar = sv.find_first_not_of("# ");
