@@ -3103,6 +3103,9 @@ namespace fdf::detail
 
     // Comments are stored raw; the writer streams them through this: leading whitespace
     // stripped, each newline (+ the following whitespace run) collapsed into one space
+    // the writer marks inline-comment padding with this
+    inline constexpr char COMMENT_PADDING_MARKER = '\x01';
+
     constexpr void NormalizeComment(std::string_view raw, auto&& writeChar) noexcept
     {
         size_t i = 0;
@@ -7125,8 +7128,7 @@ FDF_EXPORT namespace fdf
             #if !FDF_NO_COMMENTS
                 if(bInlineComment)
                 {
-                    // '\x01' marks comment padding for the final alignment pass
-                    buffer.push_back('\x01');
+                    buffer.push_back(detail::COMMENT_PADDING_MARKER);
                     buffer.append("// ");
                     detail::NormalizeComment(entryComment, [&](char c) { buffer.push_back(c); });
                 }
@@ -7362,7 +7364,7 @@ FDF_EXPORT namespace fdf
         // resolve inline-comment padding markers
         // aligned comments share a column, otherwise each marker becomes one space
         {
-            constexpr char MARKER = '\x01';
+            constexpr char MARKER = detail::COMMENT_PADDING_MARKER;
             const size_t fileCommentEnd = buffer.starts_with("/*#")? buffer.find("*/") : String::npos;
             auto isPaddingMarker = [&](size_t marker) -> bool
             {
@@ -7371,11 +7373,11 @@ FDF_EXPORT namespace fdf
                    || (fileCommentEnd != String::npos && marker < fileCommentEnd))
                     return false;
 
-                const size_t previousNewLine = buffer.rfind('\n', marker);
-                const size_t lineStart = previousNewLine == String::npos? 0 : previousNewLine + 1;
+                // a marker the writer emitted always sits in code, so scan from the top: a block
+                // comment opened on an earlier line still covers this position
                 char quote = '\0';
                 bool bEscaped = false;
-                for(size_t i = lineStart; i < marker; i++)
+                for(size_t i = 0; i < marker; i++)
                 {
                     const char c = buffer[i];
                     if(quote != '\0')
@@ -7386,11 +7388,25 @@ FDF_EXPORT namespace fdf
                             bEscaped = true;
                         else if(c == quote)
                             quote = '\0';
+                        continue;
                     }
-                    else if(c == '\"' || c == '\'')
+
+                    if(c == '\"' || c == '\'')
                         quote = c;
-                    else if(c == '/' && i + 1 < marker && buffer[i + 1] == '/')
-                        return false;
+                    else if(c == '/' && i + 1 < buffer.size() && buffer[i + 1] == '/')
+                    {
+                        const size_t lineEnd = buffer.find('\n', i);
+                        if(lineEnd == String::npos || lineEnd > marker)
+                            return false;
+                        i = lineEnd;
+                    }
+                    else if(c == '/' && i + 1 < buffer.size() && buffer[i + 1] == '*')
+                    {
+                        const size_t commentEnd = buffer.find("*/", i + 2);
+                        if(commentEnd == String::npos || commentEnd > marker)
+                            return false;
+                        i = commentEnd + 1;
+                    }
                 }
                 return quote == '\0';
             };

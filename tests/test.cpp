@@ -4105,6 +4105,20 @@ namespace fdf::detail
                         CHECK_MSG(out1 == WriteBuffer(*re), out1);
                 }
             }
+
+            // a padding marker inside a block comment is the user's own byte. Mistaking it for
+            // padding rewrote it, and the next write wrapped the changed text differently
+            {
+                UniqueEntryPtr r = ParseBuffer(std::string_view(
+                    "a[1/*aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\x01//\naaaaaa*/]", 89));
+                if(CHECK(static_cast<bool>(r)))
+                {
+                    String out1 = WriteBuffer(*r);
+                    UniqueEntryPtr re = ParseBuffer(out1);
+                    if(CHECK(static_cast<bool>(re)))
+                        CHECK_MSG(out1 == WriteBuffer(*re), out1);
+                }
+            }
         }
     #endif
     };
