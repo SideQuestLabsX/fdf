@@ -28,6 +28,20 @@ cmake --build build
 ctest --test-dir build --verbose
 ```
 
+## Validator
+
+`fdf-validate` parses documents and reports diagnostics. It builds with the tests:
+
+```sh
+cmake --build build --target fdf_validate
+./build/tools/fdf-validate --round-trip config.fdf
+```
+
+It accepts file paths and reads stdin when passed `-`. Diagnostics use
+`path:line:column: severity: message` on stderr. `--round-trip` writes each document, re-parses it
+and checks that a second write is identical. Exit status is 0 for valid input, 1 for invalid or
+unreadable input and 2 for bad usage. Prebuilt binaries are attached to each release.
+
 ## Options
 
 All options default to `OFF`, except `FDF_ASSERTIONS` which defaults to `auto`.
@@ -46,5 +60,5 @@ All options default to `OFF`, except `FDF_ASSERTIONS` which defaults to `auto`.
 `NDEBUG`. The `on` and `off` settings override it. A failed check prints to stderr and aborts.
 Without CMake, define it to `true` or `false` before including the header.
 
-MSVC needs `/Zc:preprocessor`. The CMake target adds it; a direct `cl` invocation has to pass it,
-and the header reports a missing flag as an error rather than a macro syntax failure.
+MSVC needs `/Zc:preprocessor`. The CMake target adds it. A direct `cl` invocation has to pass it,
+and the header reports the missing flag directly.
