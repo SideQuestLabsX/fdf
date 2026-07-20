@@ -6985,7 +6985,7 @@ FDF_EXPORT namespace fdf
 
                         for(size_t pos = scopes[j].end; pos > scopes[j].begin + 2; pos--)
                         {
-                            if(buffer[pos] == '/' && buffer[pos - 1] == '/')
+                            if(buffer[pos - 1] == '/' && (buffer[pos] == '/' || buffer[pos] == '*'))
                             {
                                 scopes.erase(j);
                                 return;

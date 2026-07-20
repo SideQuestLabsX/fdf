@@ -4089,6 +4089,22 @@ namespace fdf::detail
                     }
                 }
             }
+
+            // a leading comment folded onto one line would sit after the previous element's comma,
+            // and the reparse would hand it to that element instead
+            // the tabs matter: they count as padding in the scope width, so an array holding an
+            // over-long comment still looks short enough to collapse
+            {
+                UniqueEntryPtr r = ParseBuffer("a[1\n2/*aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                                               "\t\t\t\t\t\taaaaaaaaaaaaaaaaaaaaaaaaaaaa*/]");
+                if(CHECK(static_cast<bool>(r)))
+                {
+                    String out1 = WriteBuffer(*r);
+                    UniqueEntryPtr re = ParseBuffer(out1);
+                    if(CHECK(static_cast<bool>(re)))
+                        CHECK_MSG(out1 == WriteBuffer(*re), out1);
+                }
+            }
         }
     #endif
     };
