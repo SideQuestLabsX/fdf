@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Fuzz seeds are exact byte sequences, several reproduce bugs that hinge on a CR or a tab.
+# Line-ending normalization would silently rewrite them into something that no longer reproduces.
+fuzz/corpus/** -text

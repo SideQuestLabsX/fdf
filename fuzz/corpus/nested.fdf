@@ -1,0 +1,6 @@
+// file level
+a { b { c { d = [1, 2, [3, 4]] } } }
+dup = 1
+dup = 2
+empty = 0x
+str = "esc\t\n\ ሴ"

@@ -1,0 +1,57 @@
+var00[ 1, 2, 3, 5.1.2, 5.1.2.4, "Test", 1920|1080, 1.0|1.0|1.0, false, 2024-12-24, 15:30:00, true ]
+
+var01  // Some comment
+{
+    foo=true
+    bar=false
+}
+var02
+{
+    foo=true,
+    bar=false,
+}
+var03
+{
+    foo=true,
+    bar=false,
+}
+var04  // Some comment
+{
+    foo=true,
+    bar=false,
+}
+
+var05{ foo=true, bar=false, }
+var06 { foo=true, bar=false }
+var07 {foo=true, bar=false}
+var08{ foo=true, bar=false }
+var09 { foo=true, bar=false }
+var10 {foo=true, bar=false}
+
+
+var11=2.4.6
+var12=2.4.6.8
+var13="\"Test\""
+var14="Test0test1test2test3test4test5test6test7"
+var15='"Test"'
+var16=3.14
+var17=18446744073709551615  // Max u64 value
+var18=-15|-20|30
+
+var19{ health=15 }
+var20
+{
+    foo = true
+    resolution = 1920|1080  // Bar Comment
+}
+
+var21
+{
+    foo0{ bar=true, baz=false }
+    foo1[ true, false, 15 ]
+}
+
+var23
+[
+    { bar=true }
+]

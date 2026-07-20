@@ -13,31 +13,6 @@ include(StaticRuntimes)
 
 
 
-set(FDF_SANITIZER_FLAGS "")
-if(FDF_ENABLE_ASAN OR FDF_ENABLE_LSAN)
-    if(MSVC)
-        if(FDF_ENABLE_ASAN)
-            list(APPEND FDF_SANITIZER_FLAGS /fsanitize=address)
-        endif()
-        if(FDF_ENABLE_LSAN)
-            message(WARNING "FDF_ENABLE_LSAN ignored: MSVC has no standalone LeakSanitizer")
-        endif()
-    elseif(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL GNU)
-        message(FATAL_ERROR
-                "FDF_ENABLE_ASAN/LSAN: MinGW GCC ships no sanitizer runtime (libasan). "
-                "Use MSVC or Clang for sanitizers, or disable these options.")
-    else()
-        set(FDF_SANITIZE_LIST "")
-        if(FDF_ENABLE_ASAN)
-            list(APPEND FDF_SANITIZE_LIST address)
-        endif()
-        if(FDF_ENABLE_LSAN AND NOT FDF_ENABLE_ASAN)
-            list(APPEND FDF_SANITIZE_LIST leak)
-        endif()
-        list(JOIN FDF_SANITIZE_LIST "," FDF_SANITIZE_ARG)
-        list(APPEND FDF_SANITIZER_FLAGS -fsanitize=${FDF_SANITIZE_ARG} -fno-omit-frame-pointer)
-    endif()
-endif()
 
 
 

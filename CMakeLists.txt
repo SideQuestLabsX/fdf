@@ -7,9 +7,39 @@ option(FDF_EXTENDED_NO_COMMENT_IDENTIFIERS "Use extended identifier size limit w
 option(FDF_DISABLE_SLAB_ALLOCATOR          "Bypass slab allocation and use operator new/delete directly" OFF)
 option(FDF_ENABLE_ASAN                     "Enable AddressSanitizer (bundles LeakSanitizer on Linux)" OFF)
 option(FDF_ENABLE_LSAN                     "Enable standalone LeakSanitizer (non-MSVC)" OFF)
+option(FDF_BUILD_FUZZERS                   "Build the libFuzzer targets (Clang only)" OFF)
 
 
 project(fdf VERSION 0.1.0 LANGUAGES CXX)
+
+# computed here so every subdirectory target picks it up, not just the tests
+set(FDF_SANITIZER_FLAGS "")
+if(FDF_ENABLE_ASAN OR FDF_ENABLE_LSAN)
+    if(MSVC)
+        if(FDF_ENABLE_ASAN)
+            list(APPEND FDF_SANITIZER_FLAGS /fsanitize=address)
+        endif()
+        if(FDF_ENABLE_LSAN)
+            message(WARNING "FDF_ENABLE_LSAN ignored: MSVC has no standalone LeakSanitizer")
+        endif()
+    elseif(MINGW AND CMAKE_CXX_COMPILER_ID STREQUAL GNU)
+        message(FATAL_ERROR
+                "FDF_ENABLE_ASAN/LSAN: MinGW GCC ships no sanitizer runtime (libasan). "
+                "Use MSVC or Clang for sanitizers, or disable these options.")
+    else()
+        set(FDF_SANITIZE_LIST "")
+        if(FDF_ENABLE_ASAN)
+            list(APPEND FDF_SANITIZE_LIST address)
+        endif()
+        if(FDF_ENABLE_LSAN AND NOT FDF_ENABLE_ASAN)
+            list(APPEND FDF_SANITIZE_LIST leak)
+        endif()
+        list(JOIN FDF_SANITIZE_LIST "," FDF_SANITIZE_ARG)
+        list(APPEND FDF_SANITIZER_FLAGS -fsanitize=${FDF_SANITIZE_ARG} -fno-omit-frame-pointer)
+    endif()
+endif()
+
+
 if(FDF_USE_CPP_MODULES)
     add_library(fdf STATIC)
     
@@ -56,4 +86,5 @@ if(PROJECT_IS_TOP_LEVEL)
 
     enable_testing()
     add_subdirectory(tests)
+    add_subdirectory(fuzz)
 endif()

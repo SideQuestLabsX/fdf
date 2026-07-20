@@ -1,0 +1,11 @@
+// UTF-8 strings and the timestamp forms fdf understands
+
+greeting="Héllo, wörld! 日本語 🚀"
+longStr="αβγδεζηθικλμνξοπρστυφχψω αβγδεζηθικλμνξοπρστυφχψω αβγδεζηθικλμνξοπρστυφχψω αβγδεζηθικλμνξοπρστυφχψω αβγδεζηθικλμνξοπρστυφχψω αβγδεζηθικλμνξοπρστυφχψω αβγδεζηθικλμνξοπρστυφχψω"
+mixed="ascii and 中文 and \t tab and 😀"
+
+// Timestamps
+fullTs=2024-12-24T15:30:00.123Z   // date, time, millis, zulu
+dateTs=2024-12-24
+timeTs=15:30:00
+offsetTs=2024-12-24T15:30:00-05:00

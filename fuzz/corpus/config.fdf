@@ -1,0 +1,50 @@
+/*#
+    A game-ish config, the everyday case fdf is built for.
+*/
+
+appName    = "MyGame"
+appVersion = 1.4.2.0
+compatibleVersions = 1.4.0|1.4.1|1.4.1.1
+lastOpened = 2024-12-24T15:30:00
+
+graphics
+{
+    resolution = 1920|1080
+    fullscreen = true
+    vsync      = false
+    maxFps     = 144
+    gamma      = 1.0
+
+    // tried in order until one works
+    backends[ "vulkan", "d3d12", "opengl" ]
+}
+
+audio
+{
+    master = 0.8
+    music  = 0.5
+    sfx    = 0.7
+    muted  = false
+}
+
+// name -> action
+keybinds
+{
+    forward = "W"
+    back    = "S"
+    jump    = "Space"
+    pause   = "Escape"
+}
+
+recentFiles
+[
+    "C:/saves/slot1.sav"
+    "C:/saves/slot2.sav"
+    null                  // empty slot
+]
+
+players
+[
+    { id = 1, name = "Alice", color = 0xFF0000 }
+    { id = 2, name = "Bob",   color = 0x00FF00 }
+]

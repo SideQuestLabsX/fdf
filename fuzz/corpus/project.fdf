@@ -1,0 +1,32 @@
+// A build/project spec, the kind of thing you might feed a generator
+
+projects
+[
+    {
+        type="staticLibrary"
+        name="fdf"
+        ver=0.1.0
+        compatibleVersions=0.1.0|0.1.1.0
+        language="C++"
+        languageVersion=23
+        dependencies=null
+
+        files[ "include/fdf.h" ]
+
+        definitions
+        {
+            FDF_ROOT_DIRECTORY="."
+            FDF_TEST_DIRECTORY="./tests"
+        }
+    }
+
+    {
+        type="executable"
+        name="Test"
+        language="C++"
+        languageVersion=23
+
+        dependencies[ "fdf" ]
+        files[ "tests/test.cpp" ]
+    }
+]
