@@ -4166,7 +4166,8 @@ namespace fdf::detail
 
             if(content[index + 1] == '*') // multi line comment
             {
-                size_t slashPos = content.find_first_of('/', index + 2);
+                // from index + 3: "/*/" must not close on its own '/', which would underflow count
+                size_t slashPos = content.find_first_of('/', index + 3);
                 while(true)
                 {
                     if(slashPos == std::string_view::npos)
@@ -7041,54 +7042,58 @@ FDF_EXPORT namespace fdf
             const bool bInlineComment = commentSize != 0 && !e.IsContainer() && commentSize <= STYLE.singleLineCommentLimit;
             if(commentSize != 0 && !bInlineComment)
             {
-                const size_t start = buffer.size();
+                String text;
+                detail::NormalizeComment(entryComment, [&](char c) { text.push_back(c); });
+
+                const size_t indent = static_cast<size_t>(depth) * STYLE.tabSize;
+                const size_t available = STYLE.singleLineCommentLimit > indent + 3
+                                       ? static_cast<size_t>(STYLE.singleLineCommentLimit) - indent - 3
+                                       : 0;
+                // a wrapped comment must stay one token, so it wraps as a block: several '//' lines
+                // read back as several comments and only the last survives. Text holding "*/" or
+                // ending in whitespace can't survive the block form, so it stays on one line
+                const bool bWrap = available >= 5 && text.size() > available
+                                && text.find("*/") == String::npos
+                                && !detail::constexpr_isspace(text.back());
+
                 addTabFn(depth);
-                buffer.append("// ");
-                const size_t textStart = buffer.size();
-                detail::NormalizeComment(entryComment, [&](char c) { buffer.push_back(c); });
-                buffer.push_back('\n');
-
-                if constexpr(STYLE.singleLineCommentLimit >= 5)
+                if(bWrap)
                 {
-                    const size_t overhead = static_cast<size_t>(depth) * STYLE.tabSize + 3;
-                    if(overhead + 5 <= STYLE.singleLineCommentLimit)
+                    // the body starts at the space after '/*', so it can never look like a '#' file comment
+                    buffer.append("/* ");
+                    size_t lineStart = 0;
+                    while(text.size() - lineStart > available)
                     {
-                        // wrap in place: break each overlong line at the last space that fits
-                        const size_t available = STYLE.singleLineCommentLimit - overhead;
-                        size_t lineStart = textStart;
-                        bool bMultiLine = false;
-                        while(buffer.size() - 1 - lineStart > available)
+                        // re-parsing folds the newline and all whitespace after it into one space,
+                        // so only a space followed by non-whitespace is a reversible break point
+                        size_t breakPos = String::npos;
+                        for(size_t probe = std::min(lineStart + available, text.size() - 2) + 1; probe > lineStart + 1; )
                         {
-                            bMultiLine = true;
-                            size_t breakPos = buffer.find_last_of(' ', lineStart + available);
-                            if(breakPos == String::npos || breakPos <= lineStart)
+                            probe--;
+                            if(text[probe] == ' ' && !detail::constexpr_isspace(text[probe + 1]))
                             {
-                                breakPos = lineStart + available;   // no space fits, hard split
-                                buffer.insert(breakPos, 1, '\n');
+                                breakPos = probe;
+                                break;
                             }
-                            else
-                                buffer[breakPos] = '\n';
-
-                            size_t prefixEnd = breakPos + 1;
-                            if constexpr(STYLE.bUseSpacesOverTabs)
-                            {
-                                const size_t indentation = static_cast<size_t>(depth) * STYLE.tabSize;
-                                buffer.insert(prefixEnd, indentation, ' ');
-                                prefixEnd += indentation;
-                            }
-                            else
-                            {
-                                buffer.insert(prefixEnd, depth, '\t');
-                                prefixEnd += depth;
-                            }
-                            buffer.insert(prefixEnd, "// ");
-                            lineStart = prefixEnd + 3;
                         }
+                        if(breakPos == String::npos)
+                            break;   // nothing reversible on this line, leave it overlong
 
-                        if(bMultiLine)
-                            buffer.insert(start, 1, '\n');
+                        buffer.append(text.substr(lineStart, breakPos - lineStart));
+                        buffer.push_back('\n');
+                        addTabFn(depth);
+                        buffer.append("   ");
+                        lineStart = breakPos + 1;
                     }
+                    buffer.append(text.substr(lineStart));
+                    buffer.append(" */");
                 }
+                else
+                {
+                    buffer.append("// ");
+                    buffer.append(text);
+                }
+                buffer.push_back('\n');
             }
         #endif
 

@@ -12,7 +12,7 @@ and keep diffs small. Use a designated initializer to change individual fields, 
 | `bParenthesesOnNewLine` | `true` | brace on its own line |
 | `bFileComment` / `bEntryComment` | `true` | emit comments |
 | `bAlignCloseComments` | `true` | pad inline comments to a shared column |
-| `singleLineCommentLimit` | `80` | chars before a comment wraps to its own line |
+| `singleLineCommentLimit` | `80` | longest comment kept inline, longer ones move to their own line and wrap |
 | `singleLineContainerLimit` | `80` | chars before a container goes multi-line |
 | `bCommas` | `true` | trailing comma on multi-line entries |
 | `bTopLevelCommas` | `false` | comma-terminate top-level entries |
@@ -31,3 +31,9 @@ represent the same bytes.
 
 Parsing discards digit separators. The writer adds them when `intDigitGrouping` or
 `hexDigitGrouping` is set and derives the grouping itself.
+
+A comment longer than `singleLineCommentLimit` moves to its own line and wraps as a block comment
+rather than a run of `//` lines. Consecutive `//` lines read back as separate comments and only the
+last survives, so the block form is what makes a wrapped comment round-trip. Breaks land on a space
+whose next character is not whitespace, since re-parsing collapses a newline and everything after it
+into one space. A stretch with no such break point stays on one long line.
