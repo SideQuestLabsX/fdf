@@ -10,10 +10,10 @@ using UniqueEntryPtr = std::unique_ptr<Entry, EntryDeleter>;
 
 UniqueEntryPtr NewEntry();                                  // fresh, empty root map
 
-template<auto DIAG = nullptr>
-UniqueEntryPtr ParseFile(const std::filesystem::path&);     // null on failure
-template<auto DIAG = nullptr>
-UniqueEntryPtr ParseBuffer(std::string_view);               // constexpr-friendly
+template<typename SINK = detail::NoDiagnostics> requires std::is_invocable_v<SINK&, const Diagnostic&>
+UniqueEntryPtr ParseFile(const std::filesystem::path&, SINK&& sink = {});   // null on failure
+template<typename SINK = detail::NoDiagnostics> requires std::is_invocable_v<SINK&, const Diagnostic&>
+UniqueEntryPtr ParseBuffer(std::string_view, SINK&& sink = {});             // constexpr-friendly
 
 template<Style STYLE = {}>
 bool WriteFile(const Entry&, const std::filesystem::path&, bool bCreateIfNotExists = true);
@@ -22,9 +22,8 @@ fdf::String WriteBuffer(const Entry& root);
 ```
 
 `ParseBuffer`, `WriteBuffer`, `NewEntry` and the whole `Entry` interface are `constexpr`
-and work inside a `consteval` function. The optional
-`DIAG` template argument is a compile-time diagnostic callback. See
-[Diagnostics](Diagnostics.md).
+and work inside a `consteval` function. The optional final argument accepts any callable taking
+`const Diagnostic&`. See [Diagnostics](Diagnostics.md).
 
 `WriteFile(..., false)` only overwrites an existing regular file. The default creates the
 file and missing parent directories. Bare filenames use the current directory.
@@ -304,14 +303,19 @@ Merge a second document into an existing tree. `fdf::CommentCombineStrategy` res
 conflicts and `fdf::DuplicateKeyPolicy` resolves matching map keys.
 
 ```cpp
-template<auto DIAG = nullptr>
 bool ParseCombineFile(const std::filesystem::path&,
     CommentCombineStrategy = UseNewIfExistingIsEmpty, DuplicateKeyPolicy = Merge);
-template<auto DIAG = nullptr>
-bool ParseCombineBuffer(std::string_view,
-    CommentCombineStrategy = UseNewIfExistingIsEmpty, DuplicateKeyPolicy = Merge);
-bool Combine(UniqueEntryPtr& other,
-    CommentCombineStrategy = UseNewIfExistingIsEmpty, DuplicateKeyPolicy = Merge);
+template<typename SINK>
+bool ParseCombineFile(const std::filesystem::path&, SINK&& sink);
+template<typename SINK>
+bool ParseCombineFile(const std::filesystem::path&, CommentCombineStrategy, DuplicateKeyPolicy, SINK&& sink);
+
+bool ParseCombineBuffer(std::string_view, CommentCombineStrategy = UseNewIfExistingIsEmpty, DuplicateKeyPolicy = Merge);
+template<typename SINK>
+bool ParseCombineBuffer(std::string_view, SINK&& sink);
+template<typename SINK>
+bool ParseCombineBuffer(std::string_view, CommentCombineStrategy, DuplicateKeyPolicy, SINK&& sink);
+bool Combine(UniqueEntryPtr& other, CommentCombineStrategy = UseNewIfExistingIsEmpty, DuplicateKeyPolicy = Merge);
 ```
 
 When `Combine` succeeds, it consumes `other`. By default, matching same-type containers merge

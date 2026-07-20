@@ -4,14 +4,28 @@ When the parser finds a malformed entry, it reports and skips that entry, then c
 A token the lexer cannot interpret stops parsing because the parser cannot identify a reliable
 next-entry boundary.
 
-To receive the reports, pass a callback as the `DIAG` template argument of `ParseFile` or
-`ParseBuffer`.
+Pass any callable taking `const Diagnostic&` to `ParseFile` or `ParseBuffer`. Lambdas can capture
+state as usual.
 
 ```cpp
-constexpr void OnDiagnostic(const fdf::Diagnostic& d) { /* log it */ }
-
-auto root = fdf::ParseFile<&OnDiagnostic>("config.fdf");
+int errors = 0;
+auto root = fdf::ParseFile("config.fdf", [&](const fdf::Diagnostic& d)
+{
+    errors += d.severity != fdf::DiagnosticSeverity::Warning;
+});
 ```
+
+Every overload that accepts a sink keeps it last, leaving inline lambdas at the end of the call:
+
+```cpp
+root->ParseCombineBuffer(text);
+root->ParseCombineBuffer(text, fdf::CommentCombineStrategy::UseNew);
+root->ParseCombineBuffer(text, [&](const fdf::Diagnostic& d) { errors++; });
+root->ParseCombineBuffer(text, fdf::CommentCombineStrategy::UseNew, fdf::DuplicateKeyPolicy::KeepFirst, [&](const fdf::Diagnostic& d) { errors++; });
+```
+
+`ParseCombineFile` and `ParseCombineBuffer` use overloads to keep the sink last. A strategy in the
+second position selects the no-sink overload. Without a sink, diagnostic calls compile out.
 
 Diagnostics work the same at runtime and at compile time.
 

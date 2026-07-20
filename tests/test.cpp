@@ -1303,15 +1303,15 @@ namespace fdf::detail
         #endif
 
             test::g_lastDiagnostic = {};
-            CHECK(static_cast<bool>(ParseBuffer<&CountDiagnostics>(
+            CHECK(static_cast<bool>(ParseBuffer(
                 "s=\"first\nsecond\"\n"
-                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=1\n")));
+                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=1\n", CountDiagnostics)));
             CHECK(test::g_lastDiagnostic.line == 3 && test::g_lastDiagnostic.column == 1);
 
             test::g_lastDiagnostic = {};
-            CHECK(static_cast<bool>(ParseBuffer<&CountDiagnostics>(
+            CHECK(static_cast<bool>(ParseBuffer(
                 "/* first\nsecond */\n"
-                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=1\n")));
+                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx=1\n", CountDiagnostics)));
             CHECK(test::g_lastDiagnostic.line == 3 && test::g_lastDiagnostic.column == 1);
 
             UniqueEntryPtr left = NewEntry();
@@ -1374,6 +1374,17 @@ namespace fdf::detail
         // A malformed top-level line should be reported and skipped, not abort the whole parse
         static void RecoveryTest()
         {
+            // diagnostic sinks must stay in the noexcept path on truncated input
+            for(const std::string_view truncated : { "a{b=1", "a{", "a [ 1", "x=\"abc", "a=1\n/*",
+                                                     "\"", "a=", "[", "m { n { o=1" })
+            {
+                (void)ParseBuffer(truncated, CountDiagnostics);
+
+                UniqueEntryPtr base = ParseBuffer("k=1\n", CountDiagnostics);
+                if(CHECK_MSG(static_cast<bool>(base), truncated) && base)
+                    (void)base->ParseCombineBuffer(truncated, CountDiagnostics);
+            }
+
             test::g_diagnostics = 0;
             constexpr std::string_view buffer =
                 "good1 = 1\n"
@@ -1381,7 +1392,7 @@ namespace fdf::detail
                 "= orphan\n"        // line not starting with an identifier
                 "good2 = 2\n";
 
-            UniqueEntryPtr e = ParseBuffer<&CountDiagnostics>(buffer);
+            UniqueEntryPtr e = ParseBuffer(buffer, CountDiagnostics);
             if(!CHECK_MSG(static_cast<bool>(e), "parse should recover, not return null"))
                 return;
 
@@ -1404,7 +1415,7 @@ namespace fdf::detail
             // map recovery is the same on one line or several
             auto checkMap = [](std::string_view src)
             {
-                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(src);
+                UniqueEntryPtr root = ParseBuffer(src, CountDiagnostics);
                 if(!CHECK_MSG(static_cast<bool>(root), src))
                     return;
                 Entry* m = root->GetChild("m");
@@ -1420,7 +1431,7 @@ namespace fdf::detail
             checkMap("m {\n    a = 1\n    bad = = 5\n    b = 2\n}\n");
 
             // Recovery inside an array (bad element between good ones)
-            if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("arr [ 1, = , 3 ]\n"); CHECK(static_cast<bool>(root)))
+            if(UniqueEntryPtr root = ParseBuffer("arr [ 1, = , 3 ]\n", CountDiagnostics); CHECK(static_cast<bool>(root)))
             {
                 Entry* arr = root->GetChild("arr");
                 if(CHECK(arr && arr->GetType() == Type::Array) && arr)
@@ -1429,9 +1440,9 @@ namespace fdf::detail
 
             // An over-long identifier (> 30 chars) is reported precisely as InvalidIdentifier and skipped
             test::g_sawInvalidIdentifier = false;
-            if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(
+            if(UniqueEntryPtr root = ParseBuffer(
                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa = 1\n"
-                   "ok = 2\n"); CHECK(static_cast<bool>(root)))
+                   "ok = 2\n", CountDiagnostics); CHECK(static_cast<bool>(root)))
             {
                 CHECK(test::g_sawInvalidIdentifier);
                 CHECK(root->GetChildCount() == 1);
@@ -1441,10 +1452,10 @@ namespace fdf::detail
         #if !FDF_NO_COMMENTS
             // A second comment on the same entry warns with AlreadyHasComment but is not fatal
             test::g_sawAlreadyHasComment = false;
-            if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(
+            if(UniqueEntryPtr root = ParseBuffer(
                    "// first\n"
                    "// second\n"
-                   "x = 1\n"); CHECK(static_cast<bool>(root)))
+                   "x = 1\n", CountDiagnostics); CHECK(static_cast<bool>(root)))
             {
                 CHECK(test::g_sawAlreadyHasComment);
                 CHECK(root->GetChild("x") != nullptr);
@@ -1461,24 +1472,24 @@ namespace fdf::detail
             // consume mismatched closers so recovery makes progress
             {
                 test::g_diagnostics = 0;
-                if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("a { ] }\n"); CHECK(static_cast<bool>(root)))
+                if(UniqueEntryPtr root = ParseBuffer("a { ] }\n", CountDiagnostics); CHECK(static_cast<bool>(root)))
                 {
                     Entry* a = root->GetChild("a");
                     CHECK(a && a->GetType() == Type::Map && a->GetChildCount() == 0);
                 }
                 CHECK(test::g_diagnostics >= 1);
 
-                CHECK(static_cast<bool>(ParseBuffer<&CountDiagnostics>("a [ } ]\n")));
-                CHECK(static_cast<bool>(ParseBuffer<&CountDiagnostics>("a { b { ] } }\n")));
+                CHECK(static_cast<bool>(ParseBuffer("a [ } ]\n", CountDiagnostics)));
+                CHECK(static_cast<bool>(ParseBuffer("a { b { ] } }\n", CountDiagnostics)));
 
-                if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("a { ]\n"); CHECK(static_cast<bool>(root)))
+                if(UniqueEntryPtr root = ParseBuffer("a { ]\n", CountDiagnostics); CHECK(static_cast<bool>(root)))
                     CHECK(root->GetChild("a") == nullptr);
             }
 
             // non-finite floats
             {
                 test::g_diagnostics = 0;
-                if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("f = 1.0e9999\n"); CHECK(static_cast<bool>(root)))
+                if(UniqueEntryPtr root = ParseBuffer("f = 1.0e9999\n", CountDiagnostics); CHECK(static_cast<bool>(root)))
                     CHECK(root->GetChild("f") == nullptr);
                 CHECK(test::g_diagnostics >= 1);
 
@@ -1497,7 +1508,7 @@ namespace fdf::detail
             {
                 for(std::string_view src : { "a=1\na=1.0e9999\n", "a=1\na=5m3h\n", "m { a=1, a=1.0e9999 }\n" })
                 {
-                    UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(src);
+                    UniqueEntryPtr root = ParseBuffer(src, CountDiagnostics);
                     if(!CHECK_MSG(static_cast<bool>(root), src))
                         continue;
                     const Entry* scope = src.starts_with("m")? root->GetChild("m") : root.get();
@@ -1527,9 +1538,9 @@ namespace fdf::detail
             // Diagnostic carries line / column / offset of the offending token
             {
                 // "ok = 1\n" is 7 bytes; the bad identifier starts at offset 7, line 2, column 1
-                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(
+                UniqueEntryPtr root = ParseBuffer(
                     "ok = 1\n"
-                    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx = 9\n");
+                    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx = 9\n", CountDiagnostics);
                 if(CHECK(static_cast<bool>(root)))
                 {
                     CHECK(test::g_lastDiagnostic.type == DiagnosticType::InvalidIdentifier);
@@ -1540,9 +1551,9 @@ namespace fdf::detail
             }
 
             {
-                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(
+                UniqueEntryPtr root = ParseBuffer(
                     "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx = 9\n"
-                    "ok = 1\n");
+                    "ok = 1\n", CountDiagnostics);
                 if(CHECK(static_cast<bool>(root)))
                 {
                     CHECK(test::g_lastDiagnostic.line == 1);
@@ -1553,7 +1564,7 @@ namespace fdf::detail
 
             // An unterminated string is a fatal lexer error reported as UnterminatedString
             {
-                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("s = \"abc\n");
+                UniqueEntryPtr root = ParseBuffer("s = \"abc\n", CountDiagnostics);
                 CHECK(root == nullptr);
                 CHECK(test::g_lastDiagnostic.type == DiagnosticType::UnterminatedString);
                 CHECK(test::g_lastDiagnostic.severity == DiagnosticSeverity::Fatal);
@@ -1562,7 +1573,7 @@ namespace fdf::detail
             // Invalid UTF-8 is non-fatal: warned with the bad-byte offset, bytes still pass through
             {
                 test::g_lastDiagnostic = {};
-                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("s = \"\xFF\"\n");  // 0xFF at offset 5
+                UniqueEntryPtr root = ParseBuffer("s = \"\xFF\"\n", CountDiagnostics);  // 0xFF at offset 5
                 if(CHECK(static_cast<bool>(root)))
                 {
                     CHECK(root->GetChild("s") != nullptr);
@@ -1575,7 +1586,7 @@ namespace fdf::detail
             // Valid UTF-8 in a value raises no diagnostic
             {
                 test::g_diagnostics = 0;
-                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("name = \"caf\xC3\xA9\"\n");
+                UniqueEntryPtr root = ParseBuffer("name = \"caf\xC3\xA9\"\n", CountDiagnostics);
                 if(CHECK(static_cast<bool>(root)))
                     CHECK(test::g_diagnostics == 0);
             }
@@ -1583,7 +1594,7 @@ namespace fdf::detail
             // A leading UTF-8 BOM is stripped, not folded into the first key
             {
                 test::g_diagnostics = 0;
-                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("\xEF\xBB\xBFok = 1\n");
+                UniqueEntryPtr root = ParseBuffer("\xEF\xBB\xBFok = 1\n", CountDiagnostics);
                 if(CHECK(static_cast<bool>(root)))
                 {
                     CHECK(root->GetChild("ok") != nullptr);
@@ -1626,7 +1637,7 @@ namespace fdf::detail
                 test::g_diagnostics = 0;
                 test::g_lastDiagnostic = {};
                 const std::string overLimit = build(DEEPEST + 1) + "after=7\n";
-                if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(overLimit);
+                if(UniqueEntryPtr root = ParseBuffer(overLimit, CountDiagnostics);
                    CHECK(static_cast<bool>(root)) && root)
                 {
                     CHECK(FirstIntEquals(root->GetChild("after"), 7));
@@ -1644,7 +1655,7 @@ namespace fdf::detail
         {
             test::g_diagnostics = 0;
             test::g_lastDiagnostic = {};
-            if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("a=1\na=2\n"); CHECK(static_cast<bool>(root)))
+            if(UniqueEntryPtr root = ParseBuffer("a=1\na=2\n", CountDiagnostics); CHECK(static_cast<bool>(root)))
             {
                 CHECK(root->GetChildCount() == 1);
                 CHECK(FirstIntEquals(root->GetChild("a"), 1));
@@ -1658,7 +1669,7 @@ namespace fdf::detail
 
             test::g_diagnostics = 0;
             test::g_lastDiagnostic = {};
-            if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("m { a=1, a=2 }\n"); CHECK(static_cast<bool>(root)))
+            if(UniqueEntryPtr root = ParseBuffer("m { a=1, a=2 }\n", CountDiagnostics); CHECK(static_cast<bool>(root)))
             {
                 Entry* m = root->GetChild("m");
                 if(CHECK(m && m->GetType() == Type::Map) && m)
@@ -1672,7 +1683,7 @@ namespace fdf::detail
             CHECK(test::g_lastDiagnostic.severity == DiagnosticSeverity::Error);
 
             test::g_diagnostics = 0;
-            if(UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("a=1\na=2\nb=3\n"); CHECK(static_cast<bool>(root)))
+            if(UniqueEntryPtr root = ParseBuffer("a=1\na=2\nb=3\n", CountDiagnostics); CHECK(static_cast<bool>(root)))
             {
                 CHECK(root->GetChildCount() == 2);
                 CHECK(FirstIntEquals(root->GetChild("a"), 1));
@@ -1848,7 +1859,7 @@ namespace fdf::detail
             for(const Case& c : cases)
             {
                 test::g_lastDiagnostic = {};
-                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(c.src);
+                UniqueEntryPtr root = ParseBuffer(c.src, CountDiagnostics);
 
                 CHECK_MSG(test::g_lastDiagnostic.type == c.type, c.src);
                 if(c.bFatal)
@@ -1895,7 +1906,7 @@ namespace fdf::detail
                 test::g_lastDiagnostic = {};
                 static constexpr char oneByte[1] = { 'x' };
                 const std::string_view oversized(oneByte, static_cast<size_t>(std::numeric_limits<uint32_t>::max()));
-                CHECK(ParseBuffer<&CountDiagnostics>(oversized) == nullptr);
+                CHECK(ParseBuffer(oversized, CountDiagnostics) == nullptr);
                 CHECK(test::g_lastDiagnostic.type == DiagnosticType::InputTooLarge);
             }
         }
@@ -2264,7 +2275,7 @@ namespace fdf::detail
             };
             for(std::string_view src : recover)
             {
-                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(src);
+                UniqueEntryPtr root = ParseBuffer(src, CountDiagnostics);
                 if(CHECK_MSG(static_cast<bool>(root), src))
                 {
                     CHECK_MSG(root->GetChild("bad") == nullptr, src);   // malformed entry skipped
@@ -2296,7 +2307,7 @@ namespace fdf::detail
             for(const PackCase& c : packCases)
             {
                 test::g_lastDiagnostic = {};
-                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(c.src);
+                UniqueEntryPtr root = ParseBuffer(c.src, CountDiagnostics);
                 CHECK_MSG(test::g_lastDiagnostic.type == c.type, c.src);
                 if(CHECK_MSG(static_cast<bool>(root), c.src))
                     CHECK_MSG(root->GetChild("ok") != nullptr, c.src);
@@ -2305,7 +2316,7 @@ namespace fdf::detail
             // a bare '.' can't start an Atom, so '1.0|.' dies in the lexer and the whole parse is fatal
             {
                 test::g_lastDiagnostic = {};
-                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>("bad = 1.0|.\nok = 7\n");
+                UniqueEntryPtr root = ParseBuffer("bad = 1.0|.\nok = 7\n", CountDiagnostics);
                 CHECK(root == nullptr);
                 CHECK(test::g_lastDiagnostic.type == DiagnosticType::InvalidToken);
                 CHECK(test::g_lastDiagnostic.severity == DiagnosticSeverity::Fatal);
@@ -3659,7 +3670,7 @@ namespace fdf::detail
             {
                 test::g_diagnostics = 0;
                 test::g_lastDiagnostic = {};
-                UniqueEntryPtr root = ParseBuffer<&CountDiagnostics>(std::format("bad={}\nok=7\n", invalid));
+                UniqueEntryPtr root = ParseBuffer(std::format("bad={}\nok=7\n", invalid), CountDiagnostics);
                 CHECK_MSG(root && !root->GetChild("bad") && FirstIntEquals(root->GetChild("ok"), 7), invalid);
                 CHECK_MSG(test::g_diagnostics == 1 && test::g_lastDiagnostic.type == DiagnosticType::InvalidNumber, invalid);
             }

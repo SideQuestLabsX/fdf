@@ -198,9 +198,6 @@ FDF_EXPORT namespace fdf
 
 namespace fdf::detail
 {
-    template<auto DIAGNOSTIC_CALLBACK = nullptr>
-    struct Utils;
-
     FDF_EXPORT_INTERNAL class GlobalAllocator;
 
     template<typename T>
@@ -208,6 +205,37 @@ namespace fdf::detail
 
     template<typename Callable>
     constexpr bool IsValidDiagnosticCallback = std::is_invocable_v<Callable, const Diagnostic&>;
+
+    struct NoDiagnostics
+    {
+        constexpr void operator()(const Diagnostic&) const noexcept {}
+    };
+
+    FDF_EXPORT_INTERNAL struct Token;
+    FDF_EXPORT_INTERNAL struct Tokenizer;
+
+    // parser declarations used by Entry and Hex friend lists
+    template<typename SINK>
+    constexpr void Diagnose(DiagnosticSeverity severity, DiagnosticType type, const Tokenizer& tokenizer, const Token& token, SINK& sink) noexcept;
+    constexpr void SkipToNextEntry(Tokenizer& tokenizer, bool bStopAtCloseBrace) noexcept;
+
+    template<typename SINK>
+    [[nodiscard]] constexpr bool ParseVariable(Tokenizer& tokenizer, Entry& parent    FDF_COMMENT_SWITCH(, Token comment), SINK& sink) noexcept;
+    template<typename SINK>
+    [[nodiscard]] constexpr bool ParseSimpleValue(Tokenizer& tokenizer, Entry& entry     FDF_COMMENT_SWITCH(, Token comment), SINK& sink) noexcept;
+    template<typename SINK>
+    [[nodiscard]] constexpr bool ParseArray(Tokenizer& tokenizer, Entry& array     FDF_COMMENT_SWITCH(, Token comment), SINK& sink) noexcept;
+    template<typename SINK>
+    [[nodiscard]] constexpr bool ParseMap(Tokenizer& tokenizer, Entry& map       FDF_COMMENT_SWITCH(, Token comment), SINK& sink) noexcept;
+    template<Type CONTAINER_TYPE, typename SINK>
+    [[nodiscard]] constexpr bool ParseContainer(Tokenizer& tokenizer, Entry& container FDF_COMMENT_SWITCH(, Token comment), SINK& sink) noexcept;
+    template<Type CONTAINER_TYPE, typename SINK>
+    [[nodiscard]] constexpr bool ParseContainerBody(Tokenizer& tokenizer, Entry& container FDF_COMMENT_SWITCH(, Token comment), SINK& sink) noexcept;
+
+    FDF_EXPORT_INTERNAL struct Token;
+    FDF_EXPORT_INTERNAL struct Tokenizer;
+
+
 
     template<typename T>
     concept IsHexScalar = std::integral<T> || (std::floating_point<T> && (sizeof(T) == 4 || sizeof(T) == 8));
@@ -524,8 +552,18 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr bool Reallocate(uint32_t byteCount) noexcept;
         constexpr void Free() noexcept;
 
-        template<auto DIAGNOSTIC_CALLBACK>
-        friend struct detail::Utils;
+        template<typename SINK>
+        friend constexpr bool detail::ParseVariable(detail::Tokenizer&, Entry& FDF_COMMENT_SWITCH(, detail::Token), SINK&) noexcept;
+        template<typename SINK>
+        friend constexpr bool detail::ParseSimpleValue(detail::Tokenizer&, Entry& FDF_COMMENT_SWITCH(, detail::Token), SINK&) noexcept;
+        template<typename SINK>
+        friend constexpr bool detail::ParseArray(detail::Tokenizer&, Entry& FDF_COMMENT_SWITCH(, detail::Token), SINK&) noexcept;
+        template<typename SINK>
+        friend constexpr bool detail::ParseMap(detail::Tokenizer&, Entry& FDF_COMMENT_SWITCH(, detail::Token), SINK&) noexcept;
+        template<Type CONTAINER_TYPE, typename SINK>
+        friend constexpr bool detail::ParseContainer(detail::Tokenizer&, Entry& FDF_COMMENT_SWITCH(, detail::Token), SINK&) noexcept;
+        template<Type CONTAINER_TYPE, typename SINK>
+        friend constexpr bool detail::ParseContainerBody(detail::Tokenizer&, Entry& FDF_COMMENT_SWITCH(, detail::Token), SINK&) noexcept;
         friend class HexWriter;
         friend class HexReader;
 
@@ -1262,6 +1300,13 @@ FDF_EXPORT namespace fdf
 
     using UniqueEntryPtr = std::unique_ptr<Entry, detail::EntryDeleter>;
 
+
+    // declarations used by Entry's friend list
+    template<typename SINK = detail::NoDiagnostics> requires std::is_invocable_v<SINK&, const Diagnostic&>
+    [[nodiscard]] constexpr UniqueEntryPtr ParseBuffer(std::string_view content, SINK&& sink = {}) noexcept;
+    template<Style STYLE = {}>
+    [[nodiscard]] constexpr String WriteBuffer(const Entry& root) noexcept;
+
     // 8-byte slab-backed mutable string, no SSO: [u32 size][u32 capacity][chars...]['\0']
     class String
     {
@@ -1895,8 +1940,24 @@ FDF_EXPORT namespace fdf
 
         friend constexpr UniqueEntryPtr NewEntry() noexcept;
 
-        template<auto DIAGNOSTIC_CALLBACK>
-        friend struct detail::Utils;
+        template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
+        friend constexpr UniqueEntryPtr ParseBuffer(std::string_view, SINK&&) noexcept;
+        template<typename SINK>
+        friend constexpr bool detail::ParseVariable(detail::Tokenizer&, Entry& FDF_COMMENT_SWITCH(, detail::Token), SINK&) noexcept;
+        template<typename SINK>
+        friend constexpr bool detail::ParseSimpleValue(detail::Tokenizer&, Entry& FDF_COMMENT_SWITCH(, detail::Token), SINK&) noexcept;
+        template<typename SINK>
+        friend constexpr bool detail::ParseArray(detail::Tokenizer&, Entry& FDF_COMMENT_SWITCH(, detail::Token), SINK&) noexcept;
+        template<typename SINK>
+        friend constexpr bool detail::ParseMap(detail::Tokenizer&, Entry& FDF_COMMENT_SWITCH(, detail::Token), SINK&) noexcept;
+        template<Type CONTAINER_TYPE, typename SINK>
+        friend constexpr bool detail::ParseContainer(detail::Tokenizer&, Entry& FDF_COMMENT_SWITCH(, detail::Token), SINK&) noexcept;
+        template<Type CONTAINER_TYPE, typename SINK>
+        friend constexpr bool detail::ParseContainerBody(detail::Tokenizer&, Entry& FDF_COMMENT_SWITCH(, detail::Token), SINK&) noexcept;
+        template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
+        friend constexpr UniqueEntryPtr ParseBuffer(std::string_view, SINK&&) noexcept;
+        template<Style STYLE>
+        friend constexpr String WriteBuffer(const Entry&) noexcept;
 
         friend class detail::GlobalAllocator;
 
@@ -2157,10 +2218,18 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr std::string_view DataToView(String& temp) const noexcept;
 
     public:
-        template<auto DIAGNOSTIC_CALLBACK = nullptr>
+        // inline sinks stay last at call sites
         [[nodiscard]] bool ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty, DuplicateKeyPolicy policy = DuplicateKeyPolicy::Merge) noexcept;
-        template<auto DIAGNOSTIC_CALLBACK = nullptr>
+        template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
+        [[nodiscard]] bool ParseCombineFile(const std::filesystem::path& filepath, SINK&& sink) noexcept;
+        template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
+        [[nodiscard]] bool ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy, DuplicateKeyPolicy policy, SINK&& sink) noexcept;
+
         [[nodiscard]] constexpr bool ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty, DuplicateKeyPolicy policy = DuplicateKeyPolicy::Merge) noexcept;
+        template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
+        [[nodiscard]] constexpr bool ParseCombineBuffer(std::string_view content, SINK&& sink) noexcept;
+        template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
+        [[nodiscard]] constexpr bool ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy, DuplicateKeyPolicy policy, SINK&& sink) noexcept;
         [[nodiscard]] constexpr bool Combine(UniqueEntryPtr& other, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty, DuplicateKeyPolicy policy = DuplicateKeyPolicy::Merge) noexcept;
     };
 
@@ -2177,15 +2246,11 @@ FDF_EXPORT namespace fdf
 
 
 
-    template<auto DIAGNOSTIC_CALLBACK = nullptr>
-    [[nodiscard]] UniqueEntryPtr ParseFile(const std::filesystem::path& filepath) noexcept;
-    template<auto DIAGNOSTIC_CALLBACK = nullptr>
-    [[nodiscard]] constexpr UniqueEntryPtr ParseBuffer(std::string_view content) noexcept;
+    template<typename SINK = detail::NoDiagnostics> requires std::is_invocable_v<SINK&, const Diagnostic&>
+    [[nodiscard]] UniqueEntryPtr ParseFile(const std::filesystem::path& filepath, SINK&& sink = {}) noexcept;
 
     template<Style STYLE = {}>
     [[nodiscard]] bool WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists = true) noexcept;
-    template<Style STYLE = {}>
-    [[nodiscard]] constexpr String WriteBuffer(const Entry& root) noexcept;
 
     [[nodiscard]] constexpr UniqueEntryPtr NewEntry() noexcept;
 }
@@ -2257,7 +2322,13 @@ namespace fdf::detail
         [[nodiscard]] constexpr Token Current() const noexcept  { return currentToken; }
         [[nodiscard]] constexpr Token Advance()       noexcept  { currentToken = GetNextToken(); return currentToken; }
 
-        [[nodiscard]] constexpr std::string_view ToView(Token token) const noexcept { return content.substr(token.startPosition, token.count); }
+        // EOF line comments use UINT32_MAX, outside substr's range
+        [[nodiscard]] constexpr std::string_view ToView(Token token) const noexcept
+        {
+            if(token.startPosition >= content.size())
+                return {};
+            return content.substr(token.startPosition, token.count);
+        }
 
         // Detached entries cannot report open nesting through their parent chain
         uint32_t depth = 0;
@@ -4197,25 +4268,6 @@ namespace fdf::detail
 
 namespace fdf::detail
 {
-    template<auto DIAGNOSTIC_CALLBACK>
-    struct Utils
-    {
-        static constexpr void                         Diagnose(DiagnosticSeverity severity, DiagnosticType type, const Tokenizer& tokenizer, const Token& token) noexcept;
-        static constexpr void                         SkipToNextEntry(Tokenizer& tokenizer, bool bStopAtCloseBrace) noexcept;
-
-        [[nodiscard]] static constexpr UniqueEntryPtr ParseBuffer(std::string_view content) noexcept;
-        [[nodiscard]] static constexpr bool           ParseVariable   (Tokenizer& tokenizer, Entry& parent   FDF_COMMENT_SWITCH(, Token comment)) noexcept;
-        [[nodiscard]] static constexpr bool           ParseSimpleValue(Tokenizer& tokenizer, Entry& entry    FDF_COMMENT_SWITCH(, Token comment)) noexcept;
-        [[nodiscard]] static constexpr bool           ParseArray      (Tokenizer& tokenizer, Entry& array    FDF_COMMENT_SWITCH(, Token comment)) noexcept;
-        [[nodiscard]] static constexpr bool           ParseMap        (Tokenizer& tokenizer, Entry& map      FDF_COMMENT_SWITCH(, Token comment)) noexcept;
-        template<Type CONTAINER_TYPE>
-        [[nodiscard]] static constexpr bool           ParseContainer  (Tokenizer& tokenizer, Entry& container FDF_COMMENT_SWITCH(, Token comment)) noexcept;
-        template<Type CONTAINER_TYPE>
-        [[nodiscard]] static constexpr bool           ParseContainerBody(Tokenizer& tokenizer, Entry& container FDF_COMMENT_SWITCH(, Token comment)) noexcept;
-
-        template<Style STYLE>
-        [[nodiscard]] static constexpr String WriteBuffer(const Entry& root) noexcept;
-    };
 }
 
 
@@ -5749,8 +5801,20 @@ namespace fdf
 
 namespace fdf
 {
-    template <auto DIAGNOSTIC_CALLBACK>
-    bool Entry::ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy, DuplicateKeyPolicy policy) noexcept
+    inline bool Entry::ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy, DuplicateKeyPolicy policy) noexcept
+    {
+        detail::NoDiagnostics sink;
+        return ParseCombineFile(filepath, fileCommentCombineStrategy, policy, sink);
+    }
+
+    template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
+    bool Entry::ParseCombineFile(const std::filesystem::path& filepath, SINK&& sink) noexcept
+    {
+        return ParseCombineFile(filepath, CommentCombineStrategy::UseNewIfExistingIsEmpty, DuplicateKeyPolicy::Merge, std::forward<SINK>(sink));
+    }
+
+    template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
+    bool Entry::ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy, DuplicateKeyPolicy policy, SINK&& sink) noexcept
     {
         std::error_code ec;
         if(!std::filesystem::is_regular_file(filepath, ec) || ec)
@@ -5761,8 +5825,8 @@ namespace fdf
             return false;
         if(fileSize > String::max_size())
         {
-            if constexpr(!std::is_null_pointer_v<std::remove_cvref_t<decltype(DIAGNOSTIC_CALLBACK)>>)
-                DIAGNOSTIC_CALLBACK(Diagnostic{ DiagnosticSeverity::Fatal, DiagnosticType::InputTooLarge, {}, 0, 0, 0 });
+            if constexpr(!std::is_same_v<std::remove_cvref_t<SINK>, detail::NoDiagnostics>)
+                sink(Diagnostic{ DiagnosticSeverity::Fatal, DiagnosticType::InputTooLarge, {}, 0, 0, 0 });
             return false;
         }
 
@@ -5773,16 +5837,28 @@ namespace fdf
         String content(static_cast<size_t>(fileSize), '\0');
         if(fileSize > 0 && !file.read(content.data(), static_cast<std::streamsize>(fileSize)))
             return false;
-        return ParseCombineBuffer<DIAGNOSTIC_CALLBACK>(std::string_view(content), fileCommentCombineStrategy, policy);
+        return ParseCombineBuffer(std::string_view(content), fileCommentCombineStrategy, policy, std::forward<SINK>(sink));
     }
 
-    template <auto DIAGNOSTIC_CALLBACK>
     constexpr bool Entry::ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy, DuplicateKeyPolicy policy) noexcept
+    {
+        detail::NoDiagnostics sink;
+        return ParseCombineBuffer(content, fileCommentCombineStrategy, policy, sink);
+    }
+
+    template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
+    constexpr bool Entry::ParseCombineBuffer(std::string_view content, SINK&& sink) noexcept
+    {
+        return ParseCombineBuffer(content, CommentCombineStrategy::UseNewIfExistingIsEmpty, DuplicateKeyPolicy::Merge, std::forward<SINK>(sink));
+    }
+
+    template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
+    constexpr bool Entry::ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy, DuplicateKeyPolicy policy, SINK&& sink) noexcept
     {
         if(type != Type::Map)
             return false;
 
-        UniqueEntryPtr other = detail::Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(content);
+        UniqueEntryPtr other = ParseBuffer(content, sink);
         return Combine(other, fileCommentCombineStrategy, policy);
     }
 
@@ -5836,8 +5912,8 @@ namespace fdf
 
 
 
-    template<auto DIAGNOSTIC_CALLBACK>
-    UniqueEntryPtr ParseFile(const std::filesystem::path& filepath) noexcept
+    template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
+    UniqueEntryPtr ParseFile(const std::filesystem::path& filepath, SINK&& sink) noexcept
     {
         std::error_code ec;
         if(!std::filesystem::is_regular_file(filepath, ec) || ec)
@@ -5849,8 +5925,8 @@ namespace fdf
             return nullptr;
         if(fileSize > String::max_size())
         {
-            if constexpr(!std::is_null_pointer_v<std::remove_cvref_t<decltype(DIAGNOSTIC_CALLBACK)>>)
-                DIAGNOSTIC_CALLBACK(Diagnostic{ DiagnosticSeverity::Fatal, DiagnosticType::InputTooLarge, {}, 0, 0, 0 });
+            if constexpr(!std::is_same_v<std::remove_cvref_t<SINK>, detail::NoDiagnostics>)
+                sink(Diagnostic{ DiagnosticSeverity::Fatal, DiagnosticType::InputTooLarge, {}, 0, 0, 0 });
             return nullptr;
         }
 
@@ -5861,13 +5937,131 @@ namespace fdf
         String content(static_cast<size_t>(fileSize), '\0');
         if(fileSize > 0 && !file.read(content.data(), static_cast<std::streamsize>(fileSize)))
             return nullptr;
-        return detail::Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(std::string_view(content));
+        return ParseBuffer(std::string_view(content), sink);
     }
 
-    template<auto DIAGNOSTIC_CALLBACK>
-    constexpr UniqueEntryPtr ParseBuffer(std::string_view content) noexcept
+    template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
+    constexpr UniqueEntryPtr ParseBuffer(std::string_view content, SINK&& sink) noexcept
     {
-        return detail::Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(content);
+        using namespace detail;
+
+        // UINT32_MAX_VALUE is both the offset limit and eof sentinel
+        if(content.size() >= detail::UINT32_MAX_VALUE)
+        {
+            if constexpr(!std::is_same_v<std::remove_cvref_t<SINK>, detail::NoDiagnostics>)
+                sink(Diagnostic{ DiagnosticSeverity::Fatal, DiagnosticType::InputTooLarge, {}, 0, 0, 0 });
+            return nullptr;
+        }
+
+        if(content.size() >= 3 &&
+           static_cast<uint8_t>(content[0]) == 0xEF &&
+           static_cast<uint8_t>(content[1]) == 0xBB &&
+           static_cast<uint8_t>(content[2]) == 0xBF)
+            content = content.substr(3);
+
+        if constexpr(!std::is_same_v<std::remove_cvref_t<SINK>, NoDiagnostics>)
+        {
+            if(const size_t badAt = detail::Utf8FirstInvalidByte(content); badAt != content.size())
+                sink(Diagnostic{ DiagnosticSeverity::Warning, DiagnosticType::InvalidUtf8, {}, 0, 0, static_cast<uint32_t>(badAt) });
+        }
+
+        Tokenizer tokenizer(content);
+        #if !FDF_NO_COMMENTS
+            Token fileCommentToken = TokenType::NonExisting;
+        #endif
+
+        UniqueEntryPtr root(GlobalAllocator::Create<Entry>());
+        if(!root)
+            return nullptr;
+        root->type = Type::Map;
+
+        while(true)
+        {
+            #if !FDF_NO_COMMENTS
+                Token comment = TokenType::NonExisting;
+            #endif
+            Token currentToken = tokenizer.Current();
+            if(currentToken.type == TokenType::Invalid)
+            {
+                Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(currentToken.extra8), tokenizer, currentToken, sink);
+                return nullptr;
+            }
+
+            while(currentToken.type == TokenType::Comment || currentToken.type == TokenType::NewLine)
+            {
+            #if !FDF_NO_COMMENTS
+                if(currentToken.type == TokenType::Comment)
+                {
+                    if(root->size == 0 && root->comment.empty() && currentToken.count > 0 && content[currentToken.startPosition] == '#')
+                    {
+                        std::string_view sv = tokenizer.ToView(currentToken);
+                        size_t firstChar = sv.find_first_not_of("# ");
+                        if(firstChar == std::string_view::npos)
+                        {
+                            currentToken.startPosition += currentToken.count;
+                            currentToken.count = 0;
+                        }
+                        else
+                        {
+                            currentToken.startPosition += static_cast<uint32_t>(firstChar);
+                            currentToken.count = currentToken.count - static_cast<uint32_t>(firstChar);
+                            if(content[currentToken.startPosition] == '\n')
+                            {
+                                currentToken.startPosition++;
+                                currentToken.count--;
+                            }
+                        }
+
+                        if(fileCommentToken.type != TokenType::NonExisting)
+                            Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken, sink);
+                        fileCommentToken = currentToken;
+                    }
+                    else
+                    {
+                        if(comment.type != TokenType::NonExisting)
+                            Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken, sink);
+                        comment = currentToken;
+                    }
+                }
+            #endif
+
+                currentToken = tokenizer.Advance();
+            }
+
+            if(currentToken.type == TokenType::Atom)
+            {
+                const uint32_t childCountBefore = root->GetChildCount();
+                if(!ParseVariable(tokenizer, *root   FDF_COMMENT_SWITCH(,comment), sink))
+                {
+                    // remove the partial entry before recovering at the next line
+                    while(root->GetChildCount() > childCountBefore)
+                        (void)root->RemoveChild(root->GetChildCount() - 1);
+
+                    if(tokenizer.Current().type == TokenType::Invalid)
+                    {
+                        Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(tokenizer.Current().extra8), tokenizer, tokenizer.Current(), sink);
+                        return nullptr;  // Lexer error: can't reliably resume
+                    }
+                    SkipToNextEntry(tokenizer, false);  // ParseVariable already reported the error
+                }
+
+                continue;
+            }
+
+            if(currentToken.type == TokenType::EndOfFile)
+                break;
+
+            Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken, sink);
+            SkipToNextEntry(tokenizer, false);
+        }
+
+        #if !FDF_NO_COMMENTS
+            // Stored raw, the writer strips per-line leading whitespace when emitting the block
+            if(fileCommentToken.type != TokenType::NonExisting)
+                root->comment = tokenizer.ToView(fileCommentToken);
+        #endif
+
+        return root;
     }
 
     template<Style STYLE>
@@ -5898,7 +6092,7 @@ namespace fdf
         }
 
         // serialize first because opening truncates the existing file
-        String buffer = detail::Utils<>::WriteBuffer<STYLE>(e);
+        String buffer = WriteBuffer<STYLE>(e);
 
         std::filesystem::path tempPath;
         for(uint32_t attempt = 0; attempt < 1024; attempt++)
@@ -5942,12 +6136,6 @@ namespace fdf
         }
         return true;
     }
-    template<Style STYLE>
-    constexpr String WriteBuffer(const Entry& root) noexcept
-    {
-        return detail::Utils<>::WriteBuffer<STYLE>(root);
-    }
-
 
     constexpr UniqueEntryPtr NewEntry() noexcept
     {
@@ -5962,20 +6150,19 @@ namespace fdf::detail
         GlobalAllocator::Destroy<Entry>(e);
     }
 
-    template<auto DIAGNOSTIC_CALLBACK>
-    constexpr void Utils<DIAGNOSTIC_CALLBACK>::Diagnose(DiagnosticSeverity severity, DiagnosticType type, const Tokenizer& tokenizer, const Token& token) noexcept
+    template<typename SINK>
+    constexpr void Diagnose(DiagnosticSeverity severity, DiagnosticType type, const Tokenizer& tokenizer, const Token& token, SINK& sink) noexcept
     {
-        if constexpr(!std::is_null_pointer_v<std::remove_cvref_t<decltype(DIAGNOSTIC_CALLBACK)>>)
+        if constexpr(!std::is_same_v<std::remove_cvref_t<SINK>, NoDiagnostics>)
         {
-            static_assert(IsValidDiagnosticCallback<decltype(DIAGNOSTIC_CALLBACK)>, "DIAGNOSTIC_CALLBACK must be invocable with (const Diagnostic&)");
-            DIAGNOSTIC_CALLBACK(Diagnostic{ severity, type, tokenizer.ToView(token), token.line, token.column, token.startPosition });
+            static_assert(IsValidDiagnosticCallback<SINK&>, "the diagnostic sink must be invocable with (const Diagnostic&)");
+            sink(Diagnostic{ severity, type, tokenizer.ToView(token), token.line, token.column, token.startPosition });
         }
     }
 
     // skips a malformed entry while tracking nested braces
     // bStopAtCloseBrace leaves the enclosing close brace for the caller
-    template<auto DIAGNOSTIC_CALLBACK>
-    constexpr void Utils<DIAGNOSTIC_CALLBACK>::SkipToNextEntry(Tokenizer& tokenizer, bool bStopAtCloseBrace) noexcept
+    constexpr void SkipToNextEntry(Tokenizer& tokenizer, bool bStopAtCloseBrace) noexcept
     {
         uint32_t depth = 0;
         while(true)
@@ -6016,133 +6203,9 @@ namespace fdf::detail
         }
     }
 
-    template<auto DIAGNOSTIC_CALLBACK>
-    constexpr UniqueEntryPtr Utils<DIAGNOSTIC_CALLBACK>::ParseBuffer(std::string_view content) noexcept
-    {
-        // UINT32_MAX_VALUE is both the offset limit and eof sentinel
-        if(content.size() >= detail::UINT32_MAX_VALUE)
-        {
-            if constexpr(!std::is_null_pointer_v<std::remove_cvref_t<decltype(DIAGNOSTIC_CALLBACK)>>)
-                DIAGNOSTIC_CALLBACK(Diagnostic{ DiagnosticSeverity::Fatal, DiagnosticType::InputTooLarge, {}, 0, 0, 0 });
-            return nullptr;
-        }
 
-        // Strip a leading UTF-8 BOM
-        if(content.size() >= 3 &&
-           static_cast<uint8_t>(content[0]) == 0xEF &&
-           static_cast<uint8_t>(content[1]) == 0xBB &&
-           static_cast<uint8_t>(content[2]) == 0xBF)
-            content = content.substr(3);
-
-        // Bytes pass through untouched, warn when not valid UTF-8
-        if constexpr(!std::is_null_pointer_v<std::remove_cvref_t<decltype(DIAGNOSTIC_CALLBACK)>>)
-        {
-            if(const size_t badAt = detail::Utf8FirstInvalidByte(content); badAt != content.size())
-                DIAGNOSTIC_CALLBACK(Diagnostic{ DiagnosticSeverity::Warning, DiagnosticType::InvalidUtf8, {}, 0, 0, static_cast<uint32_t>(badAt) });
-        }
-
-        Tokenizer tokenizer(content);
-        #if !FDF_NO_COMMENTS
-            Token fileCommentToken = TokenType::NonExisting;
-        #endif
-
-        UniqueEntryPtr root(GlobalAllocator::Create<Entry>());
-        if(!root)
-            return nullptr;
-        root->type = Type::Map;
-
-        while(true)
-        {
-            #if !FDF_NO_COMMENTS
-                Token comment = TokenType::NonExisting;
-            #endif
-            Token currentToken = tokenizer.Current();
-            if(currentToken.type == TokenType::Invalid)
-            {
-                Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(currentToken.extra8), tokenizer, currentToken);
-                return nullptr;
-            }
-
-            while(currentToken.type == TokenType::Comment || currentToken.type == TokenType::NewLine)
-            {
-            #if !FDF_NO_COMMENTS
-                if(currentToken.type == TokenType::Comment)
-                {
-                    if(root->size == 0 && root->comment.empty() && currentToken.count > 0 && content[currentToken.startPosition] == '#')
-                    {
-                        std::string_view sv = tokenizer.ToView(currentToken);
-                        size_t firstChar = sv.find_first_not_of("# ");
-                        if(firstChar == std::string_view::npos)
-                        {
-                            currentToken.startPosition += currentToken.count;
-                            currentToken.count = 0;
-                        }
-                        else
-                        {
-                            currentToken.startPosition += static_cast<uint32_t>(firstChar);
-                            currentToken.count = currentToken.count - static_cast<uint32_t>(firstChar);
-                            if(content[currentToken.startPosition] == '\n')
-                            {
-                                currentToken.startPosition++;
-                                currentToken.count--;
-                            }
-                        }
-
-                        if(fileCommentToken.type != TokenType::NonExisting)
-                            Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
-                        fileCommentToken = currentToken;
-                    }
-                    else
-                    {
-                        if(comment.type != TokenType::NonExisting)
-                            Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
-                        comment = currentToken;
-                    }
-                }
-            #endif
-
-                currentToken = tokenizer.Advance();
-            }
-
-            if(currentToken.type == TokenType::Atom)
-            {
-                const uint32_t childCountBefore = root->GetChildCount();
-                if(!ParseVariable(tokenizer, *root   FDF_COMMENT_SWITCH(,comment)))
-                {
-                    // Drop the half-built entry, report it and resume at the next line
-                    while(root->GetChildCount() > childCountBefore)
-                        (void)root->RemoveChild(root->GetChildCount() - 1);
-
-                    if(tokenizer.Current().type == TokenType::Invalid)
-                    {
-                        Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(tokenizer.Current().extra8), tokenizer, tokenizer.Current());
-                        return nullptr;  // Lexer error: can't reliably resume
-                    }
-                    SkipToNextEntry(tokenizer, false);  // ParseVariable already reported the error
-                }
-
-                continue;
-            }
-
-            if(currentToken.type == TokenType::EndOfFile)
-                break;
-
-            // A top-level line must start with an identifier; report and skip it
-            Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken);
-            SkipToNextEntry(tokenizer, false);
-        }
-
-        #if !FDF_NO_COMMENTS
-            // Stored raw, the writer strips per-line leading whitespace when emitting the block
-            if(fileCommentToken.type != TokenType::NonExisting)
-                root->comment = tokenizer.ToView(fileCommentToken);
-        #endif
-
-        return root;
-    }
-
-    template<auto DIAGNOSTIC_CALLBACK>
-    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseVariable   (Tokenizer& tokenizer, Entry& parent   FDF_COMMENT_SWITCH(, Token comment)) noexcept
+    template<typename SINK>
+    [[nodiscard]] constexpr bool ParseVariable(Tokenizer& tokenizer, Entry& parent FDF_COMMENT_SWITCH(, Token comment), SINK& sink) noexcept
     {
         Token currentToken = tokenizer.Current();
         const Token keyToken = currentToken;
@@ -6157,7 +6220,7 @@ namespace fdf::detail
             assert(tokenizer.Current().type == TokenType::Atom && "Sanity check!");
             if(!entry->SetIdentifier(tokenizer.ToView(currentToken)))
             {
-                Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidIdentifier, tokenizer, currentToken);
+                Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidIdentifier, tokenizer, currentToken, sink);
                 return false;  // caller recovers: skips to the next entry
             }
             currentToken = tokenizer.Advance();
@@ -6182,7 +6245,7 @@ namespace fdf::detail
             if(currentToken.type == TokenType::Comment)
             {
                 if(comment.type != TokenType::NonExisting)
-                    Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
+                    Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken, sink);
                 comment = currentToken;
             }
         #endif
@@ -6194,20 +6257,20 @@ namespace fdf::detail
 
         bool bParsed = false;
         if(IsValueLiteral(currentToken.type) && (bHasEqual || parent.type == Type::Array))
-            bParsed = ParseSimpleValue(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
+            bParsed = ParseSimpleValue(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment), sink);
         // '=' introduces a scalar value only; a container must follow the identifier directly
         else if(bHasEqual && (currentToken.type == TokenType::CurlyBraceOpen || currentToken.type == TokenType::SquareBraceOpen))
         {
-            Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken);
+            Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken, sink);
             return false;
         }
         else if(currentToken.type == TokenType::CurlyBraceOpen)
-            bParsed = ParseMap(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
+            bParsed = ParseMap(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment), sink);
         else if(currentToken.type == TokenType::SquareBraceOpen)
-            bParsed = ParseArray(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment));
+            bParsed = ParseArray(tokenizer, *entry    FDF_COMMENT_SWITCH(, comment), sink);
         else
         {
-            Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken);
+            Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken, sink);
             return false;
         }
 
@@ -6222,11 +6285,11 @@ namespace fdf::detail
 
         // the entry was fully consumed, so report and continue rather than letting the caller
         // recover and swallow whatever follows
-        Diagnose(DiagnosticSeverity::Error, DiagnosticType::DuplicateKey, tokenizer, keyToken);
+        Diagnose(DiagnosticSeverity::Error, DiagnosticType::DuplicateKey, tokenizer, keyToken, sink);
         return true;
     }
-    template<auto DIAGNOSTIC_CALLBACK>
-    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseSimpleValue(Tokenizer& tokenizer, Entry& entry    FDF_COMMENT_SWITCH(, Token comment)) noexcept
+    template<typename SINK>
+    [[nodiscard]] constexpr bool ParseSimpleValue(Tokenizer& tokenizer, Entry& entry FDF_COMMENT_SWITCH(, Token comment), SINK& sink) noexcept
     {
         assert(IsValueLiteral(tokenizer.Current().type) && "Sanity check!");
 
@@ -6247,7 +6310,7 @@ namespace fdf::detail
             {
             #if !FDF_NO_COMMENTS
                 if(comment.type != TokenType::NonExisting)
-                    Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
+                    Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken, sink);
                 comment = currentToken;
             #endif
                 currentToken = tokenizer.Advance();
@@ -6277,7 +6340,7 @@ namespace fdf::detail
             out = Type::String;
             if(!ClassifyAtom(v, out))
             {
-                Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, token);
+                Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, token, sink);
                 return false;
             }
             return true;
@@ -6320,7 +6383,7 @@ namespace fdf::detail
                 FDF_CHECK_TOKEN(currentToken);
                 if(!IsValueLiteral(currentToken.type))
                 {
-                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidPack, tokenizer, valueToken);
+                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidPack, tokenizer, valueToken, sink);
                     return false;  // dangling '|' with no component
                 }
 
@@ -6359,7 +6422,7 @@ namespace fdf::detail
         // packs need a common component type
         if(componentCount > 1 && !bAllBool && !bAllNumeric && !bAllString && !bAllHex && !bAllVersion && !bAllTimestamp && !bAllDuration)
         {
-            Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidPack, tokenizer, valueToken);
+            Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidPack, tokenizer, valueToken, sink);
             return false;
         }
 
@@ -6388,7 +6451,7 @@ namespace fdf::detail
 
             auto fail = [&]() -> bool
             {
-                Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, valueToken);
+                Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, valueToken, sink);
                 entry.ReleaseData();
                 return false;
             };
@@ -6458,7 +6521,7 @@ namespace fdf::detail
 
             auto fail = [&]() -> bool
             {
-                Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, valueToken);
+                Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, valueToken, sink);
                 entry.ReleaseData();
                 return false;
             };
@@ -6539,7 +6602,7 @@ namespace fdf::detail
                 // overflow returns +/-inf, which has no text syntax
                 if(!bOk || (std::bit_cast<uint64_t>(result) >> 52 & 0x7FF) == 0x7FF)
                 {
-                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, valueToken);
+                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidNumber, tokenizer, valueToken, sink);
                     entry.ReleaseData();
                     return false;
                 }
@@ -6580,7 +6643,7 @@ namespace fdf::detail
                 // tokenizer already validated the digits, only an oversized component fails here
                 if(!entry.data.h[i].Decode_UNSAFE(componentReader.Next().substr(2), 0))
                 {
-                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InputTooLarge, tokenizer, valueToken);
+                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InputTooLarge, tokenizer, valueToken, sink);
                     entry.ReleaseData();
                     return false;
                 }
@@ -6600,7 +6663,7 @@ namespace fdf::detail
                 const Timestamp timestamp = Timestamp::FromText(componentReader.Next());
                 if(!timestamp.IsValid())
                 {
-                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidTimestamp, tokenizer, valueToken);
+                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidTimestamp, tokenizer, valueToken, sink);
                     entry.ReleaseData();
                     return false;
                 }
@@ -6622,7 +6685,7 @@ namespace fdf::detail
                 const Duration duration = Duration::FromText(componentReader.Next(), bValid);
                 if(!bValid)
                 {
-                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidDuration, tokenizer, valueToken);
+                    Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidDuration, tokenizer, valueToken, sink);
                     entry.ReleaseData();
                     return false;
                 }
@@ -6642,25 +6705,23 @@ namespace fdf::detail
         }
         return false;  // unhandled token
     }
-    template<auto DIAGNOSTIC_CALLBACK>
-    template<Type CONTAINER_TYPE>
-    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseContainer(Tokenizer& tokenizer, Entry& container FDF_COMMENT_SWITCH(, Token comment)) noexcept
+    template<Type CONTAINER_TYPE, typename SINK>
+    [[nodiscard]] constexpr bool ParseContainer(Tokenizer& tokenizer, Entry& container FDF_COMMENT_SWITCH(, Token comment), SINK& sink) noexcept
     {
         if(tokenizer.depth >= MAX_PARSE_DEPTH)
         {
-            Diagnose(DiagnosticSeverity::Error, DiagnosticType::NestingTooDeep, tokenizer, tokenizer.Current());
+            Diagnose(DiagnosticSeverity::Error, DiagnosticType::NestingTooDeep, tokenizer, tokenizer.Current(), sink);
             return false;
         }
 
         tokenizer.depth++;
-        const bool bParsed = ParseContainerBody<CONTAINER_TYPE>(tokenizer, container FDF_COMMENT_SWITCH(, comment));
+        const bool bParsed = ParseContainerBody<CONTAINER_TYPE>(tokenizer, container FDF_COMMENT_SWITCH(, comment), sink);
         tokenizer.depth--;
         return bParsed;
     }
 
-    template<auto DIAGNOSTIC_CALLBACK>
-    template<Type CONTAINER_TYPE>
-    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseContainerBody(Tokenizer& tokenizer, Entry& container FDF_COMMENT_SWITCH(, Token comment)) noexcept
+    template<Type CONTAINER_TYPE, typename SINK>
+    [[nodiscard]] constexpr bool ParseContainerBody(Tokenizer& tokenizer, Entry& container FDF_COMMENT_SWITCH(, Token comment), SINK& sink) noexcept
     {
         static_assert(CONTAINER_TYPE == Type::Array || CONTAINER_TYPE == Type::Map);
         constexpr TokenType CLOSE_TOKEN = CONTAINER_TYPE == Type::Array? TokenType::SquareBraceClose : TokenType::CurlyBraceClose;
@@ -6683,7 +6744,7 @@ namespace fdf::detail
                 if(currentToken.type == TokenType::Comment)
                 {
                     if(childComment.type != TokenType::NonExisting)
-                        Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
+                        Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken, sink);
                     childComment = currentToken;
                 }
             #endif
@@ -6701,14 +6762,14 @@ namespace fdf::detail
             if(bStartsChild)
             {
                 const uint32_t childCountBefore = container.GetChildCount();
-                if(!ParseVariable(tokenizer, container FDF_COMMENT_SWITCH(,childComment)))
+                if(!ParseVariable(tokenizer, container FDF_COMMENT_SWITCH(,childComment), sink))
                 {
                     while(container.GetChildCount() > childCountBefore)
                         (void)container.RemoveChild(container.GetChildCount() - 1);
 
                     if(tokenizer.Current().type == TokenType::Invalid)
                     {
-                        Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(tokenizer.Current().extra8), tokenizer, tokenizer.Current());
+                        Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(tokenizer.Current().extra8), tokenizer, tokenizer.Current(), sink);
                         return false;  // Lexer error: can't reliably resume
                     }
                     SkipToNextEntry(tokenizer, true);  // ParseVariable already reported the error
@@ -6733,7 +6794,7 @@ namespace fdf::detail
                 {
                 #if !FDF_NO_COMMENTS
                     if(comment.type != TokenType::NonExisting)
-                        Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken);
+                        Diagnose(DiagnosticSeverity::Warning, DiagnosticType::AlreadyHasComment, tokenizer, currentToken, sink);
                     comment = currentToken;
                 #endif
                     currentToken = tokenizer.Advance();
@@ -6757,15 +6818,15 @@ namespace fdf::detail
             {
                 if(currentToken.type == TokenType::EndOfFile)
                 {
-                    Diagnose(DiagnosticSeverity::Fatal, DiagnosticType::UnexpectedEndOfFile, tokenizer, currentToken);
+                    Diagnose(DiagnosticSeverity::Fatal, DiagnosticType::UnexpectedEndOfFile, tokenizer, currentToken, sink);
                     return false;
                 }
                 if(currentToken.type == TokenType::Invalid)
                 {
-                    Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(currentToken.extra8), tokenizer, currentToken);
+                    Diagnose(DiagnosticSeverity::Fatal, static_cast<DiagnosticType>(currentToken.extra8), tokenizer, currentToken, sink);
                     return false;
                 }
-                Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken);
+                Diagnose(DiagnosticSeverity::Error, DiagnosticType::UnexpectedToken, tokenizer, currentToken, sink);
 
                 if(currentToken.type == TokenType::CurlyBraceClose || currentToken.type == TokenType::SquareBraceClose)
                 {
@@ -6780,16 +6841,16 @@ namespace fdf::detail
         }
     }
 
-    template<auto DIAGNOSTIC_CALLBACK>
-    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseArray(Tokenizer& tokenizer, Entry& array FDF_COMMENT_SWITCH(, Token comment)) noexcept
+    template<typename SINK>
+    [[nodiscard]] constexpr bool ParseArray(Tokenizer& tokenizer, Entry& array FDF_COMMENT_SWITCH(, Token comment), SINK& sink) noexcept
     {
-        return ParseContainer<Type::Array>(tokenizer, array FDF_COMMENT_SWITCH(, comment));
+        return ParseContainer<Type::Array>(tokenizer, array FDF_COMMENT_SWITCH(, comment), sink);
     }
 
-    template<auto DIAGNOSTIC_CALLBACK>
-    [[nodiscard]] constexpr bool Utils<DIAGNOSTIC_CALLBACK>::ParseMap        (Tokenizer& tokenizer, Entry& map   FDF_COMMENT_SWITCH(, Token comment)) noexcept
+    template<typename SINK>
+    [[nodiscard]] constexpr bool ParseMap(Tokenizer& tokenizer, Entry& map FDF_COMMENT_SWITCH(, Token comment), SINK& sink) noexcept
     {
-        return ParseContainer<Type::Map>(tokenizer, map FDF_COMMENT_SWITCH(, comment));
+        return ParseContainer<Type::Map>(tokenizer, map FDF_COMMENT_SWITCH(, comment), sink);
     }
 
 
@@ -6808,11 +6869,15 @@ namespace fdf::detail
     template<>
     struct ScopePositions<false>{ size_t begin = 0; };
 
+}
 
-    template<auto DIAGNOSTIC_CALLBACK>
+FDF_EXPORT namespace fdf
+{
     template<Style STYLE>
-    constexpr String Utils<DIAGNOSTIC_CALLBACK>::WriteBuffer(const Entry& root) noexcept
+    constexpr String WriteBuffer(const Entry& root) noexcept
     {
+        using namespace detail;
+
         String buffer;
         assert((root.GetIdentifierSize() != 0 || (root.type == Type::Map && !root.parent)) && "Unless it's a map, it must have an identifier");
 
@@ -7391,6 +7456,13 @@ namespace fdf::detail
     #endif
         return buffer;
     }
+}
+
+namespace fdf::detail
+{
+
+
+
 }
 
 
