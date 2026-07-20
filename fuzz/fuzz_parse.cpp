@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <new>
 #include <string_view>
 
 #if FDF_USE_CPP_MODULES

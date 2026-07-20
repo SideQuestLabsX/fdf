@@ -1374,6 +1374,7 @@ namespace fdf::detail
         // A malformed top-level line should be reported and skipped, not abort the whole parse
         static void RecoveryTest()
         {
+            #if !FDF_NO_COMMENTS
             // only a block comment can be the file comment. "//#x" used to be claimed as one, which
             // stole it from the entry and broke the write/re-parse round trip
             if(UniqueEntryPtr root = ParseBuffer("//#hash\nr=1\n"); CHECK(static_cast<bool>(root)) && root)
@@ -1390,6 +1391,7 @@ namespace fdf::detail
                 if(CHECK(r != nullptr) && r)
                     CHECK(std::string_view(r->GetComment()).empty());
             }
+            #endif
 
             // diagnostic sinks must stay in the noexcept path on truncated input
             for(const std::string_view truncated : { "a{b=1", "a{", "a [ 1", "x=\"abc", "a=1\n/*",

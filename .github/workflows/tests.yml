@@ -95,16 +95,25 @@ jobs:
       - name: Build
         run: cmake --build build --target fuzz_${{ matrix.target }}
 
-      # libFuzzer prints Base64 reproducers in crash logs.
-      # It writes new inputs into the first corpus directory, so that one is a scratch dir and the
-      # checked-in seeds follow it as read-only inputs
+      # libFuzzer writes new inputs into the first corpus directory, so that one is a scratch dir
+      # and the checked-in seeds follow it as read-only inputs
       - name: Fuzz
         run: |
-          mkdir -p "${RUNNER_TEMP}/corpus"
+          mkdir -p "${RUNNER_TEMP}/corpus" "${RUNNER_TEMP}/artifacts"
           ./build/fuzz/fuzz_${{ matrix.target }} \
             -max_total_time=120 -timeout=25 -rss_limit_mb=2048 \
             -print_final_stats=1 \
+            -artifact_prefix="${RUNNER_TEMP}/artifacts/" \
             "${RUNNER_TEMP}/corpus" fuzz/corpus
+
+      # the crash log names the reproducer but does not contain it, so keep the bytes
+      - name: Upload reproducers
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-${{ matrix.target }}-reproducers
+          path: ${{ runner.temp }}/artifacts
+          if-no-files-found: ignore
 
   # Linux / GCC
   linux-gcc:
