@@ -321,3 +321,25 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  editors:
+    name: editor packages
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Read the declared version
+        id: version
+        run: sed -nE 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/version=\1/p' editors/package.json | head -1 >> "$GITHUB_OUTPUT"
+
+      - name: Build packages
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          python3 editors/package.py --version "$VERSION" --out staging
+          cp LICENSE editors/LICENSE
+          (cd editors && npx --yes @vscode/vsce@3.9.2 package --out "../staging/fdf-$VERSION.vsix")
+          rm editors/LICENSE
+
+      - name: Verify packages
+        run: python3 editors/verify.py staging "${{ steps.version.outputs.version }}"

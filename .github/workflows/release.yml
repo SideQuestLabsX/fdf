@@ -50,6 +50,12 @@ jobs:
             exit 1
           fi
 
+          editor_version=$(sed -nE 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' editors/package.json | head -1)
+          if [ "$editor_version" != "$version_core" ]; then
+            echo "::error::editors/package.json version $editor_version does not match $version_core"
+            exit 1
+          fi
+
           # an existing tag is only fatal when it points somewhere else, so a failed publish can be rerun
           if tagged=$(git rev-parse -q --verify "refs/tags/v$VERSION^{commit}"); then
             if [ "$tagged" != "$(git rev-parse HEAD)" ]; then
@@ -63,13 +69,193 @@ jobs:
     needs: validate
     uses: ./.github/workflows/tests.yml
 
-  release:
+  binaries:
     needs: gate
+    name: fdf-validate (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-24.04
+            asset: fdf-validate-linux-x64
+            built: build/tools/fdf-validate
+          - name: windows-x64
+            os: windows-2025
+            asset: fdf-validate-windows-x64.exe
+            built: build/tools/fdf-validate.exe
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install latest CMake + Ninja
+        uses: lukka/get-cmake@e6906078ebd1ccb8ce51ab4626ac46a1b5a517e3 # v4.4.0
+
+      - name: Install Clang 22
+        if: runner.os == 'Linux'
+        run: |
+          sudo install -d -m 0755 /etc/apt/keyrings
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/llvm.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y clang-22
+
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      # ship without libstdc++ and libgcc runtime dependencies
+      - name: Configure (Linux)
+        if: runner.os == 'Linux'
+        env:
+          CC: clang-22
+          CXX: clang++-22
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+
+      # SQ_SRT supplies the static CRT
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --target fdf_validate Test
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Smoke test the binary
+        shell: bash
+        run: |
+          "${{ matrix.built }}" --version
+          "${{ matrix.built }}" --round-trip examples/*.fdf
+
+      - name: Stage asset
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp "${{ matrix.built }}" "staging/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.asset }}
+          path: staging/${{ matrix.asset }}
+          if-no-files-found: error
+
+  editors:
+    needs: gate
+    name: editor packages
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Build packages
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          python3 editors/package.py --version "$VERSION" --out staging
+          cp LICENSE editors/LICENSE
+          (cd editors && npx --yes @vscode/vsce@3.9.2 package --out "../staging/fdf-$VERSION.vsix")
+          rm editors/LICENSE
+
+      - name: Verify packages
+        run: python3 editors/verify.py staging "${{ inputs.version }}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: editor-packages
+          path: |
+            staging/fdf-${{ inputs.version }}.vsix
+            staging/fdf.sublime-package
+            staging/fdf.tmbundle.zip
+            staging/fdf.tmLanguage.json
+          if-no-files-found: error
+
+  publish:
+    needs: [binaries, editors]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          path: staging
+          merge-multiple: true
+
+      - name: Check every asset arrived
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          missing=0
+          for asset in \
+            "fdf-validate-linux-x64" \
+            "fdf-validate-windows-x64.exe" \
+            "fdf-$VERSION.vsix" \
+            "fdf.sublime-package" \
+            "fdf.tmbundle.zip" \
+            "fdf.tmLanguage.json"
+          do
+            if [ ! -s "staging/$asset" ]; then
+              echo "::error::missing or empty asset $asset"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ]
+
+      - name: Assemble the distribution
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p dist/include dist/src dist/bin dist/editors
+
+          cp include/fdf.h dist/include/
+          cp src/fdf.ixx   dist/src/
+          cp LICENSE       dist/
+
+          cp "staging/fdf-validate-linux-x64"       dist/bin/
+          cp "staging/fdf-validate-windows-x64.exe" dist/bin/
+          # upload-artifact strips executable bits
+          chmod +x dist/bin/fdf-validate-linux-x64
+
+          cp "staging/fdf-$VERSION.vsix"   dist/editors/
+          cp "staging/fdf.sublime-package" dist/editors/
+          cp "staging/fdf.tmbundle.zip"    dist/editors/
+          cp "staging/fdf.tmLanguage.json" dist/editors/
+
+          # versioned root keeps extracted files together
+          cp -r dist "fdf-$VERSION"
+          zip -r "fdf-$VERSION.zip" "fdf-$VERSION"
+
+      - name: Verify the distribution
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          root="fdf-$VERSION"
+          archive="$root.zip"
+          unzip -t "$archive"
+
+          for entry in \
+            "include/fdf.h" \
+            "src/fdf.ixx" \
+            "LICENSE" \
+            "bin/fdf-validate-linux-x64" \
+            "bin/fdf-validate-windows-x64.exe" \
+            "editors/fdf-$VERSION.vsix" \
+            "editors/fdf.sublime-package" \
+            "editors/fdf.tmbundle.zip" \
+            "editors/fdf.tmLanguage.json"
+          do
+            if ! unzip -l "$archive" "$root/$entry" > /dev/null 2>&1; then
+              echo "::error::the distribution is missing $entry"
+              exit 1
+            fi
+          done
 
       - name: Create tag
         env:
@@ -96,7 +282,15 @@ jobs:
           name: v${{ inputs.version }}
           generate_release_notes: true
           prerelease: ${{ inputs.prerelease }}
+          fail_on_unmatched_files: true
           files: |
-            include/fdf.h
-            src/fdf.ixx
-            LICENSE
+            fdf-${{ inputs.version }}.zip
+            dist/include/fdf.h
+            dist/src/fdf.ixx
+            dist/LICENSE
+            dist/bin/fdf-validate-linux-x64
+            dist/bin/fdf-validate-windows-x64.exe
+            dist/editors/fdf-${{ inputs.version }}.vsix
+            dist/editors/fdf.sublime-package
+            dist/editors/fdf.tmbundle.zip
+            dist/editors/fdf.tmLanguage.json
