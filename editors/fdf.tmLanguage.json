@@ -1,0 +1,170 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "fdf",
+  "scopeName": "source.fdf",
+  "fileTypes": ["fdf"],
+  "patterns": [
+    { "include": "#file-comment" },
+    { "include": "#block-comment" },
+    { "include": "#line-comment" },
+    { "include": "#collection-name" },
+    { "include": "#key" },
+    { "include": "#string" },
+    { "include": "#constant" },
+    { "include": "#timestamp" },
+    { "include": "#version" },
+    { "include": "#duration" },
+    { "include": "#hex" },
+    { "include": "#float" },
+    { "include": "#integer" },
+    { "include": "#map" },
+    { "include": "#array" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "file-comment": {
+      "name": "comment.block.documentation.fdf",
+      "begin": "/\\*#",
+      "end": "#?\\*/"
+    },
+    "block-comment": {
+      "name": "comment.block.fdf",
+      "begin": "/\\*",
+      "end": "\\*/"
+    },
+    "line-comment": {
+      "name": "comment.line.double-slash.fdf",
+      "match": "//.*$"
+    },
+    "collection-name": {
+      "patterns": [
+        {
+          "match": "^\\s*((?!(?:true|false|null|nil)\\b)[A-Za-z_][A-Za-z0-9_]*)(?=\\s*(?://.*)?$)",
+          "captures": {
+            "1": { "name": "entity.name.type.collection.fdf" }
+          }
+        },
+        {
+          "match": "(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)(?=\\s*[\\{\\[])",
+          "captures": {
+            "1": { "name": "entity.name.type.collection.fdf" }
+          }
+        }
+      ]
+    },
+    "key": {
+      "match": "(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)(?=\\s*=)",
+      "captures": {
+        "1": { "name": "variable.other.property.fdf" }
+      }
+    },
+    "string": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.fdf",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [{ "include": "#escape" }]
+        },
+        {
+          "name": "string.quoted.single.fdf",
+          "begin": "'",
+          "end": "'",
+          "patterns": [{ "include": "#escape" }]
+        }
+      ]
+    },
+    "escape": {
+      "name": "constant.character.escape.fdf",
+      "match": "\\\\."
+    },
+    "constant": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.fdf",
+          "match": "(?<![A-Za-z0-9_])(?:true|false)(?![A-Za-z0-9_])"
+        },
+        {
+          "name": "constant.language.null.fdf",
+          "match": "(?<![A-Za-z0-9_])(?:null|nil)(?![A-Za-z0-9_])"
+        }
+      ]
+    },
+    "timestamp": {
+      "name": "constant.other.timestamp.fdf",
+      "match": "(?<![A-Za-z0-9_.:+-])(?:\\d{4}-\\d{2}-\\d{2}(?:[Tt]\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?(?:[Zz]|[+-]\\d{2}:\\d{2})?)?|\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?)(?![A-Za-z0-9_.:])"
+    },
+    "version": {
+      "name": "constant.other.version.fdf",
+      "match": "(?<![A-Za-z0-9_.])\\d+\\.\\d+\\.\\d+(?:\\.\\d+)?(?![A-Za-z0-9_.])"
+    },
+    "duration": {
+      "name": "constant.other.duration.fdf",
+      "match": "(?<![A-Za-z0-9_.])-?(?:\\d+(?:\\.\\d+)?(?:ms|us|ns|w|d|h|m|s))+(?![A-Za-z0-9_.])"
+    },
+    "hex": {
+      "name": "constant.other.hex.fdf",
+      "match": "(?<![A-Za-z0-9_.])0[xX][0-9A-Fa-f](?:_?[0-9A-Fa-f])*(?![A-Za-z0-9_.])|(?<![A-Za-z0-9_.])0[xX](?![A-Za-z0-9_.])"
+    },
+    "float": {
+      "name": "constant.numeric.float.fdf",
+      "match": "(?<![A-Za-z0-9_.])[+-]?\\d(?:_?\\d)*(?:\\.\\d(?:_?\\d)*(?:[eE][+-]?\\d(?:_?\\d)*)?|[eE][+-]?\\d(?:_?\\d)*)(?![A-Za-z0-9_.])"
+    },
+    "integer": {
+      "name": "constant.numeric.integer.fdf",
+      "match": "(?<![A-Za-z0-9_.])[+-]?\\d(?:_?\\d)*(?![A-Za-z0-9_.])"
+    },
+    "map": {
+      "name": "meta.mapping.fdf",
+      "begin": "\\{",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.mapping.begin.fdf" }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": { "name": "punctuation.section.mapping.end.fdf" }
+      },
+      "patterns": [
+        { "include": "$self" }
+      ]
+    },
+    "array": {
+      "name": "meta.sequence.fdf",
+      "begin": "\\[",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.sequence.begin.fdf" }
+      },
+      "end": "\\]",
+      "endCaptures": {
+        "0": { "name": "punctuation.section.sequence.end.fdf" }
+      },
+      "patterns": [
+        { "include": "$self" }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "keyword.operator.assignment.fdf",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.pack.fdf",
+          "match": "\\|"
+        },
+        {
+          "name": "punctuation.section.braces.fdf",
+          "match": "[{}]"
+        },
+        {
+          "name": "punctuation.section.brackets.fdf",
+          "match": "[\\[\\]]"
+        },
+        {
+          "name": "punctuation.separator.comma.fdf",
+          "match": ","
+        }
+      ]
+    }
+  }
+}

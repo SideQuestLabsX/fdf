@@ -1,0 +1,5 @@
+package.py
+verify.py
+*.tmLanguage
+*.sublime-package
+*.tmbundle.zip

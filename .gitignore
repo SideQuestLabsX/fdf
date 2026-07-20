@@ -5,6 +5,8 @@ _PROJ/
 out/
 build/
 cmake-build-*/
+dist/
+staging/
 
 
 
