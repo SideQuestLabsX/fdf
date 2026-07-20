@@ -16,8 +16,18 @@
 #if !defined(FDF_DISABLE_SLAB_ALLOCATOR)
     #define FDF_DISABLE_SLAB_ALLOCATOR false
 #endif
+#if !defined(FDF_ASSERTIONS)
+    #if defined(NDEBUG)
+        #define FDF_ASSERTIONS false
+    #else
+        #define FDF_ASSERTIONS true
+    #endif
+#endif
 #if FDF_EXTENDED_NO_COMMENT_IDENTIFIERS && !FDF_NO_COMMENTS
     #warning "FDF_EXTENDED_NO_COMMENT_IDENTIFIERS has no effect unless FDF_NO_COMMENTS is enabled"
+#endif
+#if defined(_MSVC_TRADITIONAL) && _MSVC_TRADITIONAL
+    #error "fdf needs MSVC's conforming preprocessor, compile with /Zc:preprocessor"
 #endif
 
 // For tests only
@@ -34,12 +44,13 @@
     #include <algorithm>
     #include <array>
     #include <bit>
-    #include <cassert>
     #include <cctype>
     #include <charconv>
     #include <compare>
     #include <cstddef>
     #include <cstdint>
+    #include <cstdio>
+    #include <cstdlib>
     #include <filesystem>
     #include <limits>
     #include <format>
@@ -69,11 +80,86 @@
     #define FDF_COMMENT_SWITCH(...) __VA_ARGS__
 #endif
 
+// contract checks for misuse and sanity. non-constexpr failure handling turns failed consteval checks into compile errors
+#if FDF_ASSERTIONS
+    #define FDF_ASSERT(CONDITION, ...) do { if(!(CONDITION)) ::fdf::detail::OnCheckFailure(#CONDITION, __FILE__, __LINE__ __VA_OPT__(,) __VA_ARGS__); } while(false)
+#else
+    #define FDF_ASSERT(CONDITION, ...) do { } while(false)
+#endif
+
 
 
 
 FDF_EXPORT namespace fdf
 {
+    namespace detail
+    {
+        [[noreturn]] inline void OnCheckFailure(std::string_view expression, std::string_view file, unsigned line, std::string_view message = {}) noexcept
+        {
+            std::fprintf(stderr, "%.*s:%u: fdf check failed: %.*s",
+                         static_cast<int>(file.size()), file.data(),
+                         line,
+                         static_cast<int>(expression.size()), expression.data());
+
+            if(!message.empty())
+                std::fprintf(stderr, ": %.*s", static_cast<int>(message.size()), message.data());
+
+            std::fputc('\n', stderr);
+            std::fflush(stderr);
+            std::abort();
+        }
+
+        // failure formatting cannot allocate because VERIFY handles allocation failure
+        // supports {} only and truncates at the fixed buffer
+        template<typename... ARGS>
+        [[noreturn]] inline void OnCheckFailure(std::string_view expression, std::string_view file, unsigned line, std::string_view message, const ARGS&... args) noexcept
+        {
+            char buffer[512];
+            size_t used = 0;
+
+            auto appendText = [&](std::string_view text) noexcept
+            {
+                const size_t count = std::min(text.size(), sizeof(buffer) - used);
+                for(size_t i = 0; i < count; i++)
+                    buffer[used + i] = text[i];
+                used += count;
+            };
+
+            auto appendValue = [&]<typename VALUE>(const VALUE& value) noexcept
+            {
+                if constexpr(std::is_convertible_v<VALUE, std::string_view>)
+                    appendText(value);
+                else if constexpr(std::is_same_v<VALUE, bool>)
+                    appendText(value? "true" : "false");
+                else if constexpr(std::is_arithmetic_v<VALUE>)
+                {
+                    char digits[64];
+                    if(const auto [end, ec] = std::to_chars(digits, digits + sizeof(digits), value); ec == std::errc())
+                        appendText(std::string_view(digits, end));
+                }
+                else
+                    { static_assert(false, "Unsupported type"); }
+            };
+
+            size_t cursor = 0;
+            auto substitute = [&](const auto& value) noexcept
+            {
+                const size_t placeholder = message.find("{}", cursor);
+                if(placeholder == std::string_view::npos)
+                    return;
+
+                appendText(message.substr(cursor, placeholder - cursor));
+                appendValue(value);
+                cursor = placeholder + 2;
+            };
+
+            (substitute(args), ...);
+            appendText(message.substr(cursor));
+
+            OnCheckFailure(expression, file, line, std::string_view(buffer, used));
+        }
+    }
+
     enum class Type : uint8_t
     {
         Map,
@@ -273,7 +359,7 @@ namespace fdf::detail
 
     [[nodiscard]] constexpr bool FitsElementCount(const size_t count) noexcept
     {
-        assert(count <= UINT32_MAX_VALUE && "pack element count must fit in uint32_t");
+        FDF_ASSERT(count <= UINT32_MAX_VALUE, "pack element count must fit in uint32_t");
         return count <= UINT32_MAX_VALUE;
     }
 
@@ -939,7 +1025,7 @@ FDF_EXPORT namespace fdf
             t.bHasDate = true;
             pos = 10;
 
-            if(pos == ts.size()) { t.bValid = true; return t; }
+            if(pos == ts.size())  { t.bValid = true; return t; }
             if(ts[pos] != 'T' && ts[pos] != 't') return t;
             pos++;
         }
@@ -959,7 +1045,7 @@ FDF_EXPORT namespace fdf
         t.bHasTime = true;
         pos += 8;
 
-        if(pos == ts.size()) { t.bValid = true; return t; }
+        if(pos == ts.size())  { t.bValid = true; return t; }
 
         // Optional fractional seconds
         if(ts[pos] == '.')
@@ -979,7 +1065,7 @@ FDF_EXPORT namespace fdf
             for(uint8_t i = t.fracDigits; i < 9; i++)
                 frac *= 10;
             t.nanosecond = static_cast<uint32_t>(frac);
-            if(pos == ts.size()) { t.bValid = true; return t; }
+            if(pos == ts.size())  { t.bValid = true; return t; }
         }
 
         // Timezone
@@ -1188,8 +1274,7 @@ FDF_EXPORT namespace fdf
                                 const size_t fractionLeastIndex = productColumn - unitDigitIndex;
                                 if(fractionLeastIndex < group.fraction.size())
                                 {
-                                    const uint64_t fractionDigit = static_cast<uint64_t>(
-                                        group.fraction[group.fraction.size() - 1 - fractionLeastIndex] - '0');
+                                    const uint64_t fractionDigit = static_cast<uint64_t>(group.fraction[group.fraction.size() - 1 - fractionLeastIndex] - '0');
                                     columnValue += fractionDigit * (unit % 10);
                                 }
                             }
@@ -1356,12 +1441,12 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr char*       data()           noexcept  { return ptr? ptr + HEADER_SIZE : nullptr; }
         [[nodiscard]] constexpr const char* c_str()    const noexcept  { return ptr? ptr + HEADER_SIZE : ""; }
 
-        [[nodiscard]] constexpr char&       operator[](size_t index)       noexcept  { assert(index < size() && "String index out of range"); return ptr[HEADER_SIZE + index]; }
-        [[nodiscard]] constexpr const char& operator[](size_t index) const noexcept  { assert(index < size() && "String index out of range"); return ptr[HEADER_SIZE + index]; }
-        [[nodiscard]] constexpr char&       front()       noexcept  { assert(!empty() && "front on empty String"); return (*this)[0]; }
-        [[nodiscard]] constexpr const char& front() const noexcept  { assert(!empty() && "front on empty String"); return (*this)[0]; }
-        [[nodiscard]] constexpr char&       back()        noexcept  { assert(!empty() && "back on empty String"); return (*this)[size() - 1]; }
-        [[nodiscard]] constexpr const char& back()  const noexcept  { assert(!empty() && "back on empty String"); return (*this)[size() - 1]; }
+        [[nodiscard]] constexpr char&       operator[](size_t index)       noexcept  { FDF_ASSERT(index < size(), "String index out of range"); return ptr[HEADER_SIZE + index]; }
+        [[nodiscard]] constexpr const char& operator[](size_t index) const noexcept  { FDF_ASSERT(index < size(), "String index out of range"); return ptr[HEADER_SIZE + index]; }
+        [[nodiscard]] constexpr char&       front()       noexcept  { FDF_ASSERT(!empty(), "front on empty String"); return (*this)[0]; }
+        [[nodiscard]] constexpr const char& front() const noexcept  { FDF_ASSERT(!empty(), "front on empty String"); return (*this)[0]; }
+        [[nodiscard]] constexpr char&       back()        noexcept  { FDF_ASSERT(!empty(), "back on empty String"); return (*this)[size() - 1]; }
+        [[nodiscard]] constexpr const char& back()  const noexcept  { FDF_ASSERT(!empty(), "back on empty String"); return (*this)[size() - 1]; }
 
         [[nodiscard]] constexpr char*       begin()        noexcept  { return data(); }
         [[nodiscard]] constexpr char*       end()          noexcept  { return empty()? data() : data() + size(); }
@@ -1398,7 +1483,7 @@ FDF_EXPORT namespace fdf
             std::string_view v = View();
             if(pos > v.size())
             {
-                assert(false && "substr pos out of range");
+                FDF_ASSERT(false, "substr pos out of range");
                 pos = v.size();
             }
             return v.substr(pos, count);
@@ -1413,7 +1498,7 @@ FDF_EXPORT namespace fdf
         // Edits
         constexpr String& assign(std::string_view value) noexcept
         {
-            assert(value.size() <= max_size() && "String size overflow");
+            FDF_ASSERT(value.size() <= max_size(), "String size overflow");
             if(AliasesBlock(value))
             {
                 const size_t sourceOffset = static_cast<size_t>(value.data() - data());
@@ -1445,7 +1530,7 @@ FDF_EXPORT namespace fdf
             const size_t sourceOffset = bAliasesBlock? static_cast<size_t>(value.data() - data()) : 0;
             const size_t oldSize = size();
             const size_t newSize = oldSize + value.size();
-            assert(newSize <= max_size() && "String size overflow");
+            FDF_ASSERT(newSize <= max_size(), "String size overflow");
             if(newSize > Capacity())
                 Grow(static_cast<uint32_t>(newSize));
             const char* const source = bAliasesBlock? data() + sourceOffset : value.data();
@@ -1458,7 +1543,7 @@ FDF_EXPORT namespace fdf
 
         constexpr String& append(const char* first, const char* last) noexcept
         {
-            assert(first <= last);
+            FDF_ASSERT(first <= last);
             return append(std::string_view(first, static_cast<size_t>(last - first)));
         }
 
@@ -1470,7 +1555,7 @@ FDF_EXPORT namespace fdf
         constexpr void push_back(char c) noexcept  { (void)append(std::string_view(&c, 1)); }
         constexpr void pop_back() noexcept
         {
-            assert(!empty() && "pop_back on empty String");
+            FDF_ASSERT(!empty(), "pop_back on empty String");
             const uint32_t newSize = static_cast<uint32_t>(size()) - 1;
             StoreU32(0, newSize);
             ptr[HEADER_SIZE + newSize] = '\0';
@@ -1481,7 +1566,7 @@ FDF_EXPORT namespace fdf
 
         constexpr String& insert(size_t pos, std::string_view value) noexcept
         {
-            assert(pos <= size() && "insert pos out of range");
+            FDF_ASSERT(pos <= size(), "insert pos out of range");
             if(value.empty())
                 return *this;
             if(AliasesBlock(value))
@@ -1491,7 +1576,7 @@ FDF_EXPORT namespace fdf
             }
             const size_t oldSize = size();
             const size_t newSize = oldSize + value.size();
-            assert(newSize <= max_size() && "String size overflow");
+            FDF_ASSERT(newSize <= max_size(), "String size overflow");
             if(newSize > Capacity())
                 Grow(static_cast<uint32_t>(newSize));
             for(size_t i = oldSize; i > pos; i--)
@@ -1505,12 +1590,12 @@ FDF_EXPORT namespace fdf
 
         constexpr String& insert(size_t pos, size_t count, char ch) noexcept
         {
-            assert(pos <= size() && "insert pos out of range");
+            FDF_ASSERT(pos <= size(), "insert pos out of range");
             if(count == 0)
                 return *this;
             const size_t oldSize = size();
             const size_t newSize = oldSize + count;
-            assert(newSize <= max_size() && "String size overflow");
+            FDF_ASSERT(newSize <= max_size(), "String size overflow");
             if(newSize > Capacity())
                 Grow(static_cast<uint32_t>(newSize));
             for(size_t i = oldSize; i > pos; i--)
@@ -1524,7 +1609,7 @@ FDF_EXPORT namespace fdf
 
         constexpr String& erase(size_t pos = 0, size_t count = npos) noexcept
         {
-            assert(pos <= size() && "erase pos out of range");
+            FDF_ASSERT(pos <= size(), "erase pos out of range");
             const size_t oldSize = size();
             const size_t removed = std::min(count, oldSize - pos);
             for(size_t i = pos + removed; i < oldSize; i++)
@@ -1540,7 +1625,7 @@ FDF_EXPORT namespace fdf
 
         constexpr String& replace(size_t pos, size_t count, std::string_view value) noexcept
         {
-            assert(pos <= size() && "replace pos out of range");
+            FDF_ASSERT(pos <= size(), "replace pos out of range");
             if(AliasesBlock(value))
             {
                 String temp(value);
@@ -1551,7 +1636,7 @@ FDF_EXPORT namespace fdf
             const size_t tailStart = pos + removed;
             const size_t tailLen = oldSize - tailStart;
             const size_t newSize = oldSize - removed + value.size();
-            assert(newSize <= max_size() && "String size overflow");
+            FDF_ASSERT(newSize <= max_size(), "String size overflow");
             if(newSize > Capacity())
                 Grow(static_cast<uint32_t>(newSize));
             if(value.size() > removed)
@@ -1576,13 +1661,13 @@ FDF_EXPORT namespace fdf
 
         constexpr String& replace(size_t pos, size_t count, size_t replacementCount, char ch) noexcept
         {
-            assert(pos <= size() && "replace pos out of range");
+            FDF_ASSERT(pos <= size(), "replace pos out of range");
             const size_t oldSize = size();
             const size_t removed = std::min(count, oldSize - pos);
             const size_t tailStart = pos + removed;
             const size_t tailLen = oldSize - tailStart;
             const size_t newSize = oldSize - removed + replacementCount;
-            assert(newSize <= max_size() && "String size overflow");
+            FDF_ASSERT(newSize <= max_size(), "String size overflow");
             if(newSize > Capacity())
                 Grow(static_cast<uint32_t>(newSize));
             if(replacementCount > removed)
@@ -1616,7 +1701,7 @@ FDF_EXPORT namespace fdf
 
         constexpr void resize(size_t n, char ch = ' ') noexcept
         {
-            assert(n <= max_size() && "String size overflow");
+            FDF_ASSERT(n <= max_size(), "String size overflow");
             const size_t oldSize = size();
             if(n > Capacity())
                 Grow(static_cast<uint32_t>(n));
@@ -1631,7 +1716,7 @@ FDF_EXPORT namespace fdf
 
         constexpr void reserve(size_t newCapacity) noexcept
         {
-            assert(newCapacity <= max_size() && "String capacity overflow");
+            FDF_ASSERT(newCapacity <= max_size(), "String capacity overflow");
             if(newCapacity > Capacity())
                 Grow(static_cast<uint32_t>(newCapacity));
         }
@@ -1683,10 +1768,10 @@ FDF_EXPORT namespace fdf
 
         constexpr char* AppendUninitialized(size_t count) noexcept
         {
-            assert(count != 0 && "Cannot append an empty uninitialized range");
+            FDF_ASSERT(count != 0, "Cannot append an empty uninitialized range");
             const size_t oldSize = size();
             const size_t newSize = oldSize + count;
-            assert(newSize <= max_size() && "String size overflow");
+            FDF_ASSERT(newSize <= max_size(), "String size overflow");
             if(newSize > Capacity())
                 Grow(static_cast<uint32_t>(newSize));
             StoreU32(0, static_cast<uint32_t>(newSize));
@@ -1703,7 +1788,7 @@ FDF_EXPORT namespace fdf
 
     constexpr void Timestamp::AppendTo(String& out, const bool bUppercase) const noexcept
     {
-        assert(IsValid() && "Writer requires a valid Timestamp");
+        FDF_ASSERT(IsValid(), "Writer requires a valid Timestamp");
         if(bHasDate)
         {
             AppendPadded(out, year, 4);
@@ -2071,7 +2156,7 @@ FDF_EXPORT namespace fdf
                 else if(current->parent && current->parent->type == Type::Array)
                 {
                     const uint32_t index = current->parent->FindChildIndex(*current);
-                    assert(index != detail::UINT32_MAX_VALUE && "Index must be valid!");
+                    FDF_ASSERT(index != detail::UINT32_MAX_VALUE, "Index must be valid!");
                     uint32_t remaining = index;
                     uint8_t digitCount = 1;
                     while(remaining >= 10)
@@ -2092,7 +2177,7 @@ FDF_EXPORT namespace fdf
                 }
                 else
                 {
-                    assert(false && "Only array elements may have an empty identifier");
+                    FDF_ASSERT(false, "Only array elements may have an empty identifier");
                     result.clear();
                     return result;
                 }
@@ -3419,7 +3504,7 @@ namespace fdf::detail
             }
 
             Chunk* newChunk = new (std::nothrow) Chunk();
-            assert(newChunk && "Allocation shouldn't fail");
+            FDF_ASSERT(newChunk, "Allocation shouldn't fail");
             newChunk->next = head;
             head = newChunk;
             return newChunk->Allocate();
@@ -3601,7 +3686,7 @@ namespace fdf::detail
             if constexpr(FDF_DISABLE_SLAB_ALLOCATOR)
             {
                 void* p = ::operator new(size, std::nothrow);
-                assert(p && "Allocation shouldn't fail");
+                FDF_ASSERT(p, "Allocation shouldn't fail");
                 return { p, size };
             }
             else
@@ -3609,7 +3694,7 @@ namespace fdf::detail
                 if(size > MAX_BUCKET)
                 {
                     void* p = ::operator new(size, std::nothrow);
-                    assert(p && "Allocation shouldn't fail");
+                    FDF_ASSERT(p, "Allocation shouldn't fail");
                     return { p, size };
                 }
 
@@ -3646,7 +3731,7 @@ namespace fdf::detail
             if constexpr(FDF_DISABLE_SLAB_ALLOCATOR)
             {
                 void* p = ::operator new(size, std::nothrow);
-                assert(p && "Allocation shouldn't fail");
+                FDF_ASSERT(p, "Allocation shouldn't fail");
                 return p;
             }
             else if constexpr(BucketFor(size) <= MAX_BUCKET)
@@ -3654,7 +3739,7 @@ namespace fdf::detail
             else
             {
                 void* p = ::operator new(size, std::nothrow);
-                assert(p && "Allocation shouldn't fail");
+                FDF_ASSERT(p, "Allocation shouldn't fail");
                 return p;
             }
         }
@@ -3720,13 +3805,13 @@ namespace fdf::detail
         [[nodiscard]] static constexpr TypedAllocationResult<T> Allocate(const uint32_t requestedCapacity, const uint32_t liveCount) noexcept
         {
             ValidateStorageType<T>();
-            assert(liveCount <= requestedCapacity);
+            FDF_ASSERT(liveCount <= requestedCapacity);
             if(requestedCapacity == 0)
                 return { nullptr, 0 };
 
             if constexpr(std::is_same_v<T, Entry>)
             {
-                assert(requestedCapacity == 1 && liveCount == 1);
+                FDF_ASSERT(requestedCapacity == 1 && liveCount == 1);
                 return { Create<T>(), 1 };
             }
 
@@ -3776,7 +3861,7 @@ namespace fdf::detail
 
             if constexpr(std::is_same_v<T, Entry>)
             {
-                assert(liveCount == 1 && allocatedCapacity == 1);
+                FDF_ASSERT(liveCount == 1 && allocatedCapacity == 1);
                 Destroy<T>(ptr);
             }
             else
@@ -3792,8 +3877,7 @@ namespace fdf::detail
                 }
                 else
                 {
-                    (void)Deallocate(static_cast<void*>(ptr),
-                        static_cast<size_t>(allocatedCapacity) * sizeof(T));
+                    (void)Deallocate(static_cast<void*>(ptr), static_cast<size_t>(allocatedCapacity) * sizeof(T));
                 }
             }
         }
@@ -3801,7 +3885,7 @@ namespace fdf::detail
         template<typename T>
         static constexpr void Allocate(Entry& entry, const uint32_t count) noexcept
         {
-            assert(entry.size == 0 && entry.capacity == 0 && "Release existing storage before allocating");
+            FDF_ASSERT(entry.size == 0 && entry.capacity == 0, "Release existing storage before allocating");
             const TypedAllocationResult<T> allocation = Allocate<T>(count);
             SetData<T>(entry, allocation.ptr);
             entry.size = count;
@@ -4004,10 +4088,10 @@ namespace fdf::detail
 
         [[nodiscard]] constexpr bool empty() const noexcept  { return size_ == 0; }
         [[nodiscard]] constexpr size_t size() const noexcept  { return size_; }
-        [[nodiscard]] constexpr T& back() noexcept  { assert(size_ > 0); return data[size_ - 1]; }
-        [[nodiscard]] constexpr const T& back() const noexcept  { assert(size_ > 0); return data[size_ - 1]; }
-        [[nodiscard]] constexpr T& operator[](size_t index) noexcept  { assert(index < size_); return data[index]; }
-        [[nodiscard]] constexpr const T& operator[](size_t index) const noexcept  { assert(index < size_); return data[index]; }
+        [[nodiscard]] constexpr T& back() noexcept  { FDF_ASSERT(size_ > 0); return data[size_ - 1]; }
+        [[nodiscard]] constexpr const T& back() const noexcept  { FDF_ASSERT(size_ > 0); return data[size_ - 1]; }
+        [[nodiscard]] constexpr T& operator[](size_t index) noexcept  { FDF_ASSERT(index < size_); return data[index]; }
+        [[nodiscard]] constexpr const T& operator[](size_t index) const noexcept  { FDF_ASSERT(index < size_); return data[index]; }
 
         template<typename... Args>
         constexpr T& emplace_back(Args&&... args) noexcept
@@ -4024,14 +4108,14 @@ namespace fdf::detail
 
         constexpr void pop_back() noexcept
         {
-            assert(size_ > 0);
+            FDF_ASSERT(size_ > 0);
             size_--;
             std::destroy_at(data + size_);
         }
 
         constexpr void erase(size_t index) noexcept
         {
-            assert(index < size_);
+            FDF_ASSERT(index < size_);
             for(size_t i = index; i + 1 < size_; i++)
                 data[i] = std::move(data[i + 1]);
             pop_back();
@@ -4432,7 +4516,7 @@ namespace fdf
 
     constexpr void String::Grow(uint32_t minCapacity) noexcept
     {
-        assert(minCapacity <= max_size() && "String capacity overflow");
+        FDF_ASSERT(minCapacity <= max_size(), "String capacity overflow");
         uint32_t newCapacity = Capacity() * 2;
         if(newCapacity < minCapacity)
             newCapacity = minCapacity;
@@ -4576,7 +4660,7 @@ namespace fdf
 
     constexpr uint32_t Entry::FindChildIndex(const Entry& e) const noexcept
     {
-        assert(IsContainer() && "You can only find index, if it's a container!");
+        FDF_ASSERT(IsContainer(), "You can only find index, if it's a container!");
         Entry* const* children = data.e;
         for(uint32_t i = 0; i < size; i++)
         {
@@ -4588,7 +4672,7 @@ namespace fdf
 
     constexpr uint32_t Entry::FindChildIndex(const std::string_view _identifier) const noexcept
     {
-        assert(IsContainer() && "You can only find index, if it's a container!");
+        FDF_ASSERT(IsContainer(), "You can only find index, if it's a container!");
         Entry* const* children = data.e;
         for(uint32_t i = 0; i < size; i++)
         {
@@ -4600,7 +4684,7 @@ namespace fdf
 
     constexpr Entry* Entry::Emplace(std::string_view _identifier) noexcept
     {
-        assert(IsContainer() && "Sanity check!");
+        FDF_ASSERT(IsContainer(), "Sanity check!");
 
         if(type == Type::Map && !detail::IsValidIdentifier(_identifier))
             return nullptr;
@@ -4648,9 +4732,9 @@ namespace fdf
                         while(e->GetChildCount() > 0)
                         {
                             UniqueEntryPtr child = e->OrphanChild(0U);
-                            assert(child && "a non-empty container must orphan its first child");
+                            FDF_ASSERT(child, "a non-empty container must orphan its first child");
                             [[maybe_unused]] const Entry* added = found->AddChild(child, policy);
-                            assert(added && "an orphaned child must be addable during a recursive merge");
+                            FDF_ASSERT(added, "an orphaned child must be addable during a recursive merge");
                         }
                         e.reset();
                         return found;
@@ -4682,7 +4766,7 @@ namespace fdf
         // parent only on the append path, a parented duplicate would leave ~Entry chasing an orphan
         e->parent = this;
 
-        assert(size <= capacity && "size must never exceed capacity");
+        FDF_ASSERT(size <= capacity, "size must never exceed capacity");
         if(size == capacity)
             detail::GlobalAllocator::Reserve<Entry*>(*this, size + 1);
 
@@ -4907,13 +4991,13 @@ namespace fdf
 
     constexpr std::span<Entry*> Entry::GetChildren_INTERNAL() noexcept
     {
-        assert(IsContainer() && "Unchecked child access requires a container");
+        FDF_ASSERT(IsContainer(), "Unchecked child access requires a container");
 
         return {data.e, size};
     }
     constexpr std::span<const Entry*> Entry::GetChildren_INTERNAL() const noexcept
     {
-        assert(IsContainer() && "Unchecked child access requires a container");
+        FDF_ASSERT(IsContainer(), "Unchecked child access requires a container");
 
         return {const_cast<const Entry**>(const_cast<Entry*>(this)->data.e), size};
     }
@@ -5572,7 +5656,7 @@ namespace fdf
                 if(value.data() != data.h + sourceOffset)
                     continue;
 
-                assert(value.size() <= size - sourceOffset);
+                FDF_ASSERT(value.size() <= size - sourceOffset);
                 const uint32_t count = static_cast<uint32_t>(value.size());
                 for(uint32_t i = 0; i < count; i++)
                     data.h[i] = std::move(data.h[sourceOffset + i]);
@@ -5903,10 +5987,9 @@ namespace fdf
         while(other->GetChildCount() > 0)
         {
             UniqueEntryPtr child = other->OrphanChild(0U);
-            assert(child && "a non-empty container must orphan its first child");
+            FDF_ASSERT(child, "a non-empty container must orphan its first child");
             [[maybe_unused]] const Entry* added = AddChild(child, policy);
-            assert((added || policy == DuplicateKeyPolicy::Reject)
-                && "an orphaned child must be addable unless Reject refused it");
+            FDF_ASSERT(added || policy == DuplicateKeyPolicy::Reject, "an orphaned child must be addable unless Reject refused it");
         }
         other.reset();
         return true;
@@ -6104,8 +6187,12 @@ namespace fdf
         std::filesystem::path tempPath;
         for(uint32_t attempt = 0; attempt < 1024; attempt++)
         {
+            String suffix(".");
+            detail::AppendUInt(suffix, attempt);
+            suffix.append(".tmp");
+
             std::filesystem::path candidate = filepath;
-            candidate += std::format(".{}.tmp", attempt);
+            candidate += std::string_view(suffix);
             const bool bTaken = std::filesystem::exists(candidate, ec);
             if(ec)
                 return false;
@@ -6224,7 +6311,7 @@ namespace fdf::detail
         Entry* entry = _temp.get();
         if(parent.type == Type::Map)
         {
-            assert(tokenizer.Current().type == TokenType::Atom && "Sanity check!");
+            FDF_ASSERT(tokenizer.Current().type == TokenType::Atom, "Sanity check!");
             if(!entry->SetIdentifier(tokenizer.ToView(currentToken)))
             {
                 Diagnose(DiagnosticSeverity::Error, DiagnosticType::InvalidIdentifier, tokenizer, currentToken, sink);
@@ -6286,7 +6373,7 @@ namespace fdf::detail
 
         // _temp is freshly created, unparented and cannot be an ancestor, and parent is a
         // container, so AddChild's guards are all unreachable here and only a duplicate key fails
-        assert(_temp && !_temp->parent && parent.IsContainer() && "only a duplicate key may fail this insert");
+        FDF_ASSERT(_temp && !_temp->parent && parent.IsContainer(), "only a duplicate key may fail this insert");
         if(parent.AddChild(_temp, DuplicateKeyPolicy::Reject))
             return true;
 
@@ -6298,7 +6385,7 @@ namespace fdf::detail
     template<typename SINK>
     [[nodiscard]] constexpr bool ParseSimpleValue(Tokenizer& tokenizer, Entry& entry FDF_COMMENT_SWITCH(, Token comment), SINK& sink) noexcept
     {
-        assert(IsValueLiteral(tokenizer.Current().type) && "Sanity check!");
+        FDF_ASSERT(IsValueLiteral(tokenizer.Current().type), "Sanity check!");
 
         Token currentToken = tokenizer.Current();
         const Token valueToken = currentToken;  // start of the value, used for diagnostics
@@ -6411,20 +6498,20 @@ namespace fdf::detail
 
             [[nodiscard]] constexpr std::string_view Next() noexcept
             {
-                assert(remaining > 0 && IsValueLiteral(tokenizer.Current().type));
+                FDF_ASSERT(remaining > 0 && IsValueLiteral(tokenizer.Current().type));
                 const std::string_view result = tokenizer.ToView(tokenizer.Current());
                 remaining--;
                 if(remaining > 0)
                 {
                     [[maybe_unused]] const Token pipe = tokenizer.Advance();
-                    assert(pipe.type == TokenType::Pipe);
+                    FDF_ASSERT(pipe.type == TokenType::Pipe);
                     [[maybe_unused]] const Token component = tokenizer.Advance();
-                    assert(IsValueLiteral(component.type));
+                    FDF_ASSERT(IsValueLiteral(component.type));
                 }
                 return result;
             }
         };
-        auto makeComponentReader = [&]() { return ComponentReader{ componentStart, componentCount }; };
+        auto makeComponentReader = [&]()  { return ComponentReader{ componentStart, componentCount }; };
 
         // packs need a common component type
         if(componentCount > 1 && !bAllBool && !bAllNumeric && !bAllString && !bAllHex && !bAllVersion && !bAllTimestamp && !bAllDuration)
@@ -6633,7 +6720,7 @@ namespace fdf::detail
             {
                 const std::string_view literal = componentReader.Next();
                 dest[i].reserve(literal.size() - 2);   // decoded length <= literal length minus the quotes
-                DecodeStringLiteral(literal, [&](char c) { dest[i].push_back(c); });
+                DecodeStringLiteral(literal, [&](char c)  { dest[i].push_back(c); });
             }
 
             return postProcess();
@@ -6732,7 +6819,7 @@ namespace fdf::detail
     {
         static_assert(CONTAINER_TYPE == Type::Array || CONTAINER_TYPE == Type::Map);
         constexpr TokenType CLOSE_TOKEN = CONTAINER_TYPE == Type::Array? TokenType::SquareBraceClose : TokenType::CurlyBraceClose;
-        assert(tokenizer.Current().type == (CONTAINER_TYPE == Type::Array? TokenType::SquareBraceOpen : TokenType::CurlyBraceOpen) && "Sanity check!");
+        FDF_ASSERT(tokenizer.Current().type == (CONTAINER_TYPE == Type::Array? TokenType::SquareBraceOpen : TokenType::CurlyBraceOpen), "Sanity check!");
 
         container.type = CONTAINER_TYPE;
 
@@ -6886,7 +6973,7 @@ FDF_EXPORT namespace fdf
         using namespace detail;
 
         String buffer;
-        assert((root.GetIdentifierSize() != 0 || (root.type == Type::Map && !root.parent)) && "Unless it's a map, it must have an identifier");
+        FDF_ASSERT((root.GetIdentifierSize() != 0 || (root.type == Type::Map && !root.parent)), "Unless it's a map, it must have an identifier");
 
         static constexpr bool CHECK_SINGLE_LINE = STYLE.singleLineContainerLimit > 5;
         detail::Vector<ScopePositions<CHECK_SINGLE_LINE>> scopes;
@@ -7044,12 +7131,12 @@ FDF_EXPORT namespace fdf
             // short scalar comments are inline, others get a leading line
             const std::string_view entryComment = STYLE.bEntryComment? std::string_view(e.GetComment()) : std::string_view{};
             size_t commentSize = 0;
-            detail::NormalizeComment(entryComment, [&](char) { commentSize++; });
+            detail::NormalizeComment(entryComment, [&](char)  { commentSize++; });
             const bool bInlineComment = commentSize != 0 && !e.IsContainer() && commentSize <= STYLE.singleLineCommentLimit;
             if(commentSize != 0 && !bInlineComment)
             {
                 String text;
-                detail::NormalizeComment(entryComment, [&](char c) { text.push_back(c); });
+                detail::NormalizeComment(entryComment, [&](char c)  { text.push_back(c); });
 
                 const size_t indent = static_cast<size_t>(depth) * STYLE.tabSize;
                 const size_t available = STYLE.singleLineCommentLimit > indent + 3
@@ -7130,7 +7217,7 @@ FDF_EXPORT namespace fdf
                 {
                     buffer.push_back(detail::COMMENT_PADDING_MARKER);
                     buffer.append("// ");
-                    detail::NormalizeComment(entryComment, [&](char c) { buffer.push_back(c); });
+                    detail::NormalizeComment(entryComment, [&](char c)  { buffer.push_back(c); });
                 }
             #endif
                 buffer.push_back('\n');
@@ -7471,7 +7558,7 @@ FDF_EXPORT namespace fdf
                         if(marker == groupStart)
                             break;
                         marker = findPreviousMarker(marker - 1, groupStart);
-                        assert(marker != String::npos && marker >= groupStart);
+                        FDF_ASSERT(marker != String::npos && marker >= groupStart);
                     }
                     groupStart = findMarker(groupStart + 1);
                 }

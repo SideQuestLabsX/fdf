@@ -8,6 +8,8 @@ option(FDF_DISABLE_SLAB_ALLOCATOR          "Bypass slab allocation and use opera
 option(FDF_ENABLE_ASAN                     "Enable AddressSanitizer (bundles LeakSanitizer on Linux)" OFF)
 option(FDF_ENABLE_LSAN                     "Enable standalone LeakSanitizer (non-MSVC)" OFF)
 option(FDF_BUILD_FUZZERS                   "Build the libFuzzer targets (Clang only)" OFF)
+set(FDF_ASSERTIONS "auto" CACHE STRING "Library assertions: auto (follow NDEBUG), on, off")
+set_property(CACHE FDF_ASSERTIONS PROPERTY STRINGS auto on off)
 
 
 project(fdf VERSION 0.1.0 LANGUAGES CXX)
@@ -59,6 +61,11 @@ if(FDF_USE_CPP_MODULES)
             TYPE CXX_MODULES
             FILES src/fdf.ixx
     )
+    # FDF_ASSERT's optional message uses __VA_OPT__, which MSVC honors only in conforming mode
+    if(MSVC)
+        target_compile_options(fdf PUBLIC /Zc:preprocessor)
+    endif()
+
     target_compile_definitions(fdf PUBLIC FDF_USE_CPP_MODULES=true)
     target_compile_definitions(fdf PUBLIC FDF_NO_COMMENTS=$<IF:$<BOOL:${FDF_NO_COMMENTS}>,true,false>)
     target_compile_definitions(fdf PUBLIC FDF_EXTENDED_NO_COMMENT_IDENTIFIERS=$<IF:$<BOOL:${FDF_EXTENDED_NO_COMMENT_IDENTIFIERS}>,true,false>)
@@ -69,11 +76,33 @@ else()
     target_include_directories(fdf INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_sources(fdf INTERFACE include/fdf.h)
 
+    # FDF_ASSERT's optional message uses __VA_OPT__, which MSVC honors only in conforming mode
+    if(MSVC)
+        target_compile_options(fdf INTERFACE /Zc:preprocessor)
+    endif()
+
     target_compile_definitions(fdf INTERFACE FDF_USE_CPP_MODULES=false)
     target_compile_definitions(fdf INTERFACE FDF_NO_COMMENTS=$<IF:$<BOOL:${FDF_NO_COMMENTS}>,true,false>)
     target_compile_definitions(fdf INTERFACE FDF_EXTENDED_NO_COMMENT_IDENTIFIERS=$<IF:$<BOOL:${FDF_EXTENDED_NO_COMMENT_IDENTIFIERS}>,true,false>)
     target_compile_definitions(fdf INTERFACE FDF_DISABLE_SLAB_ALLOCATOR=$<IF:$<BOOL:${FDF_DISABLE_SLAB_ALLOCATOR}>,true,false>)
 
+endif()
+
+
+if(NOT FDF_ASSERTIONS STREQUAL "auto")
+    if(FDF_ASSERTIONS STREQUAL "on")
+        set(FDF_ASSERTIONS_VALUE true)
+    elseif(FDF_ASSERTIONS STREQUAL "off")
+        set(FDF_ASSERTIONS_VALUE false)
+    else()
+        message(FATAL_ERROR "FDF_ASSERTIONS must be auto, on or off (got '${FDF_ASSERTIONS}')")
+    endif()
+
+    if(FDF_USE_CPP_MODULES)
+        target_compile_definitions(fdf PUBLIC FDF_ASSERTIONS=${FDF_ASSERTIONS_VALUE})
+    else()
+        target_compile_definitions(fdf INTERFACE FDF_ASSERTIONS=${FDF_ASSERTIONS_VALUE})
+    endif()
 endif()
 
 

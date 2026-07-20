@@ -286,6 +286,8 @@ Deliberate differences from `std::string`:
 - All operations are `noexcept`. Out-of-range access asserts, so there is no `at()`.
 - Sizes are `size_t` on the interface, storage stays `uint32_t`, so a size past 4GB asserts.
   `npos` is `std::string_view::npos`.
+  A failed size check prints to stderr and aborts when `FDF_ASSERTIONS` is on. See
+  [Building](Building.md#options).
 - No allocator API, `shrink_to_fit` or SSO. Slab buckets would make `shrink_to_fit` a no-op anyway.
 - Free `operator+` covers every `String`/`string_view`/`char` mix. The `String&&` overloads reuse
   the rvalue operand and may reuse its allocation when capacity permits.

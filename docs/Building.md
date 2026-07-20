@@ -30,13 +30,21 @@ ctest --test-dir build --verbose
 
 ## Options
 
-All options default to `OFF`.
+All options default to `OFF`, except `FDF_ASSERTIONS` which defaults to `auto`.
 
-| Option | What it does |
-|--------|--------------|
-| `FDF_USE_CPP_MODULES` | build the `fdf` C++ module |
-| `FDF_NO_COMMENTS` | drop comment storage for a smaller node |
+| Option | What it does                                                           |
+|--------|------------------------------------------------------------------------|
+| `FDF_USE_CPP_MODULES` | build the `fdf` C++ module                                             |
+| `FDF_ASSERTIONS` | contract checks for misuse and sanity: `auto`, `on` or `off`           |
+| `FDF_NO_COMMENTS` | drop comment storage for a smaller node                                |
 | `FDF_EXTENDED_NO_COMMENT_IDENTIFIERS` | with comments off, raise the identifier limit from 30 to 38 characters |
 | `FDF_DISABLE_SLAB_ALLOCATOR` | use one `operator new` allocation per object for sanitizer diagnostics |
-| `FDF_ENABLE_ASAN` | enable AddressSanitizer (includes leak detection on Linux) |
-| `FDF_ENABLE_LSAN` | enable standalone LeakSanitizer where supported |
+| `FDF_ENABLE_ASAN` | enable AddressSanitizer (includes leak detection on Linux)             |
+| `FDF_ENABLE_LSAN` | enable standalone LeakSanitizer where supported                        |
+
+`FDF_ASSERTIONS` controls checks for misuse and sanity. The `auto` setting follows
+`NDEBUG`. The `on` and `off` settings override it. A failed check prints to stderr and aborts.
+Without CMake, define it to `true` or `false` before including the header.
+
+MSVC needs `/Zc:preprocessor`. The CMake target adds it; a direct `cl` invocation has to pass it,
+and the header reports a missing flag as an error rather than a macro syntax failure.

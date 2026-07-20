@@ -3,12 +3,13 @@ module;
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <cassert>
 #include <cctype>
 #include <charconv>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <fstream>
