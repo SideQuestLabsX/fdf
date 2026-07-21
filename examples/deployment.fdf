@@ -1,0 +1,34 @@
+service
+{
+    name = "catalog-api"
+    version = 2.3.1
+    image = "registry.example.com/catalog:2.3.1"
+    replicas = 3
+}
+
+resources
+{
+    cpuCores = 0.5
+    memoryMb = 512
+}
+
+network
+{
+    port = 8080
+    public = true
+
+    healthCheck
+    {
+        path = "/health"
+        interval = 15s
+        timeout = 2s
+    }
+}
+
+regions[ "eu-west-1", "us-east-1" ]
+
+environment
+{
+    LOG_LEVEL = "info"
+    CACHE_TTL = 10m
+}

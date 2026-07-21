@@ -1,0 +1,30 @@
+locale = "es-ES"
+fallback = "en-US"
+updatedAt = 2026-07-21T12:00:00Z
+
+navigation
+{
+    home = "Inicio"
+    search = "Buscar"
+    settings = "Configuración"
+}
+
+account
+{
+    greeting = "¡Hola, {name}!"
+    signIn = "Iniciar sesión"
+    signOut = "Cerrar sesión"
+}
+
+cart
+{
+    empty = "Tu carrito está vacío"
+    oneItem = "Hay un producto en tu carrito"
+    manyItems = "Hay {count} productos en tu carrito"
+}
+
+errors
+{
+    offline = "Comprueba tu conexión a internet"
+    unknown = "Se produjo un error inesperado"
+}

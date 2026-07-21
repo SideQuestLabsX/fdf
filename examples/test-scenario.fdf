@@ -1,0 +1,40 @@
+name = "Create an order"
+timeout = 5s
+
+request
+{
+    method = "POST"
+    path = "/v1/orders"
+
+    headers
+    [
+        { name = "Content-Type", value = "application/json" }
+        { name = "X-Request-ID", value = "req-1842" }
+    ]
+
+    body
+    {
+        customerId = 418
+        productIds = 72|91
+        signature = 0x2F47A1C9
+    }
+}
+
+expectedResponse
+{
+    status = 201
+
+    body
+    {
+        orderId = "ord-9001"
+        state = "pending"
+        totalCents = 2499
+        createdAt = 2026-07-21T14:32:10Z
+    }
+}
+
+assertions
+[
+    { path = "body.state", equals = "pending" }
+    { path = "body.totalCents", equals = 2499 }
+]

@@ -1,0 +1,34 @@
+title = "Launch Trailer"
+resolution = 3840|2160
+frameRate = 30.0
+duration = 45s
+
+tracks
+[
+    {
+        name = "Picture"
+        kind = "video"
+
+        clips
+        [
+            { source = "opening.mp4", start = 0s, sourceIn = 2s, duration = 12s }
+            { source = "demo.mp4", start = 12s, sourceIn = 18.5s, duration = 28s }
+            { source = "logo.mp4", start = 40s, sourceIn = 0s, duration = 5s }
+        ]
+    }
+    {
+        name = "Soundtrack"
+        kind = "audio"
+
+        clips
+        [
+            { source = "launch-theme.wav", start = 0s, sourceIn = 5s, duration = 45s }
+        ]
+    }
+]
+
+markers
+[
+    { at = 12s, label = "Product reveal" }
+    { at = 40s, label = "End card" }
+]

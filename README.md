@@ -27,28 +27,28 @@ items
 
 - Header only (with C++ modules support)
 - Human first design
-- Comments preserved, read and write them through the API
-- A lot of built-in types (timestamp, hex, ...)
-- Round-trip guarantee
-- Extensive styling options
-- fully constexpr
+- Comments are preserved and exposed through the API
+- Built-in types (Hex, Version, Timestamp, Duration)
+- Extensive styling options with predictable output and clean diffs
+- Fully constexpr
+- CLI validator and editor syntax highlighting
 
 ## Quick start
 
-Header-only, drop [`include/fdf.h`](include/fdf.h) on your include path and include it
+Add [`include/fdf.h`](include/fdf.h) to your include path and include it.
 
 ### Reading
 
 ```cpp
 #include "fdf.h"
 
-fdf::UniqueEntryPtr root = fdf::ParseFile("config.fdf");
+fdf::UniqueEntryPtr root = fdf::ParseFile("examples/config.fdf");
 if(root)
 {
-    auto name  = root->GetChild("name")->GetValue<fdf::String>();
-    auto title = root->GetChild("window.title")->GetValue<fdf::String>();
+    auto name  = root->GetChild("appName")->GetValue<fdf::String>();  // "MyGame"
+    auto vsync = root->GetChild("graphics.vsync")->GetValue<bool>();  // false
 
-    root->ForEach<fdf::ForEachFlags::Recursive>([](const fdf::Entry& e)
+    root->ForEach<fdf::ForEachFlags::Recursive>([](const fdf::Entry&)
     {
         // visit every node
     });
@@ -72,8 +72,8 @@ if(fdf::Entry* arr = root->Emplace("levels"))
     arr->Emplace("")->SetValue(2);
 }
 
-fdf::WriteFile(*root, "out.fdf");                                  // default style
-fdf::WriteFile<fdf::Style{ .bCommas = false }>(*root, "out.fdf");  // tweak the style
+fdf::WriteFile(*root, "out.fdf");
+fdf::WriteFile<fdf::Style{ .bCommas = false }>(*root, "out.fdf");
 ```
 
 ### At compile time
@@ -95,19 +95,33 @@ cmake --build build
 ctest --test-dir build --verbose
 ```
 
+## Checking files
+
+`fdf-validate` parses files and reports diagnostics. Build it with CMake or download a release
+binary:
+
+```sh
+cmake --build build --target fdf_validate
+./build/tools/fdf-validate --round-trip examples/config.fdf
+```
+
+It returns 0 for success, 1 for invalid or unreadable input and 2 for bad usage.
+
+Releases include Linux and Windows validator binaries plus editor packages for VS Code, Sublime
+Text, JetBrains IDEs and TextMate. See [`editors/`](editors/README.md) for installation. The
+`fdf-<version>.zip` archive bundles them with the header, module source and license.
+
 ## Docs
 
 - [`docs/`](docs/README.md) is the reference, split by topic (syntax, types, API, styling, ...)
 - [`examples/`](examples/README.md) is a set of real, tested fdf files to copy from
 
-## Down the road
-
-Rough ideas, nothing set in stone
+## Ideas for later
 
 - A compact binary representation for embedding and network transfer
-- C++26 reflection to serialize from/to C++ structs
-- Validating a file against an expected shape, ideally with C++26 reflection too
-- Syntax highlighting (maybe LSP reusing the parser and writer)
+- C++26 reflection-based conversion between FDF and C++ structs
+- Validating a file against an expected shape
+- An LSP for editor diagnostics
 
 ## License
 

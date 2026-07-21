@@ -1,0 +1,23 @@
+source = "textures/environment/cliff_albedo.png"
+kind = "texture2D"
+importedAt = 2026-07-21T09:45:12Z
+contentHash = 0x8F21A4D709E37C65
+
+dimensions = 2048|2048
+channels = 4
+colorSpace = "sRGB"
+
+compression
+{
+    desktop = "BC7"
+    mobile = "ASTC_6x6"
+    quality = 0.9
+}
+
+mipmaps
+{
+    enabled = true
+    maxLevels = 12
+}
+
+tags[ "environment", "rock", "outdoor" ]

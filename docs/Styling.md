@@ -8,7 +8,7 @@ and keep diffs small. Use a designated initializer to change individual fields, 
 | Field | Default | Effect |
 |-------|---------|--------|
 | `bUseSpacesOverTabs` / `tabSize` | `true` / `4` | indentation |
-| `bSpaceBeforeAndAfterEqualSign` | `false` | `k=v` vs `k = v` |
+| `bSpaceBeforeAndAfterEqualSign` | `true` | `k = v` vs `k=v` |
 | `bParenthesesOnNewLine` | `true` | brace on its own line |
 | `bFileComment` / `bEntryComment` | `true` | emit comments |
 | `bAlignCloseComments` | `true` | pad inline comments to a shared column |

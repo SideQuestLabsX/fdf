@@ -1,0 +1,43 @@
+assembly = "Adjustable Desk Frame"
+partNumber = "ADF-2400"
+revision = 4.2.0
+releasedAt = 2026-06-15
+units = "mm"
+
+parts
+[
+    {
+        partNumber = "LEG-800"
+        description = "Telescoping leg"
+        quantity = 2
+        material = "powder-coated steel"
+        dimensions = 80.0|60.0|650.0
+    }
+    {
+        partNumber = "BEAM-1200"
+        description = "Cross beam"
+        quantity = 1
+        material = "steel"
+        dimensions = 1200.0|50.0|30.0
+    }
+    {
+        partNumber = "CTRL-24V"
+        description = "Motor controller"
+        quantity = 1
+        material = null
+    }
+]
+
+operations
+[
+    { sequence = 10, process = "laser cutting", duration = 4m30s }
+    { sequence = 20, process = "welding", duration = 12m }
+    { sequence = 30, process = "powder coating", duration = 45m }
+    { sequence = 40, process = "final assembly", duration = 8m }
+]
+
+quality
+{
+    toleranceMm = 0.2
+    inspectionPoints[ "welds", "travel range", "load test" ]
+}

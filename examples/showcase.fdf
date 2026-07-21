@@ -1,0 +1,194 @@
+/*#
+    A broad showcase of fdf syntax.
+    Comments are intentionally verbose because each entry demonstrates a capability.
+*/
+
+
+// Scalar literals and aliases
+scalars
+{
+    enabled = true                       // Bool true
+    disabled = false                     // Bool false
+    positive = 12345                     // Positive Int
+    negative = -12345                    // Negative Int
+    groupedInt = 1_000_000               // Int digits may use separators
+    signedMax = 9223372036854775807      // Largest signed 64-bit value
+    unsignedBits = 18446744073709551615  // All 64 bits are accepted and write back as -1
+    decimal = 3.14                       // Float with a fraction
+    scientific = 1e5                     // Float with an exponent and no decimal point
+    signedExponent = -1.25e-3            // Float signs are accepted on the value and exponent
+    groupedFloat = 1_234.5_678e+1_0      // Float digit groups may use separators
+    absent = null                        // Null value
+    alsoAbsent = nil                     // Nil is an alias of null
+}
+
+
+// Single-quoted, double-quoted and escaped strings
+strings
+{
+    doubleQuoted = "text"               // Double quotes
+    singleQuoted = 'text'               // Single quotes
+    empty = ""                          // Empty string
+    doubleInsideSingle = 'Say "hello"'  // Double quotes need no escape inside single quotes
+    singleInsideDouble = "It's fine"    // Single quotes need no escape inside double quotes
+    escapedDouble = "Say \"hello\""     // Escape a matching double quote
+    escapedSingle = 'It\'s fine'        // Escape a matching single quote
+    whitespace = "line1\nline2\tend"    // Newline and tab escapes
+    backslashes = "C:\\Temp\\file.fdf"  // A doubled backslash stores one backslash
+    unknownEscape = "a\pb"              // Unknown escapes remain literal
+    pipe = "a|b"                        // A pipe inside quotes is string content
+    commentText = "// text /* text */"  // Comment markers inside quotes are string content
+    utf8 = "Montréal 日本語 🚀"         // UTF-8 passes through unchanged
+}
+
+
+// Hex is a byte string with several accepted spellings
+hexValues
+{
+    color = 0xFF5733          // Uppercase hex digits
+    lowercase = 0xff5733      // Lowercase hex digits
+    uppercasePrefix = 0XCAFE  // Uppercase prefix
+    grouped = 0xFF_57_33      // Hex digits may use separators
+    oddDigits = 0xABC         // Odd digits gain a leading zero nibble when written
+    leadingZero = 0x00FF      // Leading zero bytes are part of the value
+    emptyBytes = 0x           // Prefix alone is an empty byte string
+}
+
+
+// Versions preserve whether the optional fourth component was written
+versions
+{
+    three = 1.2.3          // Three-component Version
+    four = 1.2.3.0         // Four-component Version
+    mixed = 1.0.0|1.1.0.0  // Version packs may mix three and four components
+}
+
+
+// Dates, times and RFC 3339-profile datetimes
+timestamps
+{
+    date = 2024-12-24                           // Calendar date
+    time = 15:30:00                             // Time without a zone
+    fractionalTime = 15:30:00.123456789         // Up to nine fractional digits
+    localDateTime = 2024-12-24T15:30:00         // Datetime without a zone
+    utc = 2024-12-24T15:30:00Z                  // UTC with uppercase T and Z
+    lowercase = 2024-12-24t15:30:00z            // Lowercase t and z are accepted
+    positiveOffset = 2024-12-24T15:30:00+05:30  // Positive fixed offset
+    negativeOffset = 2024-12-24T15:30:00-08:00  // Negative fixed offset
+    unknownOffset = 2024-12-24T15:30:00-00:00   // RFC 3339 unknown local offset
+    leapSecond = 2024-12-31T23:59:60Z           // Leap second is preserved
+}
+
+
+// Durations use descending, non-repeating units
+durations
+{
+    zero = 0s                       // Zero duration
+    compound = 1h30m                // Multiple units form one value
+    fractional = 1.5h               // Fractions are accepted when nanoseconds stay whole
+    negative = -30m                 // A leading minus negates the whole duration
+    weeks = 2w                      // Weeks parse and write back as days
+    allUnits = 1w2d3h4m5s6ms7us8ns  // Every duration unit in descending order
+}
+
+
+// Packs are atomic values with uniform components
+packs
+{
+    ints = 1920|1080               // Int pack
+    floats = 1.0|0.5|-0.5          // Float pack
+    widened = 1|2.5|3              // Int components widen when mixed with Float
+    bools = true|false|true        // Bool pack
+    texts = "config"|'a|b'|"demo"  // String pack and a quoted literal pipe
+    bytes = 0xFF|0x80|0x40         // Hex pack
+    releases = 1.0.0|1.1.0.0       // Version pack
+    dates = 2024-12-24|2024-12-31  // Timestamp pack
+    timeouts = 1h|90m|1.5h         // Duration pack
+    anyLength = 1|2|3|4|5|6        // Packs have no fixed component cap
+}
+
+
+// Comments attach to the following entry or sit inline after it
+comments
+{
+    // Leading line comment
+    leading = "line"
+
+    inline = "line"  // Inline line comment
+
+    /* Compact block comment */
+    compact = "block"
+
+    /*
+        Multiline block comment
+    */
+    multiline = "block"
+}
+
+
+// Identifier whitespace and separator placement
+layout
+{
+    noSpaces=1                         // Whitespace around = is optional
+    withSpaces = 2                     // Whitespace may surround structural tokens
+    snake_case = 3                     // Underscores are valid in identifiers
+    _leadingUnderscore = 4             // An identifier may begin with underscore
+    commaSeparated = 5, nextEntry = 6  // Same-line entries require a comma
+    trailingComma = 7,                 // A trailing comma is accepted
+}
+
+
+// A complete map may stay on one line
+inlineMap{ width = 1920, height = 1080, fullscreen = true }
+
+
+// A map may use newlines without commas
+multilineMap
+{
+    width = 1920       // First map field
+    height = 1080      // Newline separates this field
+    fullscreen = true  // Last field needs no trailing comma
+}
+
+
+// Arrays may be inline when commas separate their elements
+inlineArray[ "red", "green", "blue", ]
+
+
+// Multiline arrays may omit, mix or trail commas
+multilineArray
+[
+    10      // Newline separator
+    20,     // Optional comma on its own line
+    30, 40  // Comma required between same-line elements
+    50,     // Trailing comma
+]
+
+
+// Maps and arrays can nest in either direction
+nested
+{
+    metadata{ kind = "item", active = true }  // Named inline map inside a map
+    labels[ "rare", "consumable" ]            // Named inline array inside a map
+
+    details              // Named multiline map inside a map
+    {
+        weight = 0.5     // Nested scalar
+        tint = 0x80FF40  // Nested Hex
+    }
+
+    items                            // Array of anonymous maps
+    [
+        { id = 1, name = "Potion" }  // Complete map element
+        { id = 2, name = "Elixir" }  // Another map element
+        { id = 3 }                   // An omitted field does not exist
+        { id = 4, name = null }      // Null keeps the field present
+    ]
+
+    matrix           // Array of anonymous arrays
+    [
+        [ 1, 2, 3 ]  // First row
+        [ 4, 5, 6 ]  // Second row
+        [ 7, 8, 9 ]  // Third row
+    ]
+}

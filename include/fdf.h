@@ -184,7 +184,7 @@ FDF_EXPORT namespace fdf
         // Spacing
         bool bUseSpacesOverTabs = true;
         uint8_t tabSize = 4;
-        bool bSpaceBeforeAndAfterEqualSign = false;  // 'k = v' vs 'k=v'
+        bool bSpaceBeforeAndAfterEqualSign = true;  // 'k = v' vs 'k=v'
         bool bParenthesesOnNewLine = true;
 
         // Comment

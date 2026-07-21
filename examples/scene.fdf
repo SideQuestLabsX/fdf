@@ -1,0 +1,38 @@
+name = "Harbor"
+units = "meters"
+ambientColor = 0x8FA9C4
+
+camera
+{
+    position = 12.0|6.5|-18.0
+    rotation = -12.0|145.0|0.0
+    fieldOfView = 60.0
+}
+
+entities
+[
+    {
+        id = 1
+        name = "Dock"
+        prefab = "props/dock.fdf"
+
+        transform
+        {
+            position = 0.0|0.0|0.0
+            rotation = 0.0|0.0|0.0
+            scale = 1.0|1.0|1.0
+        }
+    }
+    {
+        id = 2
+        name = "Fishing Boat"
+        prefab = "vehicles/fishing_boat.fdf"
+
+        transform
+        {
+            position = 8.5|0.2|-3.0
+            rotation = 0.0|32.0|0.0
+            scale = 1.0|1.0|1.0
+        }
+    }
+]

@@ -1,0 +1,28 @@
+experimentId = "EXP-2026-071"
+startedAt = 2026-07-21T08:30:00Z
+sampleInterval = 250ms
+
+instrument
+{
+    model = "Spectra Mini"
+    firmware = 3.8.2
+    serial = "SM-18422"
+    calibrationHash = 0x41D7A28C9E50
+}
+
+conditions
+{
+    temperatureC = 22.5
+    humidityPercent = 41.2
+}
+
+channels[ "control", "treated" ]
+
+measurements
+[
+    { elapsed = 0s, values = 0.012|0.014 }
+    { elapsed = 250ms, values = 0.018|0.031 }
+    { elapsed = 500ms, values = 0.027|0.064 }
+]
+
+notes = null

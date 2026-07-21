@@ -1,0 +1,34 @@
+name = "support-console"
+version = 1.1.0
+defaultEffect = "deny"
+
+principals
+[
+    { subject = "group:support", roles[ "tickets", "customers" ] }
+    { subject = "group:leads", roles[ "tickets", "customers", "reports" ] }
+]
+
+roles
+[
+    {
+        name = "tickets"
+        resource = "ticket/*"
+        actions[ "read", "comment", "assign" ]
+    }
+    {
+        name = "customers"
+        resource = "customer/*"
+        actions[ "read" ]
+    }
+    {
+        name = "reports"
+        resource = "report/*"
+        actions[ "read", "export" ]
+    }
+]
+
+constraints
+{
+    requireMfa = true
+    sessionMaxAge = 8h
+}

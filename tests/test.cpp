@@ -362,6 +362,7 @@ namespace fdf::detail
 
 
     std::vector<TestDirectories> filesToTest;
+    size_t exampleFileCount = 0;   // first N entries of filesToTest come from examples/
     size_t longestFilename = 0;
     std::string output;
 
@@ -416,7 +417,7 @@ namespace fdf::detail
             size_t tokenIndex = 0;
             while(tokenIndex < tokens.size())
             {
-                addToBuffer(std::format("id={:03}--Type={}--Extra8={:02}--Value={}", tokenIndex, TOKEN_TYPE_TO_STRING[static_cast<size_t>(tokens[tokenIndex].type)], tokens[tokenIndex].extra8, views[tokenIndex]));
+                addToBuffer(std::format("id = {:03}--Type = {}--Extra8 = {:02}--Value = {}", tokenIndex, TOKEN_TYPE_TO_STRING[static_cast<size_t>(tokens[tokenIndex].type)], tokens[tokenIndex].extra8, views[tokenIndex]));
                 buffer.push_back('\n');
                 tokenIndex++;
             }
@@ -446,7 +447,7 @@ namespace fdf::detail
             String temp;
             e->ForEach<ForEachFlags::Recursive | ForEachFlags::Group>([&](const Entry& entry)
             {
-                addToBuffer(std::format("{:<{}}Type={}--Size={:03}--Name={:<20}--Value={:<50}--Comment={}", "", 4 * entry.CalculateDepth(), ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.GetType())], entry.GetChildCount(), std::string_view(entry.GetFullIdentifier()), entry.DataToView(temp), std::string_view(entry.GetComment())));
+                addToBuffer(std::format("{:<{}}Type = {}--Size = {:03}--Name = {:<20}--Value = {:<50}--Comment = {}", "", 4 * entry.CalculateDepth(), ENTRY_TYPE_TO_STRING[static_cast<size_t>(entry.GetType())], entry.GetChildCount(), std::string_view(entry.GetFullIdentifier()), entry.DataToView(temp), std::string_view(entry.GetComment())));
                 buffer.push_back('\n');
             });
 
@@ -1517,7 +1518,7 @@ namespace fdf::detail
                 {
                     f->SetValue(std::numeric_limits<double>::infinity());
                     const String written = WriteBuffer<Style{ .bCommas = false }>(*built);
-                    CHECK(written == "f=null\n");
+                    CHECK(written == "f = null\n");
                     UniqueEntryPtr reparsed = ParseBuffer(written);
                     CHECK(reparsed && reparsed->GetChild("f") != nullptr);
                 }
@@ -1916,7 +1917,7 @@ namespace fdf::detail
                 {
                     CHECK_MSG(e->GetValue<Timestamp>().size() == 1, ts.source);
                     String out = WriteBuffer<Style{ .bCommas = false }>(*root);
-                    CHECK_MSG(out == std::format("t={}\n", ts.canonical), out);
+                    CHECK_MSG(out == std::format("t = {}\n", ts.canonical), out);
                 }
             }
 
@@ -2523,7 +2524,7 @@ namespace fdf::detail
                     CHECK(HexEquals<uint16_t>(s[0], 0x0ABC));
 
                     String out = WriteBuffer<Style{ .bCommas = false }>(*root);
-                    CHECK_MSG(out.contains("h=0x0ABC"), out);
+                    CHECK_MSG(out.contains("h = 0x0ABC"), out);
                     UniqueEntryPtr reparsed = ParseBuffer(out);
                     CHECK(reparsed && TreeEqual(*root, *reparsed));
                 }
@@ -2532,9 +2533,9 @@ namespace fdf::detail
             if(UniqueEntryPtr root = ParseBuffer("h = 0XfF5733\n"))
             {
                 String upper = WriteBuffer<Style{ .bCommas = false }>(*root);
-                CHECK_MSG(upper.contains("h=0xFF5733"), upper);
+                CHECK_MSG(upper.contains("h = 0xFF5733"), upper);
                 String lower = WriteBuffer<Style{ .bCommas = false, .bUppercaseHex = false }>(*root);
-                CHECK_MSG(lower.contains("h=0xff5733"), lower);
+                CHECK_MSG(lower.contains("h = 0xff5733"), lower);
             }
 
             if(UniqueEntryPtr root = ParseBuffer("h = 0x01020304\n"))
@@ -2848,7 +2849,7 @@ namespace fdf::detail
                 CHECK(HexEquals<uint32_t>(emptyValues[0], 0u));
                 CHECK(packValues[1].IsEmpty());
                 String out = WriteBuffer<Style{ .bCommas = false }>(*root);
-                CHECK_MSG(out.contains("empty=0x") && out.contains("pack=0xFF|0x"), out);
+                CHECK_MSG(out.contains("empty = 0x") && out.contains("pack = 0xFF|0x"), out);
                 UniqueEntryPtr reparsed = ParseBuffer(out);
                 CHECK(reparsed && TreeEqual(*root, *reparsed));
             }
@@ -3250,7 +3251,7 @@ namespace fdf::detail
                     CHECK(unknown.ToUnixSeconds() == zero.ToUnixSeconds());
                     CHECK(unknown.ToUnixSeconds() == utc.ToUnixSeconds());
                     CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) ==
-                          "a=2024-01-01T00:00:00-00:00\nb=2024-01-01T00:00:00+00:00\nc=2024-01-01T00:00:00Z\n");
+                          "a = 2024-01-01T00:00:00-00:00\nb = 2024-01-01T00:00:00+00:00\nc = 2024-01-01T00:00:00Z\n");
                 }
                 // only -00:00 maps to UnknownOffset
                 const Timestamp near = Timestamp::FromText("2024-01-01T00:00:00-00:01");
@@ -3281,7 +3282,7 @@ namespace fdf::detail
                     const std::span<const Timestamp> span = std::as_const(*e).GetValue<Timestamp>();
                     CHECK_MSG(span.size() == 1 && span[0].fracDigits == digits, raw);
                     String out = WriteBuffer<Style{ .bCommas = false }>(*root);
-                    CHECK_MSG(out == std::format("t={}\n", raw), out);
+                    CHECK_MSG(out == std::format("t = {}\n", raw), out);
                 }
             }
 
@@ -3297,7 +3298,7 @@ namespace fdf::detail
                 CHECK(leap.second == 60);
                 CHECK(leap.ToUnixSeconds() == next.ToUnixSeconds());
                 CHECK(leap.ToUnixMillis() == next.ToUnixMillis() + 500);
-                CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t=2024-12-31T23:59:60.5Z\n");
+                CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t = 2024-12-31T23:59:60.5Z\n");
             }
 
             {
@@ -3316,7 +3317,7 @@ namespace fdf::detail
                     CHECK(stored[0].day == 24 && stored[1].hour == 15);
                     stored[0].year = 2025;
                     stored[1].second = 45;
-                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t=2025-12-24|15:30:45\n");
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t = 2025-12-24|15:30:45\n");
                 }
             }
 
@@ -3328,17 +3329,17 @@ namespace fdf::detail
                     e->SetValue(Timestamp::Date(2024, 12, 24));
                     e->Resize(3);
                     CHECK(e->GetValue<Timestamp>().size() == 3);
-                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t=null\n");
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t = null\n");
                     constexpr Style nilStyle{ .bCommas = false, .bUseNilInsteadOfNull = true };
-                    CHECK(WriteBuffer<nilStyle>(*root) == "t=nil\n");
+                    CHECK(WriteBuffer<nilStyle>(*root) == "t = nil\n");
 
                     e->Resize(1);
-                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t=2024-12-24\n");
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t = 2024-12-24\n");
                     const std::span<Timestamp> shrunk = e->GetValue<Timestamp>();
                     REQUIRE(shrunk.size() == 1);
                     shrunk[0] = Timestamp{};
                     const String written = WriteBuffer<Style{ .bCommas = false }>(*root);
-                    CHECK(written == "t=null\n");
+                    CHECK(written == "t = null\n");
 
                     UniqueEntryPtr reparsed = ParseBuffer(written);
                     Entry* n = reparsed? reparsed->GetChild("t") : nullptr;
@@ -3352,7 +3353,7 @@ namespace fdf::detail
                 {
                     e->SetValue(Timestamp::FromUnixSeconds(1'000'000'000));
                     CHECK(e->GetValue<Timestamp>()[0].ToUnixSeconds() == 1'000'000'000);
-                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t=2001-09-09T01:46:40Z\n");
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t = 2001-09-09T01:46:40Z\n");
                 }
             }
 
@@ -3365,8 +3366,8 @@ namespace fdf::detail
                 UniqueEntryPtr root = ParseBuffer("t=2024-12-24t15:30:00z\n");
                 String upper = WriteBuffer<Style{ .bCommas = false }>(*root);
                 String lower = WriteBuffer<Style{ .bCommas = false, .bUppercaseTimestamp = false }>(*root);
-                CHECK(upper == "t=2024-12-24T15:30:00Z\n");
-                CHECK(lower == "t=2024-12-24t15:30:00z\n");
+                CHECK(upper == "t = 2024-12-24T15:30:00Z\n");
+                CHECK(lower == "t = 2024-12-24t15:30:00z\n");
             }
         }
 
@@ -3407,7 +3408,7 @@ namespace fdf::detail
                     const std::span<const Duration> value = std::as_const(*entry).GetValue<Duration>();
                     CHECK_MSG(value.size() == 1, c.source);
                     const String written = WriteBuffer<Style{ .bCommas = false }>(*root);
-                    CHECK_MSG(written == std::format("d={}\n", c.canonical), written);
+                    CHECK_MSG(written == std::format("d = {}\n", c.canonical), written);
                 }
             }
 
@@ -3422,7 +3423,7 @@ namespace fdf::detail
                     CHECK(values[1] == Duration::Hours(2));
                     CHECK(values[2] == Duration::Minutes(30));
                     values[1] = Duration::Minutes(90);
-                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "d=1h|1h30m|30m\n");
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "d = 1h|1h30m|30m\n");
                 }
             }
 
@@ -3442,7 +3443,7 @@ namespace fdf::detail
                     values[2] = Duration::Micros(250);
                     entry->Resize(2);
                     CHECK(entry->GetValue<Duration>().size() == 2);
-                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "d=1s|500ms\n");
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "d = 1s|500ms\n");
 
                     const Duration replacement[] =
                     {
@@ -3451,7 +3452,7 @@ namespace fdf::detail
                     };
                     entry->SetValue(std::span<const Duration>(replacement));
                     CHECK(entry->GetValue<Duration>().size() == 2);
-                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "d=1d|12h\n");
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "d = 1d|12h\n");
                 }
             }
 
@@ -3501,7 +3502,7 @@ namespace fdf::detail
                     const std::span<Timestamp> stored = e->GetValue<Timestamp>();
                     REQUIRE(stored.size() == 1);
                     stored[0].day = 99;
-                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t=null\n");
+                    CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "t = null\n");
                 }
             }
 
@@ -3714,7 +3715,7 @@ namespace fdf::detail
                 CHECK(FirstIntEquals(root->GetChild("my_key"), 1000));
 
             if(UniqueEntryPtr root = ParseBuffer("h=0xA_BC\n"); CHECK(static_cast<bool>(root)))
-                CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "h=0x0ABC\n");
+                CHECK(WriteBuffer<Style{ .bCommas = false }>(*root) == "h = 0x0ABC\n");
 
             constexpr std::string_view source =
                 "i=1_000_000\n"
@@ -3730,43 +3731,43 @@ namespace fdf::detail
 
             const String ungrouped = WriteBuffer<Style{ .bCommas = false }>(*root);
             CHECK_MSG(ungrouped ==
-                "i=1000000\n"
-                "n=-1000000\n"
-                "f=1234.5678\n"
-                "e=1.0e100\n"
-                "h=0xFF5733\n"
-                "v=123.456.789\n"
-                "t=2024-12-24\n"
-                "d=123ns\n", ungrouped);
+                "i = 1000000\n"
+                "n = -1000000\n"
+                "f = 1234.5678\n"
+                "e = 1.0e100\n"
+                "h = 0xFF5733\n"
+                "v = 123.456.789\n"
+                "t = 2024-12-24\n"
+                "d = 123ns\n", ungrouped);
 
             const String intGrouped = WriteBuffer<Style{ .bCommas = false, .intDigitGrouping = 3 }>(*root);
             CHECK_MSG(intGrouped ==
-                "i=1_000_000\n"
-                "n=-1_000_000\n"
-                "f=1_234.5678\n"
-                "e=1.0e100\n"
-                "h=0xFF5733\n"
-                "v=123.456.789\n"
-                "t=2024-12-24\n"
-                "d=123ns\n", intGrouped);
+                "i = 1_000_000\n"
+                "n = -1_000_000\n"
+                "f = 1_234.5678\n"
+                "e = 1.0e100\n"
+                "h = 0xFF5733\n"
+                "v = 123.456.789\n"
+                "t = 2024-12-24\n"
+                "d = 123ns\n", intGrouped);
             UniqueEntryPtr intReparsed = ParseBuffer(intGrouped);
             CHECK(intReparsed && TreeEqual(*root, *intReparsed));
 
             const String fineGrouped = WriteBuffer<Style{ .bCommas = false, .intDigitGrouping = 2 }>(*root);
-            CHECK_MSG(fineGrouped.contains("f=12_34.5678\n") && fineGrouped.contains("e=1.0e100\n"), fineGrouped);
+            CHECK_MSG(fineGrouped.contains("f = 12_34.5678\n") && fineGrouped.contains("e = 1.0e100\n"), fineGrouped);
             UniqueEntryPtr fineReparsed = ParseBuffer(fineGrouped);
             CHECK(fineReparsed && TreeEqual(*root, *fineReparsed));
 
             const String hexGrouped = WriteBuffer<Style{ .bCommas = false, .hexDigitGrouping = 4 }>(*root);
             CHECK_MSG(hexGrouped ==
-                "i=1000000\n"
-                "n=-1000000\n"
-                "f=1234.5678\n"
-                "e=1.0e100\n"
-                "h=0xFF_5733\n"
-                "v=123.456.789\n"
-                "t=2024-12-24\n"
-                "d=123ns\n", hexGrouped);
+                "i = 1000000\n"
+                "n = -1000000\n"
+                "f = 1234.5678\n"
+                "e = 1.0e100\n"
+                "h = 0xFF_5733\n"
+                "v = 123.456.789\n"
+                "t = 2024-12-24\n"
+                "d = 123ns\n", hexGrouped);
             UniqueEntryPtr hexReparsed = ParseBuffer(hexGrouped);
             CHECK(hexReparsed && TreeEqual(*root, *hexReparsed));
         }
@@ -3839,7 +3840,7 @@ namespace fdf::detail
 
             RoundTrip<Style{}>                                                          (*original, "default", true);
             RoundTrip<Style{ .bGroupSimilarTypes = true }>                              (*original, "grouped", true);
-            RoundTrip<Style{ .bSpaceBeforeAndAfterEqualSign = true }>                   (*original, "spaced-eq", true);
+            RoundTrip<Style{ .bSpaceBeforeAndAfterEqualSign = false }>                  (*original, "compact-eq", true);
             RoundTrip<Style{ .bParenthesesOnNewLine = false, .singleLineContainerLimit = 200 }>(*original, "single-line", true);
             RoundTrip<Style{ .singleLineContainerLimit = 1 }>                           (*original, "multi-line", true);
             RoundTrip<Style{ .bCommas = false }>                                        (*original, "no-commas", true);
@@ -3855,15 +3856,16 @@ namespace fdf::detail
                     RoundTrip<Style{}>(*o, std::format("empty: {}", src), false);
             }
 
-            // the canonical example across several styles
+            // every curated example across several styles
             // Stability is skipped because comment whitespace is normalized on the first write
-            if(!filesToTest.empty())
+            for(size_t i = 0; i < exampleFileCount; i++)
             {
-                if(UniqueEntryPtr design = ParseFile(std::filesystem::path(filesToTest[0].inputFile)); CHECK(static_cast<bool>(design)))
+                const std::string& file = filesToTest[i].inputFile;
+                if(UniqueEntryPtr design = ParseFile(std::filesystem::path(file)); CHECK(static_cast<bool>(design)))
                 {
-                    RoundTrip<Style{}>                            (*design, "design-default", false);
-                    RoundTrip<Style{ .bGroupSimilarTypes = true }>(*design, "design-grouped", false);
-                    RoundTrip<Style{ .singleLineContainerLimit = 1 }>(*design, "design-multi-line", false);
+                    RoundTrip<Style{}>                            (*design, std::format("design-default: {}", file),    false);
+                    RoundTrip<Style{ .bGroupSimilarTypes = true }>(*design, std::format("design-grouped: {}", file),    false);
+                    RoundTrip<Style{ .singleLineContainerLimit = 1 }>(*design, std::format("design-multi-line: {}", file), false);
                 }
             }
         }
@@ -4324,7 +4326,7 @@ consteval bool TimestampInjectProbe()
     const fdf::String out = fdf::WriteBuffer<fdf::Style{ .bCommas = false }>(*root);
     return got.size() == 1 && got[0].IsValid() && got[0].year == 2001 && got[0].month == 9
         && got[0].day == 9 && got[0].ToUnixSeconds() == 1'000'000'000
-        && out == "t=2001-09-09T01:46:40Z\n";
+        && out == "t = 2001-09-09T01:46:40Z\n";
 }
 static_assert(TimestampInjectProbe(), "consteval timestamp inject + read back");
 
@@ -4366,7 +4368,7 @@ consteval bool DurationStorageProbe()
     second->SetValue(std::span<const fdf::Duration>(injected));
 
     return fdf::WriteBuffer<fdf::Style{ .bCommas = false }>(*root)
-        == "d=1h30m|2s\ne=1d|12h\n";
+        == "d = 1h30m|2s\ne = 1d|12h\n";
 }
 static_assert(DurationStorageProbe(), "consteval duration parse + typed storage + write");
 
@@ -4548,7 +4550,7 @@ consteval bool TimestampStorageProbe()
     if(values.size() != 1 || values[0].fracDigits != 3 || values[0].nanosecond != 123'000'000)
         return false;
     return fdf::WriteBuffer<fdf::Style{ .bCommas = false }>(*root)
-        == "t=2024-12-24T15:30:00.123Z\n";
+        == "t = 2024-12-24T15:30:00.123Z\n";
 }
 static_assert(TimestampStorageProbe(), "consteval timestamp parse + typed storage + write");
 
@@ -4668,10 +4670,10 @@ consteval bool HexWriteProbe()
     if(!root)
         return false;
     fdf::String upper = fdf::WriteBuffer<fdf::Style{}>(*root);
-    if(!upper.contains("h=0xFF5733") || !upper.contains("odd=0x0ABC") || !upper.contains("p=0xFF|0xAA"))
+    if(!upper.contains("h = 0xFF5733") || !upper.contains("odd = 0x0ABC") || !upper.contains("p = 0xFF|0xAA"))
         return false;
     fdf::String lower = fdf::WriteBuffer<fdf::Style{ .bUppercaseHex = false }>(*root);
-    return lower.contains("h=0xff5733") && lower.contains("odd=0x0abc") && lower.contains("p=0xff|0xaa");
+    return lower.contains("h = 0xff5733") && lower.contains("odd = 0x0abc") && lower.contains("p = 0xff|0xaa");
 }
 static_assert(HexWriteProbe(), "consteval hex write");
 
@@ -4921,12 +4923,12 @@ consteval bool WriteScalarsProbe()
 
     fdf::String out = fdf::WriteBuffer<fdf::Style{}>(*root);
 
-    return ContainsAt(out, "i=-42")
-        && ContainsAt(out, "u=-1")   // above INT64_MAX serializes in signed form, bits round-trip
-        && ContainsAt(out, "f=2.5")
-        && ContainsAt(out, "b=true")
-        && ContainsAt(out, "s=\"hi\"")
-        && ContainsAt(out, "n=null");
+    return ContainsAt(out, "i = -42")
+        && ContainsAt(out, "u = -1")   // above INT64_MAX serializes in signed form, bits round-trip
+        && ContainsAt(out, "f = 2.5")
+        && ContainsAt(out, "b = true")
+        && ContainsAt(out, "s = \"hi\"")
+        && ContainsAt(out, "n = null");
 }
 static_assert(WriteScalarsProbe(), "consteval write scalars");
 
@@ -4948,8 +4950,8 @@ consteval bool WriteCompositeProbe()
     root->Emplace("ver")->SetValue(std::span<const fdf::Version>(versions));
 
     fdf::String out = fdf::WriteBuffer<fdf::Style{}>(*root);
-    return ContainsAt(out, "res=1920|1080") && ContainsAt(out, "pos=1.0|2.5|3.0")
-        && ContainsAt(out, "who=\"ann\"|\"bo\"") && ContainsAt(out, "ver=1.2.3|4.5.6.0");
+    return ContainsAt(out, "res = 1920|1080") && ContainsAt(out, "pos = 1.0|2.5|3.0")
+        && ContainsAt(out, "who = \"ann\"|\"bo\"") && ContainsAt(out, "ver = 1.2.3|4.5.6.0");
 }
 static_assert(WriteCompositeProbe(), "consteval write numeric/string/version packs");
 
@@ -5076,7 +5078,7 @@ consteval bool WriteContainerProbe()
 
     fdf::String out = fdf::WriteBuffer<fdf::Style{}>(*root);
     return ContainsAt(out, "arr") && ContainsAt(out, "10") && ContainsAt(out, "20")
-        && ContainsAt(out, "m") && ContainsAt(out, "k=true");
+        && ContainsAt(out, "m") && ContainsAt(out, "k = true");
 }
 static_assert(WriteContainerProbe(), "consteval write containers");
 
@@ -5163,27 +5165,20 @@ int main(int argc, char** argv)
             fdf::test::g_bStress = true;
     }
 
-    std::filesystem::path currentDesignFile = FDF_ROOT_DIRECTORY "/examples/example.fdf";
     std::filesystem::path examplesDir = FDF_ROOT_DIRECTORY "/examples";   // genuine references
     std::filesystem::path casesDir    = FDF_TEST_DIRECTORY "/cases";      // stress / edge inputs
     std::filesystem::path outputDir   = FDF_OUTPUT_DIRECTORY;
 
     std::filesystem::create_directories(outputDir);
 
-    // example.fdf goes first so RoundTripTest can round-trip filesToTest[0]
-    if(std::filesystem::exists(currentDesignFile))
-        filesToTest.emplace_back(currentDesignFile);
-
-    auto collect = [&](const std::filesystem::path& dir, auto skip)
+    auto collect = [&](const std::filesystem::path& dir)
     {
         if(!std::filesystem::exists(dir))
             return;
 
         for(const auto& entry : std::filesystem::directory_iterator(dir))
         {
-            if(!entry.is_regular_file() || skip(entry.path()))
-                continue;
-            if(entry.path().extension() != ".fdf")
+            if(!entry.is_regular_file() || entry.path().extension() != ".fdf")
                 continue;
 
             size_t length = filesToTest.emplace_back(entry.path()).inputFile.size();
@@ -5192,8 +5187,10 @@ int main(int argc, char** argv)
         }
     };
 
-    collect(examplesDir, [](const std::filesystem::path& p){ return p.filename() == "example.fdf"; });
-    collect(casesDir,    [](const std::filesystem::path&){ return false; });
+    // every .fdf under examples/ is a curated reference, cases/ are stress inputs
+    collect(examplesDir);
+    exampleFileCount = filesToTest.size();
+    collect(casesDir);
 
     if(filesToTest.empty())
     {
@@ -5207,29 +5204,29 @@ int main(int argc, char** argv)
     using fdf::test::RunCase;
     std::print("Running suite{} -- Found {} files\n{}", fdf::test::g_bStress? " (stress)" : "", filesToTest.size(), separator);
 
-    RunCase("ParseTest",           Test::ParseTest);
-    RunCase("ReadTest",            Test::ReadTest);
-    RunCase("WriteTest",           Test::WriteTest);
-    RunCase("ValueTest",           Test::ValueTest);
-    RunCase("MutateTest",          Test::MutateTest);
-    RunCase("RegressionTest",      Test::RegressionTest);
-    RunCase("RecoveryTest",        Test::RecoveryTest);
-    RunCase("DuplicateKeyPolicyTest", Test::DuplicateKeyPolicyTest);
-    RunCase("NestingDepthTest",    Test::NestingDepthTest);
-    RunCase("NegativeTest",        Test::NegativeTest);
-    RunCase("PackTest",            Test::PackTest);
-    RunCase("DigitSeparatorTest",  Test::DigitSeparatorTest);
-    RunCase("StringRoundTripTest", Test::StringRoundTripTest);
-    RunCase("StringStorageTest",   Test::StringStorageTest);
-    RunCase("HexStorageTest",      Test::HexStorageTest);
-    RunCase("StringApiTest",       Test::StringApiTest);
-    RunCase("FloatRoundTripTest",  Test::FloatRoundTripTest);
-    RunCase("TimestampTest",       Test::TimestampTest);
-    RunCase("DurationTest",        Test::DurationTest);
-    RunCase("AllocatorTest",       Test::AllocatorTest);
-    RunCase("RoundTripTest",       Test::RoundTripTest);
+    RunCase("ParseTest",               Test::ParseTest);
+    RunCase("ReadTest",                Test::ReadTest);
+    RunCase("WriteTest",               Test::WriteTest);
+    RunCase("ValueTest",               Test::ValueTest);
+    RunCase("MutateTest",              Test::MutateTest);
+    RunCase("RegressionTest",          Test::RegressionTest);
+    RunCase("RecoveryTest",            Test::RecoveryTest);
+    RunCase("DuplicateKeyPolicyTest",  Test::DuplicateKeyPolicyTest);
+    RunCase("NestingDepthTest",        Test::NestingDepthTest);
+    RunCase("NegativeTest",            Test::NegativeTest);
+    RunCase("PackTest",                Test::PackTest);
+    RunCase("DigitSeparatorTest",      Test::DigitSeparatorTest);
+    RunCase("StringRoundTripTest",     Test::StringRoundTripTest);
+    RunCase("StringStorageTest",       Test::StringStorageTest);
+    RunCase("HexStorageTest",          Test::HexStorageTest);
+    RunCase("StringApiTest",           Test::StringApiTest);
+    RunCase("FloatRoundTripTest",      Test::FloatRoundTripTest);
+    RunCase("TimestampTest",           Test::TimestampTest);
+    RunCase("DurationTest",            Test::DurationTest);
+    RunCase("AllocatorTest",           Test::AllocatorTest);
+    RunCase("RoundTripTest",           Test::RoundTripTest);
 #if !FDF_NO_COMMENTS
-    RunCase("WriterCommentTest",   Test::WriterCommentTest);
+    RunCase("WriterCommentTest",       Test::WriterCommentTest);
 #endif
 
     std::print("{}", separator);

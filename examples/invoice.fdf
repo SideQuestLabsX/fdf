@@ -1,0 +1,27 @@
+number = "INV-2026-0042"
+issued = 2026-07-21
+due = 2026-08-20
+currency = "USD"
+
+seller
+{
+    name = "Northwind Studio"
+    taxId = "US-84-2193840"
+}
+
+customer
+{
+    name = "Acme Workshop"
+    email = "billing@example.com"
+}
+
+items
+[
+    { description = "Design consultation", quantity = 2, unitPriceCents = 12500 }
+    { description = "Prototype materials", quantity = 1, unitPriceCents = 4900 }
+]
+
+subtotalCents = 29900
+taxCents = 5382
+totalCents = 35282
+paidAt = null

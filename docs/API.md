@@ -246,8 +246,8 @@ std::vector<UniqueEntryPtr> OrphanChildren();
 | `Merge` | recursively merge same-type containers, otherwise replace as with `KeepLast` | the existing entry |
 
 An array child or a new map key is appended and returned. The `AddChild` overload without a policy
-forwards to `KeepLast`, preserving its original behavior. Parsing always uses `Reject`: `a=1`
-followed by `a=2` diagnoses `DuplicateKey`, keeps the first value and continues parsing.
+forwards to `KeepLast`, preserving its original behavior. Parsing always uses `Reject`: `a = 1`
+followed by `a = 2` diagnoses `DuplicateKey`, keeps the first value and continues parsing.
 
 `AddChild` rejects ownership cycles. It returns `nullptr` and leaves ownership with the caller when
 an orphaned ancestor is passed to its descendant. To detect a conflict before inserting, check

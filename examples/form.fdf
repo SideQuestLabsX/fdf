@@ -1,0 +1,47 @@
+id = "support-request"
+version = 1.2.0
+title = "Contact support"
+submitLabel = "Send request"
+
+fields
+[
+    {
+        id = "email"
+        type = "email"
+        label = "Email address"
+        required = true
+    }
+    {
+        id = "category"
+        type = "select"
+        label = "Category"
+        required = true
+        options[ "billing", "technical", "feedback" ]
+    }
+    {
+        id = "orderNumber"
+        type = "text"
+        label = "Order number"
+        required = false
+
+        visibleWhen
+        {
+            field = "category"
+            equals = "billing"
+        }
+    }
+    {
+        id = "details"
+        type = "textarea"
+        label = "How can we help?"
+        required = true
+        minLength = 20
+        maxLength = 2000
+    }
+]
+
+confirmation
+{
+    message = "Your request has been received"
+    redirect = null
+}

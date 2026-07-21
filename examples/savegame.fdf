@@ -1,0 +1,60 @@
+slot = 2
+gameVersion = 1.8.4
+savedAt = 2026-07-21T22:14:38Z
+playTime = 5h42m15s
+difficulty = "normal"
+
+player
+{
+    name = "Morgan"
+    level = 17
+    experience = 42850
+    health = 87.5
+    position = 184.2|12.0|-73.8
+
+    inventory
+    [
+        { item = "health-potion", quantity = 4 }
+        { item = "iron-key", quantity = 1 }
+        { item = "ancient-coin", quantity = 23 }
+    ]
+
+    equipment
+    {
+        mainHand = "storm-blade"
+        offHand = null
+        armor = "ranger-coat"
+    }
+}
+
+quests
+[
+    {
+        id = "restore-the-beacon"
+        state = "active"
+        completedObjectives = 2
+        totalObjectives = 4
+    }
+    {
+        id = "missing-cartographer"
+        state = "completed"
+        completedObjectives = 3
+        totalObjectives = 3
+    }
+]
+
+world
+{
+    location = "Northwatch Harbor"
+    weather = "rain"
+    discoveredRegions[ "northwatch", "sunken-road", "old-quarry" ]
+
+    flags
+    {
+        harborGateOpen = true
+        beaconLit = false
+        merchantRescued = true
+    }
+}
+
+checksum = 0x7D42B8E19A63
