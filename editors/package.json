@@ -1,6 +1,6 @@
 {
-  "name": "fdf",
-  "displayName": "fdf",
+  "name": "fdf-lang",
+  "displayName": "fdf Language",
   "publisher": "SideQuestLabs",
   "version": "0.2.0",
   "description": "Syntax highlighting for fdf files",
