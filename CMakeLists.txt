@@ -30,7 +30,8 @@ if(PROJECT_IS_TOP_LEVEL)
 
     # Release ships stripped; RelWithDebInfo keeps the symbols for debugging
     if(NOT MSVC)
-        add_link_options($<$<CONFIG:Release>:-s>)
+        add_compile_options($<$<CONFIG:Release>:-ffunction-sections> $<$<CONFIG:Release>:-fdata-sections>)
+        add_link_options($<$<CONFIG:Release>:-s> $<$<CONFIG:Release>:-Wl,--gc-sections>)
     endif()
 endif()
 

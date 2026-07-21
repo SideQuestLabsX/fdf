@@ -10,6 +10,8 @@ target_compile_definitions(fdf_validate PRIVATE FDF_VALIDATE_VERSION="${PROJECT_
 
 if(MSVC)
     target_compile_options(fdf_validate PRIVATE /std:c++latest)
+    # fopen/strerror are the portable choice; silence MSVC's Annex-K deprecation push
+    target_compile_definitions(fdf_validate PRIVATE _CRT_SECURE_NO_WARNINGS)
 else()
     target_compile_features(fdf_validate PRIVATE cxx_std_26)
 endif()

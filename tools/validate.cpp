@@ -2,10 +2,8 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <vector>
 
 #if FDF_USE_CPP_MODULES
@@ -107,26 +105,26 @@ namespace
         return true;
     }
 
-    // ifstream avoids UCRT deprecation warnings from fopen and strerror
     bool ReadInput(const char* path, std::string& out) noexcept
     {
         if(std::strcmp(path, "-") == 0)
             return ReadStdin(out);
 
-        errno = 0;
-        std::ifstream file(path, std::ios::binary);
+        std::FILE* file = std::fopen(path, "rb");
         if(!file)
         {
-            const std::string reason = errno != 0? std::generic_category().message(errno) : "cannot open";
-            std::fprintf(stderr, "%s: %s\n", path, reason.c_str());
+            std::fprintf(stderr, "%s: %s\n", path, std::strerror(errno));
             return false;
         }
 
         char buffer[64 * 1024];
-        while(file.read(buffer, sizeof(buffer)) || file.gcount() > 0)
-            out.append(buffer, static_cast<size_t>(file.gcount()));
+        size_t n;
+        while((n = std::fread(buffer, 1, sizeof(buffer), file)) > 0)
+            out.append(buffer, n);
 
-        if(file.bad())
+        const bool bad = std::ferror(file) != 0;
+        std::fclose(file);
+        if(bad)
         {
             std::fprintf(stderr, "%s: read failed\n", path);
             return false;
