@@ -217,6 +217,7 @@ jobs:
           cp include/fdf.h dist/include/
           cp src/fdf.ixx   dist/src/
           cp LICENSE       dist/
+          cp README.md     dist/
 
           cp "staging/fdf-validate-linux-x64"       dist/bin/
           cp "staging/fdf-validate-windows-x64.exe" dist/bin/
@@ -244,6 +245,7 @@ jobs:
             "include/fdf.h" \
             "src/fdf.ixx" \
             "LICENSE" \
+            "README.md" \
             "bin/fdf-validate-linux-x64" \
             "bin/fdf-validate-windows-x64.exe" \
             "editors/fdf-$VERSION.vsix" \
@@ -275,12 +277,31 @@ jobs:
           fi
           git push origin "refs/tags/v${VERSION}"
 
+      - name: Build release notes from CHANGELOG
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          core=$(printf '%s' "$VERSION" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          section=$(awk -v v="$core" '
+            index($0, "## [" v "]") == 1 { f = 1; print; next }
+            f && index($0, "## [") == 1 { exit }
+            f { print }
+          ' CHANGELOG.md)
+          if [ -z "$section" ]; then
+            echo "::error::CHANGELOG.md has no section for $core"
+            exit 1
+          fi
+          {
+            printf '**Full changelog:** https://github.com/%s/blob/v%s/CHANGELOG.md\n\n' "$GITHUB_REPOSITORY" "$VERSION"
+            printf '%s\n' "$section"
+          } > RELEASE_NOTES.md
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           tag_name: v${{ inputs.version }}
           name: v${{ inputs.version }}
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
           prerelease: ${{ inputs.prerelease }}
           fail_on_unmatched_files: true
           files: |

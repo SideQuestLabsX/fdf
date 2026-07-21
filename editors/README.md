@@ -30,9 +30,9 @@ The grammar is best effort and may disagree with the parser. Use `fdf-validate` 
 ## Building the packages
 
 ```sh
-python3 editors/package.py --version 0.1.0 --out dist
-(cd editors && npx --yes @vscode/vsce@3.9.2 package --out ../dist/fdf-0.1.0.vsix)
-python3 editors/verify.py dist 0.1.0
+python3 editors/package.py --version 0.2.0 --out dist
+(cd editors && npx --yes @vscode/vsce@3.9.2 package --out ../dist/fdf-0.2.0.vsix)
+python3 editors/verify.py dist 0.2.0
 ```
 
 `package.json` carries the version and the release workflow refuses to publish when it disagrees
