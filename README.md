@@ -115,6 +115,7 @@ Text, JetBrains IDEs and TextMate. See [`editors/`](editors/README.md) for insta
 
 - [`docs/`](docs/README.md) is the reference, split by topic (syntax, types, API, styling, ...)
 - [`examples/`](examples/README.md) is a set of real, tested fdf files to copy from
+- [`CHANGELOG.md`](CHANGELOG.md) records what changed between releases
 
 ## Ideas for later
 

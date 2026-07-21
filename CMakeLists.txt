@@ -12,7 +12,7 @@ set(FDF_ASSERTIONS "auto" CACHE STRING "Library assertions: auto (follow NDEBUG)
 set_property(CACHE FDF_ASSERTIONS PROPERTY STRINGS auto on off)
 
 
-project(fdf VERSION 0.1.0 LANGUAGES CXX)
+project(fdf VERSION 0.2.0 LANGUAGES CXX)
 
 # computed here so every subdirectory target picks it up, not just the tests
 set(FDF_SANITIZER_FLAGS "")
