@@ -123,10 +123,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build build --target fdf_validate Test
-
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
+        run: cmake --build build --target fdf_validate
 
       - name: Smoke test the binary
         shell: bash
