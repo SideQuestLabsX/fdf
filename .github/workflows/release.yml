@@ -88,42 +88,37 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Install latest CMake + Ninja
-        uses: lukka/get-cmake@e6906078ebd1ccb8ce51ab4626ac46a1b5a517e3 # v4.4.0
-
-      - name: Install Clang 22
+      # Linux: a fully static musl binary built in Alpine, so it runs on any distro
+      # regardless of glibc version. Built via docker, not a job container, because the
+      # Actions runner's node is glibc and cannot execute inside a musl image.
+      - name: Build (Linux, musl static)
         if: runner.os == 'Linux'
         run: |
-          sudo install -d -m 0755 /etc/apt/keyrings
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/llvm.gpg
-          echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main" | sudo tee /etc/apt/sources.list.d/llvm.list
-          sudo apt-get update
-          sudo apt-get install -y clang-22
+          docker run --rm -v "$PWD:/src" -w /src alpine:3.22 sh -euxc '
+            apk add --no-cache build-base cmake git
+            git config --global --add safe.directory "*"
+            cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS=-static
+            cmake --build build --target fdf_validate
+          '
+          file build/tools/fdf-validate
+          if ldd build/tools/fdf-validate 2>&1 | grep -q "=>"; then
+            echo "::error::the Linux binary is not fully static"; exit 1
+          fi
+
+      - name: Install latest CMake + Ninja
+        if: runner.os == 'Windows'
+        uses: lukka/get-cmake@e6906078ebd1ccb8ce51ab4626ac46a1b5a517e3 # v4.4.0
 
       - name: Set up MSVC
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
-      # ship without libstdc++ and libgcc runtime dependencies
-      - name: Configure (Linux)
-        if: runner.os == 'Linux'
-        env:
-          CC: clang-22
-          CXX: clang++-22
-        run: >
-          cmake -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
-
-      # SQ_SRT supplies the static CRT
-      - name: Configure (Windows)
+      # static CRT comes from SQ_SRT (StaticRuntimes, now included at root scope)
+      - name: Build (Windows)
         if: runner.os == 'Windows'
-        run: >
-          cmake -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build
-        run: cmake --build build --target fdf_validate
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target fdf_validate
 
       - name: Smoke test the binary
         shell: bash
@@ -209,17 +204,12 @@ jobs:
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          mkdir -p dist/include dist/src dist/bin dist/editors
+          mkdir -p dist/include dist/src dist/editors
 
           cp include/fdf.h dist/include/
           cp src/fdf.ixx   dist/src/
           cp LICENSE       dist/
           cp README.md     dist/
-
-          cp "staging/fdf-validate-linux-x64"       dist/bin/
-          cp "staging/fdf-validate-windows-x64.exe" dist/bin/
-          # upload-artifact strips executable bits
-          chmod +x dist/bin/fdf-validate-linux-x64
 
           cp "staging/fdf-$VERSION.vsix"   dist/editors/
           cp "staging/fdf.sublime-package" dist/editors/
@@ -243,8 +233,6 @@ jobs:
             "src/fdf.ixx" \
             "LICENSE" \
             "README.md" \
-            "bin/fdf-validate-linux-x64" \
-            "bin/fdf-validate-windows-x64.exe" \
             "editors/fdf-$VERSION.vsix" \
             "editors/fdf.sublime-package" \
             "editors/fdf.tmbundle.zip" \
@@ -303,12 +291,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             fdf-${{ inputs.version }}.zip
-            dist/include/fdf.h
-            dist/src/fdf.ixx
-            dist/LICENSE
-            dist/bin/fdf-validate-linux-x64
-            dist/bin/fdf-validate-windows-x64.exe
-            dist/editors/fdf-${{ inputs.version }}.vsix
-            dist/editors/fdf.sublime-package
-            dist/editors/fdf.tmbundle.zip
-            dist/editors/fdf.tmLanguage.json
+            staging/fdf-validate-linux-x64
+            staging/fdf-validate-windows-x64.exe

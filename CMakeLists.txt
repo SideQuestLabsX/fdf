@@ -14,6 +14,26 @@ set_property(CACHE FDF_ASSERTIONS PROPERTY STRINGS auto on off)
 
 project(fdf VERSION 0.2.0 LANGUAGES CXX)
 
+# one CRT policy for every target below (fdf, tests, fuzz, tools): StaticRuntimes sets
+# CMAKE_MSVC_RUNTIME_LIBRARY at root scope so subdirectories inherit it. Included at tests/
+# scope before, so it never reached the fdf_validate target and that binary linked the DLL CRT
+if(PROJECT_IS_TOP_LEVEL)
+    include(FetchContent)
+    FetchContent_Declare(common_resources
+      GIT_REPOSITORY https://github.com/SideQuestLabsX/common.git
+      GIT_TAG        48b58cf109cde83127086450efa578354caec054)
+    FetchContent_MakeAvailable(common_resources)
+
+    list(APPEND CMAKE_MODULE_PATH "${common_resources_SOURCE_DIR}/cmake")
+    include(CompilerWarnings)
+    include(StaticRuntimes)
+
+    # Release ships stripped; RelWithDebInfo keeps the symbols for debugging
+    if(NOT MSVC)
+        add_link_options($<$<CONFIG:Release>:-s>)
+    endif()
+endif()
+
 # computed here so every subdirectory target picks it up, not just the tests
 set(FDF_SANITIZER_FLAGS "")
 if(FDF_ENABLE_ASAN OR FDF_ENABLE_LSAN)
