@@ -91,10 +91,11 @@ jobs:
       # Linux: a fully static musl binary built in Alpine, so it runs on any distro
       # regardless of glibc version. Built via docker, not a job container, because the
       # Actions runner's node is glibc and cannot execute inside a musl image.
+      # edge is needed for gcc 15: 14.x rejects the constinit SlabAllocator (no constexpr dtor)
       - name: Build (Linux, musl static)
         if: runner.os == 'Linux'
         run: |
-          docker run --rm -v "$PWD:/src" -w /src alpine:3.22 sh -euxc '
+          docker run --rm -v "$PWD:/src" -w /src alpine:edge sh -euxc '
             apk add --no-cache build-base cmake git
             git config --global --add safe.directory "*"
             cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS=-static
