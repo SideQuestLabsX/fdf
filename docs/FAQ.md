@@ -80,26 +80,24 @@ output is identical. Keeps diffs clean.
 
 ## How do I read a file from C++?
 
-Parse it, then walk to what you want. `GetChild` takes a dotted path, `GetValue<T>()` hands back a
-span over the components (one element for a plain scalar, more for a pack):
+Call `ParseFile` with the file name. It returns the root entry, or `nullptr` if the file can't be
+read or parsing stops on a fatal error.
 
 ```cpp
-auto doc = fdf::ParseFile("config.fdf");
+fdf::UniqueEntryPtr doc = fdf::ParseFile("config.fdf");
 if(!doc)
-    return;   // parse failed outright
+    return;
 
-if(auto* e = doc->GetChild("graphics.resolution"))
-{
-    auto res = e->GetValue<int64_t>();     // [1920, 1080]
-    if(res.size() == 2)
-    {
-        int w = int(res[0]);
-        int h = int(res[1]);
-    }
-}
+auto resolution = doc->GetValue<int64_t>("graphics.resolution");
+if(resolution.size() != 2)
+    return;
+
+int width = int(resolution[0]);
+int height = int(resolution[1]);
 ```
 
-Always check for null. `GetChild` returns `nullptr` when the path isn't there.
+`GetValue<T>` returns an empty result if it can't find the entry or the type is wrong. Use
+`GetChild` when you need the entry itself or want to know what went wrong.
 
 ## Can I really parse it at compile time?
 
@@ -110,7 +108,7 @@ at and serialize a document inside a `consteval` function:
 consteval int64_t ReadScore()
 {
     auto doc = fdf::ParseBuffer("score = 42\n");
-    return doc->GetChild("score")->GetValue<int64_t>()[0];
+    return doc->GetValue<int64_t>("score")[0];
 }
 static_assert(ReadScore() == 42);
 ```

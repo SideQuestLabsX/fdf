@@ -736,6 +736,10 @@ namespace fdf::detail
         {
             static_assert(std::is_same_v<decltype(std::declval<const Entry&>().GetChildren()), std::span<const Entry* const>>);
             static_assert(std::is_same_v<decltype(std::declval<      Entry&>().GetChildren()), std::span<      Entry*      >>);
+            static_assert(std::is_same_v<decltype(std::declval<const Entry&>().GetValue<int64_t>("value")), std::span<const int64_t>>);
+            static_assert(std::is_same_v<decltype(std::declval<      Entry&>().GetValue<int64_t>("value")), std::span<      int64_t>>);
+            static_assert(std::is_same_v<decltype(std::declval<const Entry&>().GetValue<uint64_t>("value")), ConstUIntSpan>);
+            static_assert(std::is_same_v<decltype(std::declval<      Entry&>().GetValue<uint64_t>("value")), UIntSpan>);
 
             UniqueEntryPtr root = NewEntry();
             if(!CHECK(static_cast<bool>(root)))
@@ -922,6 +926,35 @@ namespace fdf::detail
                 e->SetValue(123);
                 e->SetValue("now a string");
                 CHECK(e->GetType() == Type::String && FirstString(*e) == "now a string");
+            }
+
+            if(Entry* group = root->Emplace("group"); CHECK(group))
+            {
+                group->SetValue(MapType{});
+                if(Entry* value = group->Emplace("value"); CHECK(value))
+                    value->SetValue(41);
+
+                auto dotted = root->GetValue<int64_t>("group.value");
+                REQUIRE(dotted.size() == 1);
+                CHECK(dotted[0] == 41);
+                dotted[0] = 42;
+
+                const Entry& constRoot = *root;
+                const auto variadic = constRoot.GetValue<int64_t>("group", "value");
+                CHECK(variadic.size() == 1 && variadic[0] == 42);
+                CHECK(root->GetValue<int64_t>("missing").empty());
+                CHECK(root->GetValue<uint64_t>("missing").empty());
+                CHECK(root->GetValue<double>("group.value").empty());
+                CHECK(root->GetValue<int64_t>("group").empty());
+            }
+
+            if(Entry* items = root->Emplace("items"); CHECK(items))
+            {
+                items->SetValue(ArrayType{});
+                if(Entry* value = items->Emplace(""); CHECK(value))
+                    value->SetValue(7);
+                const auto indexed = std::as_const(*root).GetValue<int64_t>("items", 0u);
+                CHECK(indexed.size() == 1 && indexed[0] == 7);
             }
         }
 
@@ -5063,6 +5096,27 @@ consteval bool ValueRoundTripProbe()
     return true;
 }
 static_assert(ValueRoundTripProbe(), "consteval SetValue/GetValue round-trips");
+
+consteval bool LookupValueProbe()
+{
+    fdf::UniqueEntryPtr root = fdf::ParseBuffer("group { value = 41 }\nitems [ 7 ]\n");
+    if(!root)
+        return false;
+
+    auto dotted = root->GetValue<int64_t>("group.value");
+    if(dotted.size() != 1 || dotted[0] != 41)
+        return false;
+    dotted[0] = 42;
+
+    const fdf::Entry& constRoot = *root;
+    const auto variadic = constRoot.GetValue<int64_t>("group", "value");
+    const auto indexed = constRoot.GetValue<int64_t>("items", 0u);
+    return variadic.size() == 1 && variadic[0] == 42
+        && indexed.size() == 1 && indexed[0] == 7
+        && constRoot.GetValue<int64_t>("missing").empty()
+        && constRoot.GetValue<double>("group.value").empty();
+}
+static_assert(LookupValueProbe(), "consteval GetValue lookup handles mutation and empty results");
 
 // Containers (array + nested map), single-line collapse exercised at compile time
 consteval bool WriteContainerProbe()

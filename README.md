@@ -45,8 +45,8 @@ Add [`include/fdf.h`](include/fdf.h) to your include path and include it.
 fdf::UniqueEntryPtr root = fdf::ParseFile("examples/config.fdf");
 if(root)
 {
-    auto name  = root->GetChild("appName")->GetValue<fdf::String>();  // "MyGame"
-    auto vsync = root->GetChild("graphics.vsync")->GetValue<bool>();  // false
+    auto name  = root->GetValue<fdf::String>("appName");  // ["MyGame"]
+    auto vsync = root->GetValue<bool>("graphics.vsync");  // [false]
 
     root->ForEach<fdf::ForEachFlags::Recursive>([](const fdf::Entry&)
     {
@@ -54,6 +54,9 @@ if(root)
     });
 }
 ```
+
+`GetValue<T>` returns a span-like view. It is empty if the entry can't be found or has a different
+type.
 
 ### Building and writing
 
@@ -82,7 +85,7 @@ fdf::WriteFile<fdf::Style{ .bCommas = false }>(*root, "out.fdf");
 consteval int64_t ReadAnswer()
 {
     fdf::UniqueEntryPtr root = fdf::ParseBuffer("answer = 42\n");
-    return root->GetChild("answer")->GetValue<int64_t>()[0];
+    return root->GetValue<int64_t>("answer")[0];
 }
 static_assert(ReadAnswer() == 42);
 ```

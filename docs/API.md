@@ -54,16 +54,17 @@ Type         GetType()            const;
 uint32_t     GetChildCount()      const;
 ```
 
-`GetValue<T>()` reads the scalar payload. Every scalar type comes back as a `std::span` over its
-components: one element for a plain scalar and more for a pack.
+`GetValue<T>()` returns the scalar value stored in this entry. If you only need the value and don't
+care why the lookup failed, `GetValue<T>` can do the lookup too. It returns an empty span or view
+when it can't find the entry or the type is wrong. Use `GetChild` when you need the entry itself.
 
 ```cpp
-auto name = e->GetChild("name")->GetValue<fdf::String>()[0];     // "MyGame"
-auto px   = e->GetChild("pos")->GetValue<int64_t>();             // pack span: [100, 100]
-auto flag = e->GetChild("fullscreen")->GetValue<bool>()[0];      // true
-auto vers = e->GetChild("versions")->GetValue<Version>();
-auto when = e->GetChild("created")->GetValue<Timestamp>();
-auto wait = e->GetChild("timeout")->GetValue<Duration>();
+auto name = e->GetValue<fdf::String>("name")[0];     // "MyGame"
+auto px   = e->GetValue<int64_t>("pos");             // pack span: [100, 100]
+auto flag = e->GetValue<bool>("fullscreen")[0];      // true
+auto vers = e->GetValue<Version>("versions");
+auto when = e->GetValue<Timestamp>("created");
+auto wait = e->GetValue<Duration>("timeout");
 ```
 
 `GetValue<uint64_t>()` returns `fdf::UIntSpan` (or `ConstUIntSpan`), a span-alike unsigned view
@@ -170,7 +171,7 @@ odd-length literal comes back padded (`0xABC` → `0x0ABC`), and an odd digit co
 leading zero nibble.
 
 ```cpp
-Hex& color = e->GetChild("color")->GetValue<Hex>()[0];   // 0xFF5733
+Hex& color = e->GetValue<Hex>("color")[0];               // 0xFF5733
 uint32_t rgb = 0;
 bool bRead = color.Read(rgb);                            // rgb = 0x00FF5733 on every host
 bool bAppended = color.Write(uint8_t{0xAA});              // color = 0xFF5733AA
@@ -180,7 +181,7 @@ bool bWrote = color.Write(uint8_t{0x99}, 1);              // color = 0xFF9933AA
 A string value is stored as an array of `fdf::String` (see [fdf::String](#fdfstring)).
 
 ```cpp
-std::span<fdf::String> comps = e->GetChild("name")->GetValue<fdf::String>();
+std::span<fdf::String> comps = e->GetValue<fdf::String>("name");
 comps[0] = "renamed";                            // reallocs that component only
 std::string_view view = comps[0];                // "renamed"
 ```

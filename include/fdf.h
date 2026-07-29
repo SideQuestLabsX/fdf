@@ -2263,6 +2263,10 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr auto GetValue()       noexcept       { static_assert(false, "Invalid type"); }
         template<typename T>
         [[nodiscard]] constexpr auto GetValue() const noexcept       { static_assert(false, "Invalid type"); }
+        template<typename Value, detail::IsValidIDType T, detail::IsValidIDType... Args>
+        [[nodiscard]] constexpr auto GetValue(T&& param, Args&&... args) noexcept;
+        template<typename Value, detail::IsValidIDType T, detail::IsValidIDType... Args>
+        [[nodiscard]] constexpr auto GetValue(T&& param, Args&&... args) const noexcept;
 
         constexpr void SetType(Type _type) noexcept;
         constexpr void Resize(uint32_t _size) noexcept;
@@ -5439,6 +5443,25 @@ namespace fdf
     [[nodiscard]] constexpr auto Entry::GetValue<char*>() const noexcept  { return GetValue<String>(); }
     template<>
     [[nodiscard]] constexpr auto Entry::GetValue<const char*>() const noexcept  { return GetValue<String>(); }
+
+
+    template<typename Value, detail::IsValidIDType T, detail::IsValidIDType... Args>
+    [[nodiscard]] constexpr auto Entry::GetValue(T&& param, Args&&... args) noexcept
+    {
+        using Result = decltype(GetValue<Value>());
+        if(Entry* child = GetChild(std::forward<T>(param), std::forward<Args>(args)...))
+            return child->GetValue<Value>();
+        return Result{};
+    }
+
+    template<typename Value, detail::IsValidIDType T, detail::IsValidIDType... Args>
+    [[nodiscard]] constexpr auto Entry::GetValue(T&& param, Args&&... args) const noexcept
+    {
+        using Result = decltype(GetValue<Value>());
+        if(const Entry* child = GetChild(std::forward<T>(param), std::forward<Args>(args)...))
+            return child->GetValue<Value>();
+        return Result{};
+    }
 
 
 
