@@ -84,6 +84,8 @@ namespace fdf::detail
     };
 }
 
+static_assert(fdf::MAX_IDENTIFIER_LENGTH
+              == (FDF_NO_COMMENTS && FDF_EXTENDED_NO_COMMENT_IDENTIFIERS? 38U : 30U));
 
 
 
@@ -4413,21 +4415,21 @@ static_assert(sizeof(fdf::Timestamp) == 16,                               "times
 static_assert(alignof(fdf::Timestamp) == 4,                               "timestamp alignment");
 
 // ----- Strict UTF-8 validation (all escaped so the test file's own encoding can't skew it) -----
-static_assert( fdf::detail::IsValidUtf8(""),                     "empty");
-static_assert( fdf::detail::IsValidUtf8("plain ascii"),         "ascii");
-static_assert( fdf::detail::IsValidUtf8("caf\xC3\xA9"),         "2-byte");
-static_assert( fdf::detail::IsValidUtf8("\xE2\x82\xAC"),        "3-byte euro");
-static_assert( fdf::detail::IsValidUtf8("\xF0\x9F\x98\x80"),    "4-byte emoji");
-static_assert(!fdf::detail::IsValidUtf8("\x80"),                "stray continuation");
-static_assert(!fdf::detail::IsValidUtf8("\xC0\xAF"),            "overlong 2-byte");
-static_assert(!fdf::detail::IsValidUtf8("\xE0\x80\xAF"),        "overlong 3-byte");
-static_assert(!fdf::detail::IsValidUtf8("\xF0\x80\x80\xAF"),    "overlong 4-byte");
-static_assert(!fdf::detail::IsValidUtf8("\xED\xA0\x80"),        "surrogate U+D800");
-static_assert(!fdf::detail::IsValidUtf8("\xF4\x90\x80\x80"),    "above U+10FFFF");
-static_assert(!fdf::detail::IsValidUtf8("\xF5"),                "invalid lead F5");
-static_assert(!fdf::detail::IsValidUtf8("\xC2"),                "truncated 2-byte");
-static_assert(!fdf::detail::IsValidUtf8("\xE2\x82"),            "truncated 3-byte");
-static_assert(!fdf::detail::IsValidUtf8("\xC2\x20"),            "bad continuation");
+static_assert( fdf::IsValidUtf8(""),                    "empty");
+static_assert( fdf::IsValidUtf8("plain ascii"),         "ascii");
+static_assert( fdf::IsValidUtf8("caf\xC3\xA9"),         "2-byte");
+static_assert( fdf::IsValidUtf8("\xE2\x82\xAC"),        "3-byte euro");
+static_assert( fdf::IsValidUtf8("\xF0\x9F\x98\x80"),    "4-byte emoji");
+static_assert(!fdf::IsValidUtf8("\x80"),                "stray continuation");
+static_assert(!fdf::IsValidUtf8("\xC0\xAF"),            "overlong 2-byte");
+static_assert(!fdf::IsValidUtf8("\xE0\x80\xAF"),        "overlong 3-byte");
+static_assert(!fdf::IsValidUtf8("\xF0\x80\x80\xAF"),    "overlong 4-byte");
+static_assert(!fdf::IsValidUtf8("\xED\xA0\x80"),        "surrogate U+D800");
+static_assert(!fdf::IsValidUtf8("\xF4\x90\x80\x80"),    "above U+10FFFF");
+static_assert(!fdf::IsValidUtf8("\xF5"),                "invalid lead F5");
+static_assert(!fdf::IsValidUtf8("\xC2"),                "truncated 2-byte");
+static_assert(!fdf::IsValidUtf8("\xE2\x82"),            "truncated 3-byte");
+static_assert(!fdf::IsValidUtf8("\xC2\x20"),            "bad continuation");
 static_assert(fdf::detail::Utf8FirstInvalidByte("ok\xFF") == 2, "reports first bad offset");
 
 // ----- Timestamp struct: decode and epoch conversion (all consteval) -----

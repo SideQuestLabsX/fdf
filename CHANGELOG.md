@@ -16,6 +16,11 @@ Run `fdf-validate` on existing documents. It reports syntax that needs updating.
 - `FDF_NO_FILE_IO` removes file APIs. `FDF_NO_STD_FORMAT` removes fdf's
   `std::formatter<fdf::String>` specialization. Assertion-free builds omit the direct C standard I/O
   includes used by failure reporting.
+- `MAX_IDENTIFIER_LENGTH` exposes the configured identifier limit.
+
+### Fixed
+
+- Exposed the documented `fdf::IsValidUtf8` function in the public namespace.
 
 ## [0.2.0] - 2026-07-21
 

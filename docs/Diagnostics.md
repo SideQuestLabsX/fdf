@@ -46,7 +46,7 @@ Diagnostics work the same at runtime and at compile time.
 | `AlreadyHasComment` | Warning | second comment on one entry, the later comment wins |
 | `InvalidUtf8` | Warning | malformed UTF-8, bytes still pass through, `offset` points at the first bad byte |
 | `UnexpectedToken` | Error | token out of place, e.g. `=` before a container |
-| `InvalidIdentifier` | Error | bad key: over 30 chars, a keyword, a stray character or a leading digit |
+| `InvalidIdentifier` | Error | bad key: over the configured limit, a keyword, a stray character or a leading digit |
 | `InvalidNumber` | Error | malformed numeric value or a float literal that overflows to infinity |
 | `InvalidPack` | Error | dangling `\|` or components with no common type |
 | `InvalidTimestamp` | Error | RFC 3339 profile structure or range violation |

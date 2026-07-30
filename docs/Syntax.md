@@ -19,7 +19,8 @@ mapName{ ... }  // map
 arrName[ ... ]  // array
 ```
 
-Identifiers are capped at 30 characters.
+Identifiers are capped at `fdf::MAX_IDENTIFIER_LENGTH` bytes: 30 by default, or 38 when comments are
+disabled with extended identifiers enabled.
 
 ## Comments
 

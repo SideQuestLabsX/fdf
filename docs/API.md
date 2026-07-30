@@ -245,6 +245,9 @@ UniqueEntryPtr OrphanChild(child | key | index);   // detach without destroying
 std::vector<UniqueEntryPtr> OrphanChildren();
 ```
 
+`MAX_IDENTIFIER_LENGTH` is the configured identifier limit: 30 by default, or 38 when comments are
+disabled with extended identifiers enabled. `SetIdentifier` returns false when a key exceeds it.
+
 `DuplicateKeyPolicy` controls how `AddChild` handles an existing direct map key:
 
 | Policy | Duplicate behavior | Returns |

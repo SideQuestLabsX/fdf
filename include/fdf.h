@@ -175,6 +175,9 @@ FDF_EXPORT namespace fdf
     #endif
     }
 
+    inline constexpr size_t MAX_IDENTIFIER_LENGTH =
+        FDF_NO_COMMENTS && FDF_EXTENDED_NO_COMMENT_IDENTIFIERS? 38 : 30;
+
     enum class Type : uint8_t
     {
         Map,
@@ -356,8 +359,6 @@ namespace fdf::detail
         { WriteHex(writer, value) } noexcept -> std::same_as<bool>;
     };
 
-    inline constexpr size_t MAX_IDENTIFIER_LENGTH = FDF_NO_COMMENTS && FDF_EXTENDED_NO_COMMENT_IDENTIFIERS? 38 : 30;
-
     struct EntryDeleter { static constexpr void operator()(Entry* e) noexcept; };
 
     inline constexpr auto SIZE_T_MAX_VALUE = std::numeric_limits<  size_t>::max();
@@ -429,6 +430,12 @@ namespace fdf::detail
 
 FDF_EXPORT namespace fdf
 {
+    [[nodiscard]] constexpr bool IsValidUtf8(std::string_view value) noexcept
+    {
+        return detail::Utf8FirstInvalidByte(value) == value.size();
+    }
+
+
     namespace ForEachFlags
     {
         enum Flag : uint8_t
@@ -2167,7 +2174,7 @@ FDF_EXPORT namespace fdf
         friend class detail::GlobalAllocator;
 
     private:
-        char identifier[detail::MAX_IDENTIFIER_LENGTH + 1] = {};
+        char identifier[MAX_IDENTIFIER_LENGTH + 1] = {};
         Type type = Type::Map;
         uint32_t size = 0;
         uint32_t capacity = 0;  // runtime may exceed the request by slab bucket slack
@@ -2230,8 +2237,8 @@ FDF_EXPORT namespace fdf
         }
 
 
-        [[nodiscard]] constexpr uint8_t GetIdentifierSize()                    const noexcept  { return static_cast<uint8_t>(detail::MAX_IDENTIFIER_LENGTH) - static_cast<uint8_t>(identifier[detail::MAX_IDENTIFIER_LENGTH]); }
-                      constexpr void    SetIdentifierSize(const uint8_t value)       noexcept  { identifier[detail::MAX_IDENTIFIER_LENGTH] = static_cast<char>(detail::MAX_IDENTIFIER_LENGTH - value); }
+        [[nodiscard]] constexpr uint8_t GetIdentifierSize()                    const noexcept  { return static_cast<uint8_t>(MAX_IDENTIFIER_LENGTH) - static_cast<uint8_t>(identifier[MAX_IDENTIFIER_LENGTH]); }
+                      constexpr void    SetIdentifierSize(const uint8_t value)       noexcept  { identifier[MAX_IDENTIFIER_LENGTH] = static_cast<char>(MAX_IDENTIFIER_LENGTH - value); }
 
     public:
         [[nodiscard]] constexpr uint32_t GetChildCount() const noexcept  { return IsContainer()? size : 0; }
@@ -3509,10 +3516,6 @@ namespace fdf::detail
         return Timestamp::FromText(ts).IsValid();
     }
 
-    FDF_EXPORT_INTERNAL [[nodiscard]] constexpr bool IsValidUtf8(std::string_view s) noexcept
-    {
-        return detail::Utf8FirstInvalidByte(s) == s.size();
-    }
 }
 
 
@@ -4690,7 +4693,7 @@ namespace fdf
 
     constexpr void Entry::SetIdentifier_INTERNAL(std::string_view newIdentifier) noexcept
     {
-        SetIdentifierSize(static_cast<uint8_t>(std::min(newIdentifier.size(), detail::MAX_IDENTIFIER_LENGTH)));
+        SetIdentifierSize(static_cast<uint8_t>(std::min(newIdentifier.size(), MAX_IDENTIFIER_LENGTH)));
         detail::constexpr_memcpy(identifier, newIdentifier.data(), GetIdentifierSize());
         identifier[GetIdentifierSize()] = '\0';
     }
