@@ -16,6 +16,12 @@
 #if !defined(FDF_DISABLE_SLAB_ALLOCATOR)
     #define FDF_DISABLE_SLAB_ALLOCATOR false
 #endif
+#if !defined(FDF_NO_FILE_IO)
+    #define FDF_NO_FILE_IO false
+#endif
+#if !defined(FDF_NO_STD_FORMAT)
+    #define FDF_NO_STD_FORMAT false
+#endif
 #if !defined(FDF_ASSERTIONS)
     #if defined(NDEBUG)
         #define FDF_ASSERTIONS false
@@ -49,12 +55,7 @@
     #include <compare>
     #include <cstddef>
     #include <cstdint>
-    #include <cstdio>
-    #include <cstdlib>
-    #include <filesystem>
     #include <limits>
-    #include <format>
-    #include <fstream>
     #include <memory>
     #include <ranges>
     #include <span>
@@ -63,6 +64,18 @@
     #include <type_traits>
     #include <utility>
     #include <vector>
+
+    #if FDF_ASSERTIONS
+        #include <cstdio>
+        #include <cstdlib>
+    #endif
+    #if !FDF_NO_FILE_IO
+        #include <filesystem>
+        #include <fstream>
+    #endif
+    #if !FDF_NO_STD_FORMAT
+        #include <format>
+    #endif
 
     #define FDF_EXPORT
 #endif
@@ -94,6 +107,7 @@ FDF_EXPORT namespace fdf
 {
     namespace detail
     {
+    #if FDF_ASSERTIONS
         [[noreturn]] inline void OnCheckFailure(std::string_view expression, std::string_view file, unsigned line, std::string_view message = {}) noexcept
         {
             std::fprintf(stderr, "%.*s:%u: fdf check failed: %.*s",
@@ -158,6 +172,7 @@ FDF_EXPORT namespace fdf
 
             OnCheckFailure(expression, file, line, std::string_view(buffer, used));
         }
+    #endif
     }
 
     enum class Type : uint8_t
@@ -2413,11 +2428,13 @@ FDF_EXPORT namespace fdf
 
     public:
         // inline sinks stay last at call sites
+    #if !FDF_NO_FILE_IO
         [[nodiscard]] bool ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty, DuplicateKeyPolicy policy = DuplicateKeyPolicy::Merge) noexcept;
         template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
         [[nodiscard]] bool ParseCombineFile(const std::filesystem::path& filepath, SINK&& sink) noexcept;
         template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
         [[nodiscard]] bool ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy, DuplicateKeyPolicy policy, SINK&& sink) noexcept;
+    #endif
 
         [[nodiscard]] constexpr bool ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy = CommentCombineStrategy::UseNewIfExistingIsEmpty, DuplicateKeyPolicy policy = DuplicateKeyPolicy::Merge) noexcept;
         template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
@@ -2440,11 +2457,13 @@ FDF_EXPORT namespace fdf
 
 
 
+    #if !FDF_NO_FILE_IO
     template<typename SINK = detail::NoDiagnostics> requires std::is_invocable_v<SINK&, const Diagnostic&>
     [[nodiscard]] UniqueEntryPtr ParseFile(const std::filesystem::path& filepath, SINK&& sink = {}) noexcept;
 
     template<Style STYLE = {}>
     [[nodiscard]] bool WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists = true) noexcept;
+    #endif
 
     [[nodiscard]] constexpr UniqueEntryPtr NewEntry() noexcept;
 }
@@ -6017,6 +6036,7 @@ namespace fdf
 
 namespace fdf
 {
+    #if !FDF_NO_FILE_IO
     inline bool Entry::ParseCombineFile(const std::filesystem::path& filepath, CommentCombineStrategy fileCommentCombineStrategy, DuplicateKeyPolicy policy) noexcept
     {
         detail::NoDiagnostics sink;
@@ -6055,6 +6075,7 @@ namespace fdf
             return false;
         return ParseCombineBuffer(std::string_view(content), fileCommentCombineStrategy, policy, std::forward<SINK>(sink));
     }
+    #endif
 
     constexpr bool Entry::ParseCombineBuffer(std::string_view content, CommentCombineStrategy fileCommentCombineStrategy, DuplicateKeyPolicy policy) noexcept
     {
@@ -6127,6 +6148,7 @@ namespace fdf
 
 
 
+    #if !FDF_NO_FILE_IO
     template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
     UniqueEntryPtr ParseFile(const std::filesystem::path& filepath, SINK&& sink) noexcept
     {
@@ -6154,6 +6176,7 @@ namespace fdf
             return nullptr;
         return ParseBuffer(std::string_view(content), sink);
     }
+    #endif
 
     template<typename SINK> requires std::is_invocable_v<SINK&, const Diagnostic&>
     constexpr UniqueEntryPtr ParseBuffer(std::string_view content, SINK&& sink) noexcept
@@ -6282,6 +6305,7 @@ namespace fdf
         return root;
     }
 
+    #if !FDF_NO_FILE_IO
     template<Style STYLE>
     bool WriteFile(const Entry& e, const std::filesystem::path& filepath, bool bCreateIfNotExists) noexcept
     {
@@ -6358,6 +6382,7 @@ namespace fdf
         }
         return true;
     }
+    #endif
 
     constexpr UniqueEntryPtr NewEntry() noexcept
     {
@@ -7713,6 +7738,7 @@ namespace fdf::detail
 
 
 
+#if !FDF_NO_STD_FORMAT
 template<>
 struct std::formatter<fdf::String> : std::formatter<std::string_view>
 {
@@ -7722,6 +7748,7 @@ struct std::formatter<fdf::String> : std::formatter<std::string_view>
         return std::formatter<std::string_view>::format(std::string_view(value), ctx);
     }
 };
+#endif
 
 
 

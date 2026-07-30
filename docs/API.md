@@ -32,6 +32,9 @@ file and missing parent directories. Bare filenames use the current directory.
 succeeds. An interrupted or failed write leaves the existing target readable and removes the
 temporary. The destination directory needs room for both copies during the write.
 
+`FDF_NO_FILE_IO` removes `ParseFile`, `WriteFile` and `Entry::ParseCombineFile`. Their buffer
+counterparts remain available.
+
 `Type` is the tag every entry carries
 
 ```cpp

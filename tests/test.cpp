@@ -485,6 +485,7 @@ namespace fdf::detail
             return static_cast<bool>(file);
         }
 
+    #if !FDF_NO_FILE_IO
         template<Style STYLE = {}>
         static bool PrintFile(const Entry* e, std::string_view outFile)
         {
@@ -529,6 +530,7 @@ namespace fdf::detail
                 }
             }
         }
+    #endif
 
 
 
@@ -645,6 +647,7 @@ namespace fdf::detail
 
 
 
+    #if !FDF_NO_FILE_IO
         static void WriteTest()
         {
             UniqueEntryPtr root = NewEntry();
@@ -757,6 +760,7 @@ namespace fdf::detail
             }
             std::filesystem::remove_all(FDF_OUTPUT_DIRECTORY "/new", ec);
         }
+    #endif
 
 
 
@@ -3117,8 +3121,10 @@ namespace fdf::detail
                 CHECK(static_cast<std::string>(s) == source);
                 s = std::string("assigned");
                 CHECK(s == "assigned");
+            #if !FDF_NO_STD_FORMAT
                 CHECK(std::format("[{}]", s) == "[assigned]");
-                CHECK(std::format("{:>10}", s) == "  assigned");   // uses the string_view formatter
+                CHECK(std::format("{:>10}", s) == "  assigned");
+            #endif
             }
 
             // self-aliasing mutations: value points into this->block
@@ -3980,6 +3986,7 @@ namespace fdf::detail
 
             // every curated example across several styles
             // Stability is skipped because comment whitespace is normalized on the first write
+        #if !FDF_NO_FILE_IO
             for(size_t i = 0; i < exampleFileCount; i++)
             {
                 const std::string& file = filesToTest[i].inputFile;
@@ -3990,6 +3997,7 @@ namespace fdf::detail
                     RoundTrip<Style{ .singleLineContainerLimit = 1 }>(*design, std::format("design-multi-line: {}", file), false);
                 }
             }
+        #endif
         }
 
 
@@ -5371,9 +5379,13 @@ int main(int argc, char** argv)
     using fdf::test::RunCase;
     std::print("Running suite{} -- Found {} files\n{}", fdf::test::g_bStress? " (stress)" : "", filesToTest.size(), separator);
 
+#if !FDF_NO_FILE_IO
     RunCase("ParseTest",               Test::ParseTest);
+#endif
     RunCase("ReadTest",                Test::ReadTest);
+#if !FDF_NO_FILE_IO
     RunCase("WriteTest",               Test::WriteTest);
+#endif
     RunCase("ValueTest",               Test::ValueTest);
     RunCase("MutateTest",              Test::MutateTest);
     RunCase("RegressionTest",          Test::RegressionTest);

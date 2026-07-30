@@ -1,5 +1,20 @@
 
 module;
+
+#if !defined(FDF_NO_FILE_IO)
+    #define FDF_NO_FILE_IO false
+#endif
+#if !defined(FDF_NO_STD_FORMAT)
+    #define FDF_NO_STD_FORMAT false
+#endif
+#if !defined(FDF_ASSERTIONS)
+    #if defined(NDEBUG)
+        #define FDF_ASSERTIONS false
+    #else
+        #define FDF_ASSERTIONS true
+    #endif
+#endif
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -8,11 +23,6 @@ module;
 #include <compare>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <filesystem>
-#include <format>
-#include <fstream>
 #include <limits>
 #include <memory>
 #include <ranges>
@@ -22,6 +32,19 @@ module;
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+#if FDF_ASSERTIONS
+    #include <cstdio>
+    #include <cstdlib>
+#endif
+#if !FDF_NO_FILE_IO
+    #include <filesystem>
+    #include <fstream>
+#endif
+#if !FDF_NO_STD_FORMAT
+    #include <format>
+#endif
+
 export module fdf;
 
 extern "C++"

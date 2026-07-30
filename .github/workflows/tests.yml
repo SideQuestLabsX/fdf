@@ -17,7 +17,7 @@ permissions:
 jobs:
   # ASAN both with the production allocator and with per-allocation redzones
   linux-clang-asan:
-    name: linux-clang-asan (slab=${{ matrix.slab }})
+    name: linux-clang-asan (slab=${{ matrix.slab }} lean=${{ matrix.lean }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -25,8 +25,16 @@ jobs:
         include:
           - slab: "ON"
             disable_slab: "OFF"
+            lean: "OFF"
+            no_file_io: "OFF"
+            no_std_format: "OFF"
+            assertions: "auto"
           - slab: "OFF"
             disable_slab: "ON"
+            lean: "ON"
+            no_file_io: "ON"
+            no_std_format: "ON"
+            assertions: "off"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -51,6 +59,9 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
           -DFDF_ENABLE_ASAN=ON
           -DFDF_DISABLE_SLAB_ALLOCATOR=${{ matrix.disable_slab }}
+          -DFDF_NO_FILE_IO=${{ matrix.no_file_io }}
+          -DFDF_NO_STD_FORMAT=${{ matrix.no_std_format }}
+          -DFDF_ASSERTIONS=${{ matrix.assertions }}
 
       - name: Build
         run: cmake --build build
