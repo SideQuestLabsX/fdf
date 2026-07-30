@@ -211,6 +211,27 @@ struct ReadNested
     return reader.Read(value.color) && reader.Read(value.tail);
 }
 
+struct SkipRead
+{
+    uint8_t head = 0;
+    uint8_t tail = 0;
+    size_t remaining = 0;
+};
+[[nodiscard]] constexpr bool ReadHex(fdf::HexReader& reader, SkipRead& value) noexcept
+{
+    if(!reader.Read(value.head) || !reader.Skip(2) || !reader.Read(value.tail))
+        return false;
+    value.remaining = reader.Remaining();
+    return true;
+}
+
+struct SkipPoison {};
+[[nodiscard]] constexpr bool ReadHex(fdf::HexReader& reader, SkipPoison&) noexcept
+{
+    (void)reader.Skip(reader.Remaining() + 1);
+    return true;
+}
+
 struct PoisonParent { uint8_t tail; };
 [[nodiscard]] constexpr bool WriteHex(fdf::HexWriter& writer, const PoisonParent& value) noexcept
 {
@@ -246,8 +267,17 @@ template<typename T>
 inline constexpr bool HexTransfers = requires(fdf::Hex& h, T& v) { h.Read(v); h.Write(v); };
 template<typename T>
 inline constexpr bool HexWrites = requires(fdf::Hex& h, const T& v) { h.Write(v); };
-static_assert(HexTransfers<uint32_t> && HexTransfers<Rgb> && !HexTransfers<HookLess>);
-static_assert(HexWrites<RgbWriteOnly> && !HexWrites<HookLess>);
+static_assert(HexTransfers<uint32_t> && HexTransfers<std::byte> && HexTransfers<Rgb>
+    && !HexTransfers<HookLess>);
+static_assert(HexTransfers<std::array<uint16_t, 2>> && HexTransfers<std::array<Rgb, 2>>
+    && HexTransfers<std::array<std::byte, 2>>
+    && HexTransfers<std::array<std::array<uint16_t, 2>, 2>>
+    && !HexTransfers<std::array<HookLess, 2>>);
+static_assert(HexTransfers<std::span<uint16_t>> && HexTransfers<std::span<Rgb>>
+    && HexTransfers<std::span<std::byte>> && !HexTransfers<std::span<const uint16_t>>
+    && !HexTransfers<std::span<HookLess>>);
+static_assert(HexWrites<RgbWriteOnly> && HexWrites<std::span<const RgbWriteOnly>>
+    && !HexWrites<HookLess>);
 static_assert(fdf::detail::HasHexWriter<Rgb> && fdf::detail::HasHexWriter<RgbWriteOnly>
     && !fdf::detail::HasHexWriter<HookLess>);
 
@@ -2653,6 +2683,65 @@ namespace fdf::detail
                     CHECK(nested.Read(nestedRead) && nestedRead.color.r == 5
                         && nestedRead.color.g == 6 && nestedRead.color.b == 7 && nestedRead.tail == 8);
 
+                    const std::array<uint16_t, 3> words = { 0x0102, 0x0304, 0x0506 };
+                    Hex wordArray;
+                    std::array<uint16_t, 3> readWords = {};
+                    CHECK(wordArray.Write(words) && HexEquals<uint64_t>(wordArray, 0x010203040506ull));
+                    CHECK(wordArray.Read(readWords) && readWords == words);
+
+                    const std::array<Rgb, 2> colors = { Rgb{ 1, 2, 3 }, Rgb{ 4, 5, 6 } };
+                    Hex colorArray;
+                    std::array<Rgb, 2> readColors = {};
+                    CHECK(colorArray.Write(colors) && HexEquals<uint64_t>(colorArray, 0x010203040506ull));
+                    CHECK(colorArray.Read(readColors)
+                        && readColors[0].r == 1 && readColors[0].g == 2 && readColors[0].b == 3
+                        && readColors[1].r == 4 && readColors[1].g == 5 && readColors[1].b == 6);
+
+                    const std::array<uint16_t, 3> spanWords = { 0x0708, 0x090A, 0x0B0C };
+                    Hex wordSpan;
+                    std::array<uint16_t, 2> readSpanWords = {};
+                    CHECK(wordSpan.Write(std::span<const uint16_t>{spanWords}.first(2))
+                        && HexEquals<uint32_t>(wordSpan, 0x0708090Au));
+                    CHECK(wordSpan.Read(std::span<uint16_t>{readSpanWords})
+                        && readSpanWords[0] == 0x0708 && readSpanWords[1] == 0x090A);
+
+                    const std::array<std::byte, 4> bytes = {
+                        std::byte{0x10}, std::byte{0x20}, std::byte{0x30}, std::byte{0x40}
+                    };
+                    Hex byteArray;
+                    std::array<std::byte, 2> readBytes = {};
+                    CHECK(byteArray.Write(bytes) && HexEquals<uint32_t>(byteArray, 0x10203040u));
+                    CHECK(byteArray.Read(std::span<std::byte>{readBytes}, 1)
+                        && readBytes[0] == std::byte{0x20} && readBytes[1] == std::byte{0x30});
+                    std::array<std::byte, 3> shortRead = {
+                        std::byte{0xAA}, std::byte{0xBB}, std::byte{0xCC}
+                    };
+                    const std::array<std::byte, 3> beforeShortRead = shortRead;
+                    CHECK(!byteArray.Read(std::span<std::byte>{shortRead}, 2)
+                        && shortRead == beforeShortRead);
+
+                    Hex colorSpan;
+                    std::array<Rgb, 2> readSpanColors = {};
+                    CHECK(colorSpan.Write(std::span<const Rgb>{colors})
+                        && colorSpan.Read(std::span<Rgb>{readSpanColors})
+                        && readSpanColors[0].r == 1 && readSpanColors[0].g == 2 && readSpanColors[0].b == 3
+                        && readSpanColors[1].r == 4 && readSpanColors[1].g == 5 && readSpanColors[1].b == 6);
+
+                    const std::byte skippedRaw[] = {
+                        std::byte{0x10}, std::byte{0xAA}, std::byte{0xBB}, std::byte{0x20}, std::byte{0x30}
+                    };
+                    const Hex skippedHex(std::span<const std::byte>{skippedRaw});
+                    SkipRead skipped{};
+                    CHECK(skippedHex.Read(skipped) && skipped.head == 0x10 && skipped.tail == 0x20
+                        && skipped.remaining == 1);
+
+                    const std::byte shortRaw[] = { std::byte{0x10}, std::byte{0xAA} };
+                    const Hex shortHex(std::span<const std::byte>{shortRaw});
+                    SkipRead skippedShortRead{};
+                    CHECK(!shortHex.Read(skippedShortRead));
+                    SkipPoison skipPoison;
+                    CHECK(!skippedHex.Read(skipPoison));
+
                     // interior overwrite keeps the suffix, an overlapping one extends
                     Hex interior;
                     CHECK(interior.Write(uint32_t{0xA1A2A3A4u}) && interior.Write(Rgb{ 1, 2, 3 }, 0)
@@ -4688,6 +4777,30 @@ consteval bool HexCursorProbe()
 
     if(!composed.Write(Rgb{ 9, 8, 7 }, 0) || composed.Size() != 4
         || !HexEquals<uint32_t>(composed, 0x09080704u))
+        return false;
+
+    const std::array<uint16_t, 2> words = { 0x0102, 0x0304 };
+    fdf::Hex wordArray;
+    std::array<uint16_t, 2> readWords = {};
+    if(!wordArray.Write(std::span<const uint16_t>{words}) || !HexEquals<uint32_t>(wordArray, 0x01020304u)
+        || !wordArray.Read(std::span<uint16_t>{readWords}) || readWords != words)
+        return false;
+
+    const std::array<std::byte, 3> bytes = { std::byte{0x11}, std::byte{0x22}, std::byte{0x33} };
+    fdf::Hex byteArray;
+    std::array<std::byte, 2> readBytes = {};
+    if(!byteArray.Write(bytes) || !HexEquals<uint32_t>(byteArray, 0x00112233u)
+        || !byteArray.Read(std::span<std::byte>{readBytes}, 1)
+        || readBytes[0] != std::byte{0x22} || readBytes[1] != std::byte{0x33})
+        return false;
+
+    const std::byte skippedRaw[] = {
+        std::byte{0x10}, std::byte{0xAA}, std::byte{0xBB}, std::byte{0x20}, std::byte{0x30}
+    };
+    const fdf::Hex skippedHex(std::span<const std::byte>{skippedRaw});
+    SkipRead skipped{};
+    if(!skippedHex.Read(skipped) || skipped.head != 0x10 || skipped.tail != 0x20
+        || skipped.remaining != 1)
         return false;
 
     const std::byte one[] = { std::byte{0x7F} };

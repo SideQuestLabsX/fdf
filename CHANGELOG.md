@@ -11,6 +11,8 @@ Run `fdf-validate` on existing documents. It reports syntax that needs updating.
 
 - `Entry::GetValue<T>` can now look up an entry and return its value in one call. It returns an
   empty span or view if it can't find the entry or the type is wrong.
+- Hex transfers now handle `std::array`, `std::span` and raw `std::byte` values. `HexReader` can
+  report or skip unread bytes.
 
 ## [0.2.0] - 2026-07-21
 

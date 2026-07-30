@@ -148,9 +148,14 @@ constexpr bool WriteHex(fdf::HexWriter& writer, const Rgb& v) noexcept
 }
 ```
 
-Cursor reads want the scalar's full width. Zero-extension stays on direct `Hex::Read`. A failed hook
-leaves the value unchanged: an overwrite stages its bytes past the current end and splices them into
-place only on success.
+`Read` and `Write` accept nested `std::array` and runtime-sized `std::span` values containing supported
+scalars or types with hooks. `std::byte` transfers one byte unchanged.
+
+Cursor reads require the scalar's full width, unlike direct integral reads. A failed write hook leaves
+the `Hex` unchanged.
+
+`HexReader::Remaining()` returns the unread byte count. `Skip(count)` advances without decoding and
+fails if fewer than `count` bytes remain.
 
 `Assign` replaces, `Decode` appends and `Decode` at an offset overwrites, under the same offset rule.
 All accept an optional `0x`/`0X` prefix, accept `_` separators under the literal rule in

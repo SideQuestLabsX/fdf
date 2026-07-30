@@ -324,7 +324,7 @@ namespace fdf::detail
 
 
     template<typename T>
-    concept IsHexScalar = std::integral<T> || (std::floating_point<T> && (sizeof(T) == 4 || sizeof(T) == 8));
+    concept IsHexScalar = std::integral<T> || (std::floating_point<T> && (sizeof(T) == 4 || sizeof(T) == 8)) || std::same_as<std::remove_cv_t<T>, std::byte>;
 
     template<typename T>
     inline constexpr size_t HexScalarWidth = std::same_as<T, bool>? 1 : sizeof(T);
@@ -487,6 +487,12 @@ FDF_EXPORT namespace fdf
         template<typename T> requires(detail::IsHexScalar<T> || detail::HasHexReader<T>)
         [[nodiscard]] constexpr bool Read(T& value) noexcept;
 
+        template<typename T, size_t EXTENT> requires(!std::is_const_v<T> && (detail::IsHexScalar<T> || detail::HasHexReader<T>))
+        [[nodiscard]] constexpr bool Read(std::span<T, EXTENT> values) noexcept;
+
+        [[nodiscard]] constexpr size_t Remaining() const noexcept;
+        [[nodiscard]] constexpr bool Skip(size_t byteCount) noexcept;
+
     private:
         friend class Hex;
         constexpr HexReader(const Hex& target_, const size_t cursor_) noexcept
@@ -572,6 +578,13 @@ FDF_EXPORT namespace fdf
                     reader.Poison();
                 return bResult && !reader.bPoisoned;
             }
+            else if constexpr(std::same_as<T, std::byte>)
+            {
+                if(byteOffset >= size)
+                    return false;
+                value = ptr[byteOffset];
+                return true;
+            }
             else if constexpr(std::same_as<T, bool>)
             {
                 if(byteOffset > size)
@@ -608,6 +621,16 @@ FDF_EXPORT namespace fdf
             }
             else
                 { static_assert(false); return false; }
+        }
+
+        template<typename T, size_t EXTENT> requires(!std::is_const_v<T> && (detail::IsHexScalar<T> || detail::HasHexReader<T>))
+        [[nodiscard]] constexpr bool Read(std::span<T, EXTENT> values, size_t byteOffset = 0) const noexcept
+        {
+            if(byteOffset > size)
+                return false;
+
+            HexReader reader(*this, byteOffset);
+            return reader.template Read<T, EXTENT>(values);
         }
 
         template<typename T> requires(detail::IsHexScalar<T> || detail::HasHexWriter<T>)
@@ -659,6 +682,26 @@ FDF_EXPORT namespace fdf
     };
     static_assert(sizeof(Hex) == 16);
     static_assert(alignof(Hex) == 8);
+
+
+    constexpr size_t HexReader::Remaining() const noexcept
+    {
+        FDF_ASSERT(cursor <= target->size, "Hex reader cursor must stay within the value");
+        return static_cast<size_t>(target->size) - cursor;
+    }
+
+    constexpr bool HexReader::Skip(const size_t byteCount) noexcept
+    {
+        if(bPoisoned)
+            return false;
+        if(byteCount > Remaining())
+        {
+            Poison();
+            return false;
+        }
+        cursor += byteCount;
+        return true;
+    }
 
 
     template<typename T> requires(detail::IsHexScalar<T> || detail::HasHexWriter<T>)
@@ -721,6 +764,66 @@ FDF_EXPORT namespace fdf
     }
 
 
+    template<typename T, size_t EXTENT> requires(!std::is_const_v<T> && (detail::IsHexScalar<T> || detail::HasHexReader<T>))
+    constexpr bool HexReader::Read(std::span<T, EXTENT> values) noexcept
+    {
+        if(bPoisoned)
+            return false;
+
+        if constexpr(detail::IsHexScalar<T>)
+        {
+            constexpr size_t byteWidth = detail::HexScalarWidth<T>;
+            if(cursor > target->size || values.size() > (static_cast<size_t>(target->size) - cursor) / byteWidth)
+            {
+                Poison();
+                return false;
+            }
+        }
+
+        for(T& value : values)
+        {
+            if(!Read(value))
+                return false;
+        }
+        return true;
+    }
+
+
+    template<typename T, size_t SIZE> requires(detail::IsHexScalar<T> || detail::HasHexReader<T>)
+    [[nodiscard]] constexpr bool ReadHex(HexReader& reader, std::array<T, SIZE>& value) noexcept
+    {
+        return reader.Read(std::span<T, SIZE>{value});
+    }
+
+    template<typename T, size_t SIZE> requires(detail::IsHexScalar<T> || detail::HasHexWriter<T>)
+    [[nodiscard]] constexpr bool WriteHex(HexWriter& writer, const std::array<T, SIZE>& value) noexcept
+    {
+        for(const T& element : value)
+        {
+            if(!writer.Write(element))
+                return false;
+        }
+        return true;
+    }
+
+    template<typename T, size_t EXTENT> requires(!std::is_const_v<T> && (detail::IsHexScalar<T> || detail::HasHexReader<T>))
+    [[nodiscard]] constexpr bool ReadHex(HexReader& reader, std::span<T, EXTENT> values) noexcept
+    {
+        return reader.template Read<T, EXTENT>(values);
+    }
+
+    template<typename T, size_t EXTENT> requires(detail::IsHexScalar<std::remove_cv_t<T>> || detail::HasHexWriter<std::remove_cv_t<T>>)
+    [[nodiscard]] constexpr bool WriteHex(HexWriter& writer, std::span<T, EXTENT> values) noexcept
+    {
+        for(const T& value : values)
+        {
+            if(!writer.Write(value))
+                return false;
+        }
+        return true;
+    }
+
+
     template<typename T>
     constexpr bool Hex::WriteScalarAt(const T& value, const size_t byteOffset) noexcept
     {
@@ -737,7 +840,9 @@ FDF_EXPORT namespace fdf
             size = requiredSize;
         }
 
-        if constexpr(std::same_as<T, bool>)
+        if constexpr(std::same_as<T, std::byte>)
+            ptr[byteOffset] = value;
+        else if constexpr(std::same_as<T, bool>)
             ptr[byteOffset] = value? std::byte{1} : std::byte{0};
         else if constexpr(std::integral<T>)
         {
