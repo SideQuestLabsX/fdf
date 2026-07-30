@@ -2,7 +2,7 @@
   "name": "fdf-lang",
   "displayName": "fdf Language",
   "publisher": "SideQuestLabs",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Syntax highlighting for fdf files",
   "license": "Unlicense",
   "repository": {

@@ -14,7 +14,7 @@ set(FDF_ASSERTIONS "auto" CACHE STRING "Library assertions: auto (follow NDEBUG)
 set_property(CACHE FDF_ASSERTIONS PROPERTY STRINGS auto on off)
 
 
-project(fdf VERSION 0.2.0 LANGUAGES CXX)
+project(fdf VERSION 0.2.1 LANGUAGES CXX)
 
 # one CRT policy for every target below (fdf, tests, fuzz, tools): StaticRuntimes sets
 # CMAKE_MSVC_RUNTIME_LIBRARY at root scope so subdirectories inherit it. Included at tests/

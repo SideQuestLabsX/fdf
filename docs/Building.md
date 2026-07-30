@@ -9,7 +9,7 @@ include(FetchContent)
 FetchContent_Declare(
     fdf
     GIT_REPOSITORY https://github.com/SideQuestLabsX/fdf.git
-    GIT_TAG        main   # or a release tag like v0.2.0
+    GIT_TAG        main   # or a release tag like v0.2.1
 )
 
 # optional module build

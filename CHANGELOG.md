@@ -5,7 +5,7 @@ This file records user-visible changes to fdf and follows
 
 Run `fdf-validate` on existing documents. It reports syntax that needs updating.
 
-## [Unreleased]
+## [0.2.1] - 2026-07-30
 
 ### Added
 
