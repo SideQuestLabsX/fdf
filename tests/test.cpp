@@ -3908,7 +3908,7 @@ namespace fdf::detail
             String out = WriteBuffer<STYLE>(original);
 
             UniqueEntryPtr rt = ParseBuffer(out);
-            if(!CHECK_MSG(rt && TreeEqual(original, *rt), std::format("[{}] tree mismatch:\n{}", label, out)))
+            if(!CHECK_MSG(rt && TreeEqual(original, *rt), std::format("[{}] tree mismatch:\n{}", label, std::string_view(out))))
                 return;
 
             if(bCheckStable)
