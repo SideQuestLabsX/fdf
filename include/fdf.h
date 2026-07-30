@@ -278,6 +278,62 @@ FDF_EXPORT namespace fdf
         NestingTooDeep,
     };
 
+    [[nodiscard]] constexpr std::string_view ToString(const Type type) noexcept
+    {
+        switch(type)
+        {
+            case Type::Map:       return "Map";
+            case Type::Array:     return "Array";
+            case Type::Null:      return "Null";
+            case Type::Bool:      return "Bool";
+            case Type::Int:       return "Int";
+            case Type::Float:     return "Float";
+            case Type::String:    return "String";
+            case Type::Hex:       return "Hex";
+            case Type::Version:   return "Version";
+            case Type::Timestamp: return "Timestamp";
+            case Type::Duration:  return "Duration";
+        }
+        return "Unknown";
+    }
+
+    [[nodiscard]] constexpr std::string_view ToString(const DiagnosticSeverity severity) noexcept
+    {
+        switch(severity)
+        {
+            case DiagnosticSeverity::None:    return "None";
+            case DiagnosticSeverity::Info:    return "Info";
+            case DiagnosticSeverity::Warning: return "Warning";
+            case DiagnosticSeverity::Error:   return "Error";
+            case DiagnosticSeverity::Fatal:   return "Fatal";
+        }
+        return "Unknown";
+    }
+
+    [[nodiscard]] constexpr std::string_view ToString(const DiagnosticType type) noexcept
+    {
+        switch(type)
+        {
+            case DiagnosticType::AlreadyHasComment:   return "AlreadyHasComment";
+            case DiagnosticType::UnexpectedToken:     return "UnexpectedToken";
+            case DiagnosticType::InvalidIdentifier:   return "InvalidIdentifier";
+            case DiagnosticType::UnexpectedEndOfFile: return "UnexpectedEndOfFile";
+            case DiagnosticType::UnterminatedString:  return "UnterminatedString";
+            case DiagnosticType::UnterminatedComment: return "UnterminatedComment";
+            case DiagnosticType::InvalidComment:      return "InvalidComment";
+            case DiagnosticType::InvalidNumber:       return "InvalidNumber";
+            case DiagnosticType::InvalidPack:         return "InvalidPack";
+            case DiagnosticType::InvalidTimestamp:    return "InvalidTimestamp";
+            case DiagnosticType::InvalidToken:        return "InvalidToken";
+            case DiagnosticType::InvalidUtf8:         return "InvalidUtf8";
+            case DiagnosticType::InputTooLarge:       return "InputTooLarge";
+            case DiagnosticType::InvalidDuration:     return "InvalidDuration";
+            case DiagnosticType::DuplicateKey:        return "DuplicateKey";
+            case DiagnosticType::NestingTooDeep:      return "NestingTooDeep";
+        }
+        return "Unknown";
+    }
+
     // Passed to a DIAGNOSTIC_CALLBACK for every issue found while parsing
     struct Diagnostic
     {

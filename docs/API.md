@@ -42,6 +42,9 @@ enum class Type : uint8_t { Map, Array, Null, Nil = Null, Bool, Int, Float,
                             String, Hex, Version, Timestamp, Duration };
 ```
 
+`fdf::ToString` returns the enumerator name for `Type`, `DiagnosticSeverity` and `DiagnosticType`.
+Invalid enum values return `"Unknown"`. `Type::Nil` shares `Type::Null`'s value and returns `"Null"`.
+
 ## Reading values
 
 `GetChild` accepts a dotted path containing map keys and array indices. It returns

@@ -91,6 +91,66 @@ static_assert(fdf::MAX_IDENTIFIER_LENGTH
 
 namespace fdf::test
 {
+    consteval bool EnumNameProbe()
+    {
+        constexpr std::pair<Type, std::string_view> typeNames[] =
+        {
+            { Type::Map, "Map" }, { Type::Array, "Array" }, { Type::Null, "Null" },
+            { Type::Bool, "Bool" }, { Type::Int, "Int" }, { Type::Float, "Float" },
+            { Type::String, "String" }, { Type::Hex, "Hex" }, { Type::Version, "Version" },
+            { Type::Timestamp, "Timestamp" }, { Type::Duration, "Duration" },
+        };
+        for(const auto& [value, name] : typeNames)
+        {
+            if(ToString(value) != name)
+                return false;
+        }
+
+        constexpr std::pair<DiagnosticSeverity, std::string_view> severityNames[] =
+        {
+            { DiagnosticSeverity::None, "None" }, { DiagnosticSeverity::Info, "Info" },
+            { DiagnosticSeverity::Warning, "Warning" }, { DiagnosticSeverity::Error, "Error" },
+            { DiagnosticSeverity::Fatal, "Fatal" },
+        };
+        for(const auto& [value, name] : severityNames)
+        {
+            if(ToString(value) != name)
+                return false;
+        }
+
+        constexpr std::pair<DiagnosticType, std::string_view> diagnosticNames[] =
+        {
+            { DiagnosticType::AlreadyHasComment, "AlreadyHasComment" },
+            { DiagnosticType::UnexpectedToken, "UnexpectedToken" },
+            { DiagnosticType::InvalidIdentifier, "InvalidIdentifier" },
+            { DiagnosticType::UnexpectedEndOfFile, "UnexpectedEndOfFile" },
+            { DiagnosticType::UnterminatedString, "UnterminatedString" },
+            { DiagnosticType::UnterminatedComment, "UnterminatedComment" },
+            { DiagnosticType::InvalidComment, "InvalidComment" },
+            { DiagnosticType::InvalidNumber, "InvalidNumber" },
+            { DiagnosticType::InvalidPack, "InvalidPack" },
+            { DiagnosticType::InvalidTimestamp, "InvalidTimestamp" },
+            { DiagnosticType::InvalidToken, "InvalidToken" },
+            { DiagnosticType::InvalidUtf8, "InvalidUtf8" },
+            { DiagnosticType::InputTooLarge, "InputTooLarge" },
+            { DiagnosticType::InvalidDuration, "InvalidDuration" },
+            { DiagnosticType::DuplicateKey, "DuplicateKey" },
+            { DiagnosticType::NestingTooDeep, "NestingTooDeep" },
+        };
+        for(const auto& [value, name] : diagnosticNames)
+        {
+            if(ToString(value) != name)
+                return false;
+        }
+
+        return ToString(Type::Nil) == "Null"
+            && ToString(static_cast<Type>(255)) == "Unknown"
+            && ToString(static_cast<DiagnosticSeverity>(255)) == "Unknown"
+            && ToString(static_cast<DiagnosticType>(255)) == "Unknown";
+    }
+
+    static_assert(EnumNameProbe());
+
     inline int g_checks = 0;
     inline bool g_bStress = false;
     inline int g_failed = 0;
