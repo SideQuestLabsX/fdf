@@ -17,6 +17,7 @@ Run `fdf-validate` on existing documents. It reports syntax that needs updating.
   `std::formatter<fdf::String>` specialization. Assertion-free builds omit the direct C standard I/O
   includes used by failure reporting.
 - `MAX_IDENTIFIER_LENGTH` exposes the configured identifier limit.
+- Added `Duration` overloads for `+=`, `-=`, `*=` and `scalar * duration`.
 
 ### Fixed
 

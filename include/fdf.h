@@ -1257,6 +1257,10 @@ FDF_EXPORT namespace fdf
         [[nodiscard]] constexpr Duration operator-() const noexcept                     { return { -nanoseconds }; }
         [[nodiscard]] constexpr Duration operator*(const int64_t scalar) const noexcept  { return { nanoseconds * scalar }; }
 
+        constexpr Duration& operator+=(const Duration other) noexcept { nanoseconds += other.nanoseconds; return *this; }
+        constexpr Duration& operator-=(const Duration other) noexcept { nanoseconds -= other.nanoseconds; return *this; }
+        constexpr Duration& operator*=(const int64_t scalar) noexcept  { nanoseconds *= scalar; return *this; }
+
         [[nodiscard]] static constexpr Duration FromText(std::string_view text, bool& bValidOut) noexcept
         {
             bValidOut = false;
@@ -1443,6 +1447,12 @@ FDF_EXPORT namespace fdf
 
         constexpr void AppendTo(String& out) const noexcept;
     };
+
+    [[nodiscard]] constexpr Duration operator*(const int64_t scalar, const Duration duration) noexcept
+    {
+        return duration * scalar;
+    }
+
     static_assert(sizeof(Duration) == 8);
     static_assert(alignof(Duration) == 8);
     static_assert(std::is_trivially_copyable_v<Duration>);

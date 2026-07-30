@@ -90,7 +90,9 @@ cover weeks through nanoseconds:
 
 ```cpp
 Duration timeout = Duration::Hours(1) + Duration::Minutes(30);
-int64_t minutes = timeout.TotalMinutes();   // 90
+timeout += Duration::Minutes(30);
+Duration retryDelay = 2 * Duration::Seconds(5);
+int64_t minutes = timeout.TotalMinutes();   // 120
 ```
 
 Duration arithmetic is `constexpr`. Timestamps interoperate through free operators:

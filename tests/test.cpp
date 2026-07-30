@@ -3507,6 +3507,14 @@ namespace fdf::detail
             static_assert(std::is_trivially_copyable_v<Duration>);
             static_assert(std::is_same_v<decltype(std::declval<Entry&>().GetValue<Duration>()), std::span<Duration>>);
             static_assert(std::is_same_v<decltype(std::declval<const Entry&>().GetValue<Duration>()), std::span<const Duration>>);
+            static_assert([]
+            {
+                Duration value = Duration::Hours(1);
+                value += Duration::Minutes(30);
+                value -= Duration::Minutes(15);
+                value *= 2;
+                return value == Duration::Minutes(150) && 4 * Duration::Millis(250) == Duration::Seconds(1);
+            }());
 
             struct Case
             {
@@ -3594,6 +3602,16 @@ namespace fdf::detail
                 CHECK((combined - Duration::Minutes(30)) == Duration::Hours(1));
                 CHECK((-Duration::Seconds(3)) == Duration::Seconds(-3));
                 CHECK(Duration::Millis(250) * 4 == Duration::Seconds(1));
+                CHECK(4 * Duration::Millis(250) == Duration::Seconds(1));
+
+                Duration adjusted = Duration::Hours(1);
+                Duration& added = adjusted += Duration::Minutes(30);
+                CHECK(&added == &adjusted && adjusted == Duration::Minutes(90));
+                Duration& subtracted = adjusted -= Duration::Minutes(15);
+                CHECK(&subtracted == &adjusted && adjusted == Duration::Minutes(75));
+                Duration& scaled = adjusted *= 2;
+                CHECK(&scaled == &adjusted && adjusted == Duration::Minutes(150));
+
                 CHECK(Duration::Nanos(-1'500).TotalMicros() == -1);
                 CHECK(Duration::Weeks(2).TotalWeeks() == 2);
                 CHECK(Duration::Days(13).TotalWeeks() == 1);
