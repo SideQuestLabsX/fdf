@@ -153,6 +153,8 @@ namespace fdf::test
 
     inline int g_checks = 0;
     inline bool g_bStress = false;
+    inline std::string_view g_caseFilter;
+    inline bool g_bCaseMatched = false;
     inline int g_failed = 0;
     inline int g_caseChecks = 0;
     inline int g_caseFailed = 0;
@@ -383,6 +385,10 @@ namespace fdf::test
 
     inline void RunCase(std::string_view name, void (*caseFn)()) noexcept
     {
+        if(!g_caseFilter.empty() && name != g_caseFilter)
+            return;
+        g_bCaseMatched = true;
+
         g_caseChecks = 0;
         g_caseFailed = 0;
         if(g_bIsTty)
@@ -5427,8 +5433,19 @@ int main(int argc, char** argv)
 
     for(int i = 1; i < argc; i++)
     {
-        if(std::string_view(argv[i]) == "--stress")
+        const std::string_view arg = argv[i];
+        if(arg == "--stress")
             fdf::test::g_bStress = true;
+        else if(arg == "--case")
+        {
+            if(i + 1 >= argc || std::string_view(argv[i + 1]).empty()
+               || std::string_view(argv[i + 1]).starts_with("--"))
+            {
+                std::println(stderr, "[ERROR] --case needs a case name");
+                return 2;
+            }
+            fdf::test::g_caseFilter = argv[++i];
+        }
     }
 
     std::filesystem::path examplesDir = FDF_ROOT_DIRECTORY "/examples";   // genuine references
@@ -5469,6 +5486,7 @@ int main(int argc, char** argv)
 
     using fdf::test::RunCase;
     std::print("Running suite{} -- Found {} files\n{}", fdf::test::g_bStress? " (stress)" : "", filesToTest.size(), separator);
+    std::fflush(stdout);
 
 #if !FDF_NO_FILE_IO
     RunCase("ParseTest",               Test::ParseTest);
@@ -5499,10 +5517,19 @@ int main(int argc, char** argv)
     RunCase("WriterCommentTest",       Test::WriterCommentTest);
 #endif
 
+    if(!fdf::test::g_caseFilter.empty() && !fdf::test::g_bCaseMatched)
+    {
+        std::println(stderr, "[ERROR] Unknown test case '{}'", fdf::test::g_caseFilter);
+        return 2;
+    }
+
     std::print("{}", separator);
     if(fdf::test::g_failedCases.empty())
     {
-        std::println("PASSED -- {} checks across all cases", fdf::test::g_checks);
+        if(fdf::test::g_caseFilter.empty())
+            std::println("PASSED -- {} checks across all cases", fdf::test::g_checks);
+        else
+            std::println("PASSED -- {} checks in {}", fdf::test::g_checks, fdf::test::g_caseFilter);
         return 0;
     }
 

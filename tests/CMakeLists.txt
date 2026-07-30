@@ -27,6 +27,12 @@ endfunction()
 
 add_fdf_test(Test test.cpp)
 
+add_test(NAME TestCaseFilter COMMAND Test --case DurationTest)
+set_tests_properties(TestCaseFilter PROPERTIES
+    PASS_REGULAR_EXPRESSION "PASSED -- [0-9]+ checks in DurationTest"
+    FAIL_REGULAR_EXPRESSION "\\[ PASS \\] ReadTest"
+)
+
 target_compile_definitions(Test PRIVATE
     FDF_ROOT_DIRECTORY="${PROJECT_SOURCE_DIR}"
     FDF_TEST_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}"
