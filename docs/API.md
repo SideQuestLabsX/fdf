@@ -206,10 +206,14 @@ std::span<Entry*>             GetChildren();
 std::span<const Entry* const> GetChildren() const;
 std::vector<Entry*>           GetChildrenRecursive();
 size_t                        GetChildCountRecursive() const;
+uint32_t                      FindChildIndex(const Entry&) const;
+uint32_t                      FindChildIndex(std::string_view key) const;
 
 template<auto FLAGS = ForEachFlags::None>
 void ForEach(auto&& callback);   // callback(Entry&) or callback(const Entry&)
 ```
+
+`FindChildIndex` returns `Entry::INVALID_CHILD_INDEX` when the child is not found.
 
 `ForEachFlags` are bit flags, combined with `|`:
 

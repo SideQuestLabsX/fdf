@@ -18,6 +18,7 @@ Run `fdf-validate` on existing documents. It reports syntax that needs updating.
   includes used by failure reporting.
 - `MAX_IDENTIFIER_LENGTH` exposes the configured identifier limit.
 - Added `ToString` overloads for `Type`, `DiagnosticSeverity` and `DiagnosticType`.
+- Added `Entry::INVALID_CHILD_INDEX` for `FindChildIndex` misses.
 - Added `Duration` overloads for `+=`, `-=`, `*=` and `scalar * duration`.
 
 ### Fixed

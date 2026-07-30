@@ -1057,6 +1057,8 @@ namespace fdf::detail
         // container growth, removal, orphaning and indexed lookup
         static void MutateTest()
         {
+            static_assert(Entry::INVALID_CHILD_INDEX == std::numeric_limits<uint32_t>::max());
+
             UniqueEntryPtr root = NewEntry();
             if(!CHECK(static_cast<bool>(root)))
                 return;
@@ -1069,6 +1071,15 @@ namespace fdf::detail
                     e->SetValue(static_cast<int64_t>(i));
             }
             CHECK(root->GetChildCount() == count);
+
+            Entry* seventh = root->GetDirectChild(7u);
+            REQUIRE(seventh);
+            CHECK(root->FindChildIndex(*seventh) == 7);
+            CHECK(root->FindChildIndex("k7") == 7);
+            CHECK(root->FindChildIndex("missing") == Entry::INVALID_CHILD_INDEX);
+            UniqueEntryPtr outsider = NewEntry();
+            REQUIRE(static_cast<bool>(outsider));
+            CHECK(root->FindChildIndex(*outsider) == Entry::INVALID_CHILD_INDEX);
 
             // GetDirectChild(index) and value integrity after growth
             if(Entry* e = root->GetDirectChild(7u); CHECK(e && e->GetIdentifier() == "k7"))

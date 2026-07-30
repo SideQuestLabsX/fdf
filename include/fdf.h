@@ -2203,6 +2203,8 @@ FDF_EXPORT namespace fdf
     class Entry
     {
     public:
+        static constexpr uint32_t INVALID_CHILD_INDEX = std::numeric_limits<uint32_t>::max();
+
         // value moves would invalidate raw parent/child links
         Entry(const Entry&) = delete;
         Entry& operator=(const Entry&) = delete;
@@ -2349,7 +2351,7 @@ FDF_EXPORT namespace fdf
                 else if(current->parent && current->parent->type == Type::Array)
                 {
                     const uint32_t index = current->parent->FindChildIndex(*current);
-                    FDF_ASSERT(index != detail::UINT32_MAX_VALUE, "Index must be valid!");
+                    FDF_ASSERT(index != INVALID_CHILD_INDEX, "Index must be valid!");
                     uint32_t remaining = index;
                     uint8_t digitCount = 1;
                     while(remaining >= 10)
@@ -4864,7 +4866,7 @@ namespace fdf
             if(children[i] == &e)
                 return i;
         }
-        return detail::UINT32_MAX_VALUE;
+        return INVALID_CHILD_INDEX;
     }
 
     constexpr uint32_t Entry::FindChildIndex(const std::string_view _identifier) const noexcept
@@ -4876,7 +4878,7 @@ namespace fdf
             if(children[i]->GetIdentifier() == _identifier)
                 return i;
         }
-        return detail::UINT32_MAX_VALUE;
+        return INVALID_CHILD_INDEX;
     }
 
     constexpr Entry* Entry::Emplace(std::string_view _identifier) noexcept
@@ -4980,7 +4982,7 @@ namespace fdf
             return false;
 
         const uint32_t index = FindChildIndex(e);
-        return index != detail::UINT32_MAX_VALUE? RemoveChild(index) : false;
+        return index != INVALID_CHILD_INDEX? RemoveChild(index) : false;
     }
 
     constexpr bool Entry::RemoveChild(std::string_view _identifier) noexcept
@@ -4989,7 +4991,7 @@ namespace fdf
             return false;
 
         const uint32_t index = FindChildIndex(_identifier);
-        return index != detail::UINT32_MAX_VALUE? RemoveChild(index) : false;
+        return index != INVALID_CHILD_INDEX? RemoveChild(index) : false;
     }
 
     constexpr bool Entry::RemoveChild(uint32_t index) noexcept
@@ -5067,7 +5069,7 @@ namespace fdf
             return nullptr;
 
         const uint32_t index = FindChildIndex(e);
-        return index != detail::UINT32_MAX_VALUE? OrphanChild_INTERNAL(index) : nullptr;
+        return index != INVALID_CHILD_INDEX? OrphanChild_INTERNAL(index) : nullptr;
     }
 
     constexpr Entry* Entry::OrphanChild_INTERNAL(std::string_view _identifier) noexcept
@@ -5076,7 +5078,7 @@ namespace fdf
             return nullptr;
 
         const uint32_t index = FindChildIndex(_identifier);
-        return index != detail::UINT32_MAX_VALUE? OrphanChild_INTERNAL(index) : nullptr;
+        return index != INVALID_CHILD_INDEX? OrphanChild_INTERNAL(index) : nullptr;
     }
 
     constexpr Entry* Entry::OrphanChild_INTERNAL(uint32_t index) noexcept
