@@ -138,6 +138,7 @@ jobs:
           name: ${{ matrix.asset }}
           path: staging/${{ matrix.asset }}
           if-no-files-found: error
+          retention-days: 1
 
   editors:
     needs: gate
@@ -167,10 +168,14 @@ jobs:
             staging/fdf.tmbundle.zip
             staging/fdf.tmLanguage.json
           if-no-files-found: error
+          retention-days: 1
 
   publish:
     needs: [binaries, editors]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -294,3 +299,13 @@ jobs:
             fdf-${{ inputs.version }}.zip
             staging/fdf-validate-linux-x64
             staging/fdf-validate-windows-x64.exe
+
+      - name: Delete intermediate artifacts
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
+            --jq '.artifacts[].id' | while read -r id; do
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}"
+            done
